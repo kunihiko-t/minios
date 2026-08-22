@@ -232,7 +232,7 @@ fn has_heading(contents: &str, heading: &str) -> bool {
         if update_fence(line, &mut fence) || fence.is_some() {
             return false;
         }
-        line.trim() == expected
+        commonmark_content(line).is_some_and(|content| content.trim_end() == expected)
     })
 }
 
@@ -297,14 +297,16 @@ fn read_text(root: &Path, relative: &Path) -> Result<String, DocsError> {
 }
 
 fn update_fence(line: &str, fence: &mut Option<Fence>) -> bool {
-    let trimmed = line.trim_start();
-    let Some(marker) = trimmed.as_bytes().first().copied() else {
+    let Some(content) = commonmark_content(line) else {
+        return false;
+    };
+    let Some(marker) = content.as_bytes().first().copied() else {
         return false;
     };
     if marker != b'`' && marker != b'~' {
         return false;
     }
-    let length = trimmed
+    let length = content
         .as_bytes()
         .iter()
         .take_while(|candidate| **candidate == marker)
@@ -318,13 +320,18 @@ fn update_fence(line: &str, fence: &mut Option<Fence>) -> bool {
             true
         }
         Some(open) => {
-            if marker == open.marker && length >= open.length && trimmed[length..].trim().is_empty()
+            if marker == open.marker && length >= open.length && content[length..].trim().is_empty()
             {
                 *fence = None;
             }
             true
         }
     }
+}
+
+fn commonmark_content(line: &str) -> Option<&str> {
+    let indentation = line.bytes().take_while(|byte| *byte == b' ').count();
+    (indentation <= 3).then(|| &line[indentation..])
 }
 
 fn inline_destinations(line: &str) -> Vec<String> {
@@ -337,26 +344,36 @@ fn inline_destinations(line: &str) -> Vec<String> {
             continue;
         }
         cursor += 2;
-        while characters
-            .get(cursor)
-            .is_some_and(|character| character.is_whitespace())
-        {
-            cursor += 1;
-        }
-        let Some(character) = characters.get(cursor) else {
-            break;
-        };
-        let parsed = if *character == '<' {
-            parse_angle_destination(&characters, cursor + 1)
-        } else {
-            parse_bare_destination(&characters, cursor)
-        };
-        if let Some((destination, next)) = parsed {
+        if let Some((destination, next)) = parse_inline_destination(&characters, cursor) {
             destinations.push(destination);
             cursor = next;
         }
     }
     destinations
+}
+
+fn parse_inline_destination(characters: &[char], mut cursor: usize) -> Option<(String, usize)> {
+    while characters
+        .get(cursor)
+        .is_some_and(|character| character.is_whitespace())
+    {
+        cursor += 1;
+    }
+    let character = *characters.get(cursor)?;
+    if character == ')' {
+        return Some((String::new(), cursor + 1));
+    }
+    if character == '<' {
+        let (destination, suffix_start) = parse_angle_destination(characters, cursor + 1)?;
+        let end = consume_link_suffix(characters, suffix_start)?;
+        return Some((destination, end));
+    }
+
+    let (destination, suffix_start) = parse_bare_destination(characters, cursor)?;
+    match suffix_start {
+        LinkSuffix::Consumed(end) => Some((destination, end)),
+        LinkSuffix::Pending(start) => Some((destination, consume_link_suffix(characters, start)?)),
+    }
 }
 
 fn parse_angle_destination(characters: &[char], mut cursor: usize) -> Option<(String, usize)> {
@@ -375,7 +392,12 @@ fn parse_angle_destination(characters: &[char], mut cursor: usize) -> Option<(St
     None
 }
 
-fn parse_bare_destination(characters: &[char], mut cursor: usize) -> Option<(String, usize)> {
+enum LinkSuffix {
+    Consumed(usize),
+    Pending(usize),
+}
+
+fn parse_bare_destination(characters: &[char], mut cursor: usize) -> Option<(String, LinkSuffix)> {
     let mut destination = String::new();
     let mut parentheses = 0usize;
     while let Some(character) = characters.get(cursor).copied() {
@@ -388,19 +410,62 @@ fn parse_bare_destination(characters: &[char], mut cursor: usize) -> Option<(Str
                 parentheses += 1;
                 destination.push(character);
             }
-            ')' if parentheses == 0 => return Some((destination, cursor + 1)),
+            ')' if parentheses == 0 => {
+                return Some((destination, LinkSuffix::Consumed(cursor + 1)));
+            }
             ')' => {
                 parentheses -= 1;
                 destination.push(character);
             }
             character if character.is_whitespace() && parentheses == 0 => {
-                return Some((destination, cursor));
+                return Some((destination, LinkSuffix::Pending(cursor)));
             }
             _ => destination.push(character),
         }
         cursor += 1;
     }
     None
+}
+
+fn consume_link_suffix(characters: &[char], mut cursor: usize) -> Option<usize> {
+    let before_whitespace = cursor;
+    while characters
+        .get(cursor)
+        .is_some_and(|character| character.is_whitespace())
+    {
+        cursor += 1;
+    }
+    if characters.get(cursor) == Some(&')') {
+        return Some(cursor + 1);
+    }
+    if cursor == before_whitespace {
+        return None;
+    }
+
+    let closing = match characters.get(cursor)? {
+        '"' => '"',
+        '\'' => '\'',
+        '(' => ')',
+        _ => return None,
+    };
+    cursor += 1;
+    loop {
+        match characters.get(cursor).copied()? {
+            '\\' => cursor += 2,
+            character if character == closing => {
+                cursor += 1;
+                break;
+            }
+            _ => cursor += 1,
+        }
+    }
+    while characters
+        .get(cursor)
+        .is_some_and(|character| character.is_whitespace())
+    {
+        cursor += 1;
+    }
+    (characters.get(cursor) == Some(&')')).then_some(cursor + 1)
 }
 
 #[cfg(test)]
@@ -664,10 +729,127 @@ mod tests {
     }
 
     #[test]
+    fn four_space_indented_backticks_do_not_open_a_fence() {
+        let temp = TestTree::new();
+        temp.write("README.md", "    ```rust\n[missing](docs/missing.md)\n");
+
+        let error = check_local_links(temp.path()).unwrap_err();
+        assert_eq!(error.path(), Path::new("docs/missing.md"));
+    }
+
+    #[test]
+    fn four_space_indented_tildes_do_not_open_a_fence() {
+        let temp = TestTree::new();
+        temp.write("README.md", "    ~~~rust\n[missing](docs/missing.md)\n");
+
+        let error = check_local_links(temp.path()).unwrap_err();
+        assert_eq!(error.path(), Path::new("docs/missing.md"));
+    }
+
+    #[test]
+    fn tab_indented_marker_does_not_open_a_fence() {
+        let temp = TestTree::new();
+        temp.write("README.md", "\t```rust\n[missing](docs/missing.md)\n");
+
+        let error = check_local_links(temp.path()).unwrap_err();
+        assert_eq!(error.path(), Path::new("docs/missing.md"));
+    }
+
+    #[test]
+    fn four_space_indented_marker_does_not_close_a_fence() {
+        let temp = TestTree::new();
+        temp.write(
+            "README.md",
+            "~~~~rust\n    ~~~~\n[missing](docs/missing.md)\n~~~~\n",
+        );
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn three_space_indented_markers_delimit_a_fence() {
+        let temp = TestTree::new();
+        temp.write(
+            "README.md",
+            "   ```rust\n[missing](docs/missing.md)\n   ```\n",
+        );
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
     fn accepts_inline_destination_followed_by_a_title() {
         let temp = TestTree::new();
         temp.write("README.md", "[guide](guide.md \"学習ガイド\")\n");
         temp.write("guide.md", "# Guide\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn does_not_parse_a_link_inside_a_double_quoted_title() {
+        let temp = TestTree::new();
+        temp.write("README.md", "[guide](guide.md \"see ](missing.md)\")\n");
+        temp.write("guide.md", "# Guide\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn does_not_parse_a_link_inside_a_single_quoted_title() {
+        let temp = TestTree::new();
+        temp.write("README.md", "[guide](guide.md 'see ](missing.md)')\n");
+        temp.write("guide.md", "# Guide\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn accepts_a_parenthesized_title_with_escaped_delimiters() {
+        let temp = TestTree::new();
+        temp.write("README.md", "[guide](missing.md (see \\(details\\)))\n");
+
+        let error = check_local_links(temp.path()).unwrap_err();
+        assert_eq!(error.path(), Path::new("missing.md"));
+    }
+
+    #[test]
+    fn escaped_quote_does_not_end_a_double_quoted_title() {
+        let temp = TestTree::new();
+        temp.write(
+            "README.md",
+            "[guide](guide.md \"quoted \\\" ](missing.md)\")\n",
+        );
+        temp.write("guide.md", "# Guide\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn finds_a_second_link_after_a_titled_link() {
+        let temp = TestTree::new();
+        temp.write(
+            "README.md",
+            "[guide](guide.md \"see it\") [missing](missing.md)\n",
+        );
+        temp.write("guide.md", "# Guide\n");
+
+        let error = check_local_links(temp.path()).unwrap_err();
+        assert_eq!(error.path(), Path::new("missing.md"));
+    }
+
+    #[test]
+    fn malformed_title_suffix_is_not_treated_as_a_link() {
+        let temp = TestTree::new();
+        temp.write("README.md", "[guide](missing.md \"title\" trailing)\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn unterminated_escaped_title_does_not_panic() {
+        let temp = TestTree::new();
+        temp.write("README.md", "[guide](missing.md \"unterminated\\\n");
 
         assert_eq!(check_local_links(temp.path()), Ok(()));
     }
@@ -786,5 +968,40 @@ mod tests {
 
         let error = check_guide_structure(temp.path()).unwrap_err();
         assert_eq!(error.missing_section(), "背景");
+    }
+
+    #[test]
+    fn four_space_indented_heading_does_not_satisfy_required_section() {
+        let temp = TestTree::new();
+        temp.write_complete_guide();
+        let chapter = complete_chapter("# Chapter\n    ## 背景\n");
+        let chapter = chapter.replacen("## 背景\ncontent\n", "", 1);
+        temp.write("docs/guide/01-introduction.md", &chapter);
+
+        let error = check_guide_structure(temp.path()).unwrap_err();
+        assert_eq!(error.missing_section(), "背景");
+    }
+
+    #[test]
+    fn tab_indented_heading_does_not_satisfy_required_section() {
+        let temp = TestTree::new();
+        temp.write_complete_guide();
+        let chapter = complete_chapter("# Chapter\n\t## 背景\n");
+        let chapter = chapter.replacen("## 背景\ncontent\n", "", 1);
+        temp.write("docs/guide/01-introduction.md", &chapter);
+
+        let error = check_guide_structure(temp.path()).unwrap_err();
+        assert_eq!(error.missing_section(), "背景");
+    }
+
+    #[test]
+    fn three_space_indented_heading_satisfies_required_section() {
+        let temp = TestTree::new();
+        temp.write_complete_guide();
+        let chapter = complete_chapter("# Chapter\n   ## 背景\n");
+        let chapter = chapter.replacen("## 背景\ncontent\n", "", 1);
+        temp.write("docs/guide/01-introduction.md", &chapter);
+
+        assert_eq!(check_guide_structure(temp.path()), Ok(()));
     }
 }
