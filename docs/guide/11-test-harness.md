@@ -1,4 +1,4 @@
-# テストハーネスの仕組み
+# 11. テストハーネスの仕組み
 
 ## 学習目標
 
@@ -192,6 +192,6 @@ status 0 でも verifier が transcript 付きで失敗することを確認し�
 
 ## 次の章
 
-ここまでで、現在の kernel の振る舞いを host と QEMU の両側から守る単一入口ができました。
-次章ではこの安全網を維持したまま、Device Tree、heap、仮想 memory、user mode へ学習範囲を
-広げる順序を考えます。
+[第10章: 対話シェル](10-shell.md)へ戻ると、interactive verifierが観測するcommand処理を
+読み直せます。次は[第12章: 次に作るもの](12-next-steps.md)で、この安全網を維持したまま
+Device Tree、heap、仮想memory、user modeへ学習範囲を広げる順序を考えます。

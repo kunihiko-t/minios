@@ -28,6 +28,13 @@ RISC-V 64、QEMU `virt`、OpenSBI、1 hart、128 MiB RAMに固定し、一つず
 dynamic heap、Sv39仮想memory、user mode、process、filesystem、network、multi-hart、実機対応は
 現在の実装に先行して抽象化せず、[第12章](12-next-steps.md)の発展課題にします。
 
+読み始める前に、現在の境界をソースでも確認しておきます。OpenSBIから最初に実行される
+[`entry.S`](../../kernel/src/arch/riscv64/entry.S)がstackとBSSを準備し、
+[`kernel_main`](../../kernel/src/main.rs)がtrap、timer、allocator、shellを順に初期化します。
+host側では[`xtask`のphase runner](../../xtask/src/lib.rs)がbuildとtestの順序を持ち、
+[`QEMU harness`](../../xtask/src/qemu.rs)がguestのmarkerと対話transcriptを検証します。各章では
+この4つの入口から担当moduleへ降り、hardware/ABI境界とpure logicを分けて読みます。
+
 ## 実行と確認
 
 まずrepository rootで開発command一覧を表示します。

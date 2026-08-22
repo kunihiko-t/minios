@@ -16,28 +16,41 @@ contractとacceptanceを追加します。
 
 推奨順序と前提は次のとおりです。
 
-1. **Device Tree解析** — 前提: OpenSBIの`a1`でDTB addressを保持できていること。固定addressを
+1. **Device Tree解析** — 前提: OpenSBIの`a1`でDTB addressを保持できていること。
+   [`entry.S`のboot ABI](../../kernel/src/arch/riscv64/entry.S)から
+   [`kernel_main`のDTB境界](../../kernel/src/main.rs)へ渡る値を起点に、固定addressを
    node/propertyから読むpure parserとfixture testを先に作ります。
 2. **dynamic heap** — 前提: Device Treeでusable RAMを確認し、物理page allocatorがunique ownershipと
-   statsを守ること。最初はsmall allocatorとallocation failureを明示します。
+   statsを守ること。[現在のframe ownership](../../kernel/src/memory/frame.rs)の上に最初はsmall
+   allocatorを載せ、allocation failureを明示します。
 3. **Sv39 virtual memory** — 前提: page-table nodeをheapで確保できること。identity mappingから始め、
-   UART MMIOとkernel section permissionをtestします。
-4. **user mode** — 前提: kernel/user address spaceをSv39で分離できること。`sret`でU-modeへ入り、
+   [現在のlinker section境界](../../kernel/linker.ld)をpermission設計の入力にして、UART MMIOと
+   kernel section permissionをtestします。
+4. **user mode** — 前提: kernel/user address spaceをSv39で分離できること。
+   [現在のS-mode trap frame](../../kernel/src/arch/riscv64/trap.S)を拡張して`sret`でU-modeへ入り、
    privileged instructionがtrapすることを確認します。
 5. **system calls** — 前提: user trap frameとkernel stackがあること。register ABIを固定し、未知syscallの
-   errorもtestします。
+   errorもtestします。[現在のcause分岐](../../kernel/src/arch/riscv64/trap.rs)がsyscall dispatchを
+   追加する境界です。
 6. **processとscheduler** — 前提: syscallでyield/exitでき、address spaceとkernel stackを所有できること。
-   まずsingle-hart cooperative schedulingから始めます。
+   [現在のsingle-hart shell loop](../../kernel/src/shell/mod.rs)の一つの実行主体を置き換える形で、
+   cooperative schedulingから始めます。
 7. **VirtIO block** — 前提: heap、physical/virtual address変換、interrupt待機があること。descriptor ringと
-   read-only sector testを作ります。
+   read-only sector testを作ります。[UART driverのMMIO境界](../../kernel/src/drivers/uart.rs)は、
+   volatile accessとdevice固有状態をdriver内へ閉じ込める最小例です。
 8. **filesystem** — 前提: VirtIO blockのsector readが安定していること。小さなread-only filesystemから
-   始め、壊れたmetadataを拒否します。
+   始め、壊れたmetadataを拒否します。[固定長line buffer](../../kernel/src/shell/line.rs)のように、
+   入力容量と拒否状態を型の境界で明示します。
 9. **multi-hart** — 前提: schedulerとallocatorのshared state境界が明確なこと。per-hart stack、IPI、lock、
-   atomic orderingを追加します。
+   atomic orderingを追加します。[現在のtick atomic](../../kernel/src/time.rs)のordering理由を読み、
+   複数writerへ変わる状態だけを改めて設計します。
 10. **networking** — 前提: VirtIO、interrupt、buffer ownership、timer timeout、concurrent schedulingが
-    あること。VirtIO netからpacket parser、ARP/IPへ進みます。
+    あること。[command parserのpure logic分離](../../kernel/src/shell/command.rs)を手本に、VirtIO netから
+    packet parser、ARP/IPへ進み、device I/Oなしでmalformed packetをhost testします。
 11. **real hardware** — 前提: Device Tree駆動でQEMU固定値を除去し、必要driverのdatasheetとboot firmware
-    契約を確認できること。serial consoleだけのbootから移植します。
+    契約を確認できること。[RISC-V arch公開境界](../../kernel/src/arch/riscv64/mod.rs)と
+    [QEMU UART constructor](../../kernel/src/drivers/uart.rs)をboard依存実装から分離し、serial console
+    だけのbootから移植します。
 
 詳細なmilestoneと完了条件は[発展roadmap](../reference/roadmap.md)にも整理しています。
 
@@ -67,7 +80,9 @@ host pure-logic testだけでなく専用QEMU markerまたはinteractive transcr
 
 ## 次の章
 
-[第11章](11-test-harness.md)へ戻れます。これで基礎教材は完了です。[ガイド索引](README.md)から
-必要な章を再読し、[architecture](../reference/architecture.md)、[memory map](../reference/memory-map.md)、
-[用語集](../reference/glossary.md)、[troubleshooting](../reference/troubleshooting.md)を実装中の参照資料として
-使ってください。
+[第11章: テストハーネス](11-test-harness.md)へ戻ると、発展中も維持するacceptanceの入口を
+確認できます。基礎教材の次は[発展roadmap](../reference/roadmap.md)を最終navigationとして開き、
+選んだmilestoneの前提と完了条件を書き出してください。[ガイド索引](README.md)から必要な章を再読し、
+[architecture](../reference/architecture.md)、[memory map](../reference/memory-map.md)、
+[用語集](../reference/glossary.md)、[troubleshooting](../reference/troubleshooting.md)も実装中の参照資料として
+使えます。
