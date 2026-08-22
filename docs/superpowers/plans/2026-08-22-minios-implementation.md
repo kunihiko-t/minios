@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rust製のRISC-V 64学習用カーネルを、QEMU上のOpenSBIから起動し、UARTシェル、トラップ、タイマー、物理ページ管理、再現可能なテストハーネス、日本語教材まで完成させる。
+**Goal:** Rust製のRISC-V 64学習用カーネルを、QEMU上のOpenSBIから起動し、UARTシェル、トラップ、タイマー、物理ページ管理、再現可能なテストハーネス、日本語教材まで完成させ、個人GitHubアカウントのprivateリポジトリへ公開する。
 
 **Architecture:** `#![no_std]` カーネルを `riscv64gc-unknown-none-elf` 向けにビルドし、QEMU `virt` 上でSモードとして動かす。ハードウェア非依存の処理はカーネルライブラリへ分離してホスト単体テストを行い、実機依存部分はUART出力を捕捉するQEMU統合テストで検証する。ホスト側操作はRust製の `cargo xtask` に統一する。
 
@@ -24,6 +24,7 @@
 - コード識別子は英語、教材・設計意図・安全条件のコメントは日本語とする。
 - すべての `unsafe` に呼び出し条件または安全性の根拠を隣接コメントとして残す。
 - 各タスクは失敗するテストを先に確認し、最小実装、全体回帰テスト、コミットの順で完了する。
+- GitHub公開先は `kunihiko-t/minios` のprivateリポジトリとし、同名リポジトリが存在する場合は変更も上書きもせずユーザーへ報告する。
 
 ---
 
@@ -976,3 +977,63 @@ Expected: the eight implementation commits appear in task order, ending with `do
 Run: `cargo xtask check`
 
 Expected: format, link validation, Clippy, host tests, cross-build, and all five QEMU tests pass in the final tree.
+
+---
+
+### Task 9: Publish the Verified Project to a Private GitHub Repository
+
+**Files:**
+- Modify: none
+- Test: local Git state, GitHub repository metadata, and remote `main` reference
+
+**Interfaces:**
+- Consumes: Task 8のクリーンな `main`、全検証成功の証拠、GitHubアカウント `kunihiko-t`。
+- Produces: private repository `kunihiko-t/minios`, local remote `origin`, and pushed `main` branch.
+
+- [ ] **Step 1: Reconfirm the local release gate**
+
+Run: `git status --short`
+
+Expected: no output.
+
+Run: `cargo xtask check`
+
+Expected: every host and QEMU phase exits 0 immediately before publication.
+
+- [ ] **Step 2: Restore GitHub CLI authentication**
+
+Run: `gh auth status`
+
+If the current `kunihiko-t` token remains invalid, run `gh auth login -h github.com -p https -w` and complete the browser authorization as `kunihiko-t`.
+
+Run: `gh api user --jq .login`
+
+Expected: exact output `kunihiko-t`. Do not create a repository when a different account is active.
+
+- [ ] **Step 3: Prove the target name is unused**
+
+Run: `gh repo view kunihiko-t/minios --json nameWithOwner,visibility,url`
+
+Expected: GitHub reports that `kunihiko-t/minios` does not exist. If repository metadata is returned, stop without changing the remote repository and report the collision to the user.
+
+- [ ] **Step 4: Create the private repository and push `main`**
+
+Run: `gh repo create kunihiko-t/minios --private --source=. --remote=origin --push`
+
+Expected: GitHub creates the repository, adds its URL as `origin`, pushes local `main`, and configures its upstream branch.
+
+- [ ] **Step 5: Verify remote identity, visibility, and branch contents**
+
+Run: `gh repo view kunihiko-t/minios --json nameWithOwner,visibility,url,defaultBranchRef`
+
+Expected: `nameWithOwner` is `kunihiko-t/minios`, `visibility` is `PRIVATE`, and `defaultBranchRef.name` is `main`.
+
+Run: `git remote -v`
+
+Expected: fetch and push entries for `origin` both point to `kunihiko-t/minios`.
+
+Run: `git rev-parse HEAD`
+
+Run: `git ls-remote --heads origin main`
+
+Expected: the local HEAD hash exactly matches the remote `refs/heads/main` hash.
