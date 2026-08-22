@@ -1,26 +1,24 @@
-# 5. UARTで文字を出す・受け取る
+# 5. UARTで文字を送受信する
 
 ## 学習目標
 
-QEMU `virt`の16550互換UARTについて、MMIO、volatile access、Line Status Registerのbit、
-format出力とbyte入出力の責務分離を説明できるようになります。
+QEMU `virt`の16550互換UARTを通して、MMIO、volatileアクセス、Line Status Registerの各ビットを学びます。
+書式付き出力と1バイト単位の入出力を別の層にする理由も説明できるようになります。
 
 ## 背景
 
-kernel起動直後にはfileやterminal driverがありません。UART MMIOはCPUからaddressとして見えても
-通常RAMではなく、read/write自体がdeviceへの作用です。compilerに値の再利用やaccessの削除を
-許すとhardwareへ届かないため、volatile境界が必要です。
+カーネルの起動直後には、ファイルも端末ドライバーもありません。
+UARTのMMIOはCPUからアドレスとして見えますが、通常のRAMではなく、読み書きそのものが機器への操作になります。
+コンパイラーに値の再利用や読み書きの削除を許すと操作がハードウェアへ届かないため、volatileアクセスが必要です。
 
 ## 実装
 
-[`Uart`](../../kernel/src/drivers/uart.rs)はQEMU `virt`固有のbase `0x1000_0000`を持ちます。
-base + 5のLine Status Registerでbit 5が送信可能、bit 0が受信可能です。`write_byte`はbit 5を
-待ってoffset 0へ`write_volatile`し、`has_byte`と`read_byte`はbit 0を見てoffset 0から
-`read_volatile`します。
+[`Uart`](../../kernel/src/drivers/uart.rs)は、QEMU `virt`固有のベースアドレス`0x1000_0000`を持ちます。
+ベースアドレスから5バイト先にあるLine Status Registerでは、ビット5が送信可能、ビット0が受信可能であることを示します。
+`write_byte`はビット5を待ってオフセット0へ`write_volatile`し、`has_byte`と`read_byte`はビット0を見てオフセット0から`read_volatile`します。
 
-[`console`](../../kernel/src/console.rs)はdevice registerを隠し、`core::fmt::Write`経由の
-`print!`/`println!`、byte入力、緊急出力を提供します。formatとdevice accessを分けることで、
-shellはUART register配置を知りません。
+[`console`](../../kernel/src/console.rs)は機器のレジスターを隠し、`core::fmt::Write`を使う`print!`と`println!`、1バイトの入力、緊急出力を提供します。
+書式処理と機器へのアクセスを分けているため、シェルはUARTのレジスター配置を知る必要がありません。
 
 ## 実行と確認
 
@@ -32,23 +30,23 @@ hart id: 0
 [MINIOS_TEST] boot: ok
 ```
 
-5秒以内のstatus 0だけでなくmarkerが必要です。timeout時はxtaskがQEMUをkillしてwaitし、捕捉した
-stdout/stderrと実際のcommand lineを省略せず返します。
+5秒以内に終了ステータス0で終わるだけでなく、マーカーが必要です。
+制限時間を超えた場合は、`xtask`がQEMUを終了して回収し、受信した標準出力と標準エラー、実際のコマンドラインを省略せず表示します。
 
 ## よくある失敗
 
-- 文字化け・欠落: transmit-ready bit 5を待たず書いていないか確認します。
-- 入力が永遠に待つ: receive-ready bit 0とtransmit bitを取り違えていないか確認します。
-- release buildだけ出力が消える: MMIOに通常のpointer read/writeを使っていないか監査します。
-- timeoutとcrashを混同する: xtaskのstatus、timeout文、最後のUART行を別々に読みます。
+- 文字化けや欠落が起きる：送信可能を示すビット5を待たずに書いていないか確認します。
+- 入力を待ち続ける：受信可能を示すビット0と送信可能ビットを取り違えていないか確認します。
+- リリースビルドだけ出力が消える：MMIOに通常のポインター読み書きを使っていないか調べます。
+- 制限時間超過とクラッシュを混同する：`xtask`の終了ステータス、時間切れの診断、最後のUART出力を分けて読みます。
 
 ## 演習
 
 Line Status Registerの値が`0b0010_0001`のとき、送信と受信のどちらが可能か答えてください。
-次に`Uart`、`console`、`shell`の各層が知るべき情報を一行ずつ書き、register offsetがshellへ
-漏れていないことを確認します。
+次に、`Uart`、`console`、`shell`の各層が知るべき情報を一行ずつ書きます。
+レジスターのオフセットがシェルまで漏れていないことを確認してください。
 
 ## 次の章
 
-[第4章](04-boot-with-opensbi.md)へ戻れます。次は
-[第6章: panicと診断](06-panic-and-diagnostics.md)で、通常経路が壊れた後にも使える出力を作ります。
+[第4章](04-boot-with-opensbi.md)へ戻れます。
+次は[第6章「パニックと緊急診断」](06-panic-and-diagnostics.md)で、通常の出力経路が壊れた後にも使える診断を作ります。

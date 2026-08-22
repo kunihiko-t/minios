@@ -2,72 +2,75 @@
 
 ## ABI
 
-Application Binary Interface。関数名、register、stack alignment、戻り値などbinary同士の契約です。
-MiniOSではOpenSBIの`a0/a1` entry引数、SBI call register、assemblyからRustへのC ABIが該当します。
+**Application Binary Interface（ABI）**は、関数名、レジスター、スタックのアラインメント、戻り値など、バイナリー同士の規約です。
+MiniOSでは、OpenSBIが`a0/a1`で渡す起動引数、SBI呼び出しで使うレジスター、アセンブリーコードからRustへ移るC ABIが該当します。
 
 ## BSS
 
-zero-initialized static dataを置くELF sectionです。fileにはzero bytesを持たず、MiniOSの`entry.S`がRustへ
-入る前に`__bss_start..__bss_end`をzero化します。
+**BSS**は、ゼロで初期化する静的データを置くELFセクションです。
+ファイルにはゼロの並びを保持せず、MiniOSの`entry.S`がRustへ入る前に`__bss_start..__bss_end`をゼロ化します。
 
 ## CSR
 
-Control and Status Register。RISC-Vの特権状態を読み書きするregister群で、`scause`、`sepc`、`stval`、
-`stvec`、`sstatus`、`sie`、`time`を使います。
+**Control and Status Register（CSR）**は、RISC-Vの特権状態を読み書きするレジスター群です。
+MiniOSは`scause`、`sepc`、`stval`、`stvec`、`sstatus`、`sie`、`time`を使います。
 
 ## DTB
 
-Device Tree Blob。CPU、RAM、device address、interruptなどhardware構成を表すbinaryです。OpenSBIはaddressを
-`a1`で渡しますが、現在のMiniOSはまだ解析しません。
+**Device Tree Blob（DTB）**は、CPU、RAM、機器のアドレス、割り込みなど、ハードウェア構成を表すバイナリーです。
+OpenSBIはそのアドレスを`a1`で渡しますが、現在のMiniOSはまだ内容を解析しません。
 
 ## hart
 
-Hardware thread。独立にinstructionを実行するRISC-Vの単位です。MiniOSはQEMUを`-smp 1`で起動し、boot hart
-ID 0だけを扱います。
+**ハート**は、RISC-Vで命令を独立して実行するハードウェアスレッドです。
+MiniOSはQEMUを`-smp 1`で起動し、IDが0の起動ハートだけを扱います。
 
 ## ISA
 
-Instruction Set Architecture。CPUが実行できるinstructionとregister/privilege仕様です。guest targetはRISC-V
-64のRV64GCです。
+**Instruction Set Architecture（ISA）**は、CPUが実行できる命令、レジスター、特権の仕様です。
+ゲストのターゲットは、RISC-V 64のRV64GCです。
 
 ## MMIO
 
-Memory-Mapped I/O。device registerをphysical addressへ割り当てる方式です。UART base `0x1000_0000`はRAMでは
-なく、read/writeがdevice actionになります。
+**Memory-Mapped I/O（MMIO）**は、機器のレジスターを物理アドレスへ割り当てる方式です。
+UARTのベースアドレス`0x1000_0000`はRAMではなく、その読み書きが機器への操作になります。
 
 ## OpenSBI
 
-RISC-V Supervisor Binary Interfaceのfirmware implementationです。QEMUからM-modeで起動し、MiniOSをS-modeへ
-渡し、timer予約とsystem resetを仲介します。
+**OpenSBI**は、RISC-V Supervisor Binary Interfaceのファームウェア実装です。
+QEMUからM-modeで起動し、MiniOSをS-modeへ渡した後、タイマーの予約とシステムリセットを仲介します。
 
 ## page
 
-memoryを固定sizeで管理する単位です。MiniOSのphysical pageは4 KiBで、先頭addressは4096-byte alignedです。
-`PhysFrame`はallocatorから払い出された1 pageの排他所有を表すtokenで、`Clone`/`Copy`できず、解放時に
-消費されます。tokenを作る`unsafe`境界は、同addressの別tokenや別subsystem ownerがいないことをcallerへ
-要求します。この境界はalignmentを検査しますが、hardware上の所有者重複を自動検出するものではありません。
+**ページ**は、メモリーを固定サイズで管理する単位です。
+MiniOSの物理ページは4 KiBで、先頭アドレスは4096バイト境界にそろえます。
+`PhysFrame`は、アロケーターから払い出された1ページの排他所有を表す値です。
+`Clone`と`Copy`を実装せず、解放時に消費されます。
+この値を作る`unsafe`な境界は、同じアドレスを表す別の値と、別のサブシステムによる所有がないことを呼び出し側へ要求します。
+アラインメントは検査できますが、ハードウェア上の所有者重複は自動検出できません。
 
 ## privilege mode
 
-RISC-Vの権限levelです。OpenSBIはMachine mode、MiniOS kernelはSupervisor modeで動きます。User modeはroadmap
-項目で、現在は未実装です。
+**特権モード**は、RISC-Vにおける権限レベルです。
+OpenSBIはMachineモード、MiniOSのカーネルはSupervisorモードで動きます。
+Userモードはロードマップに含まれますが、まだ実装していません。
 
 ## SBI
 
-Supervisor Binary Interface。S-mode softwareがfirmwareへtimer、resetなどを依頼するstandard ABIです。
-MiniOSはTIMEとSRST extensionを使います。
+**Supervisor Binary Interface（SBI）**は、S-modeのソフトウェアがファームウェアへタイマーやリセットを依頼する標準ABIです。
+MiniOSはTIME拡張とSRST拡張を使います。
 
 ## trap
 
-exceptionまたはinterruptにより通常control flowから特権handlerへ移るeventです。`scause`が種類、`sepc`が
-中断位置、`stval`が追加情報を表します。
+**トラップ**は、例外または割り込みにより、通常の制御の流れから特権ハンドラーへ移る事象です。
+`scause`が種類、`sepc`が中断位置、`stval`が追加情報を表します。
 
 ## UART
 
-Universal Asynchronous Receiver/Transmitter。MiniOSのconsoleに使うbyte-oriented serial deviceです。QEMU
-`virt`の16550 compatible implementationをstdioへ接続します。
+**Universal Asynchronous Receiver/Transmitter（UART）**は、MiniOSのコンソールに使う、1バイト単位のシリアル機器です。
+QEMU `virt`の16550互換実装を標準入出力へ接続します。
 
 ## volatile access
 
-compilerへ「このread/write自体を省略・統合してはいけない」と伝えるmemory accessです。MMIOには必要ですが、
-thread間同期やatomicityを保証するものではありません。
+**volatileアクセス**は、この読み書き自体を省略または統合してはいけないとコンパイラーへ伝えるメモリーアクセスです。
+MMIOには必要ですが、スレッド間の同期と不可分な操作を保証するものではありません。

@@ -1,26 +1,27 @@
-# 7. RISC-Vの例外・割り込み
+# 7. RISC-Vの例外と割り込み
 
 ## 学習目標
 
-同期exceptionと非同期interrupt、`scause/sepc/stval/stvec`、Direct mode、trap frame、`sret`の
-関係を説明できるようになります。
+同期例外と非同期割り込みの違いを学びます。
+`scause`、`sepc`、`stval`、`stvec`、Directモード、トラップフレーム、`sret`の関係も説明できるようになります。
 
 ## 背景
 
-trapは現在のcontrol flowから特権handlerへ移るeventの総称です。illegal instructionやbreakpointは
-実行命令に同期したexception、timerやdevice通知は非同期interruptです。hardwareは普通の関数callの
-C ABIに従って全registerを保存してくれないため、entry assemblyが中断位置を守る必要があります。
+**トラップ**は、現在の制御の流れから特権ハンドラーへ移る事象の総称です。
+不正命令とブレークポイントは実行中の命令に同期する例外であり、タイマーと機器からの通知は非同期割り込みです。
+ハードウェアは通常の関数呼び出しで使うC ABIに従って全レジスターを保存しないため、入口のアセンブリーコードが中断位置を守ります。
 
 ## 実装
 
-[`decode_scause`](../../kernel/src/arch/riscv64/trap.rs)は最上位bitをinterrupt flag、残りをcause codeへ
-分ける純粋関数です。unexpected trapは種類と`scause`、`sepc`、`stval`を16進数で出しfailure reset
-します。`sepc`は再開候補、`stval`はfault addressやinstruction bitsなどcause固有の追加値です。
+[`decode_scause`](../../kernel/src/arch/riscv64/trap.rs)は、最上位ビットを割り込みフラグ、残りを原因コードへ分ける純粋関数です。
+予期しないトラップは、種類と`scause`、`sepc`、`stval`を16進数で出し、異常終了します。
+`sepc`は実行を再開する候補位置、`stval`は障害アドレスや命令ビットなど、原因に固有の追加値です。
 
-`stvec`はDirect mode 0で`__trap_entry`を指します。entryは256 byte、16 byte alignedのframeへx1と
-x3..x31を保存します。x0は常に0、x2 (`sp`)はframe幅を加えて回復できるため別slotに保存しません。
-Rust handlerから戻る経路は同じregisterを復元し`sret`します。callee-savedだけでは任意のinstruction
-間に入るinterruptからtemporaryやargumentを守れません。
+`stvec`はDirectモード0で`__trap_entry`を指します。
+入口は256バイト、16バイト境界にそろえたフレームへ、x1とx3からx31までを保存します。
+x0は常に0であり、x2（`sp`）はフレーム幅を加えると復元できるため、別の領域には保存しません。
+Rustのハンドラーから戻る経路は同じレジスターを復元し、`sret`を実行します。
+呼び出し先保存レジスターだけでは、任意の命令間に入る割り込みから一時レジスターと引数レジスターを守れません。
 
 ## 実行と確認
 
@@ -30,24 +31,25 @@ $ cargo xtask test trap
 [MINIOS_TEST] trap: ok
 ```
 
-test featureは`trap::init`後に`ebreak`を実行します。breakpoint exceptionのcause 3だけがmarkerへ
-進み、status 0でresetします。marker不足やunexpected diagnosticsは失敗です。
+テスト用機能は、`trap::init`の後に`ebreak`を実行します。
+ブレークポイント例外の原因3だけがマーカーの出力へ進み、終了ステータス0でリセットします。
+マーカーの欠落と、予期しない診断は失敗です。
 
 ## よくある失敗
 
-- immediate retrap: `stvec` alignment、saved register offset、frame size、`sret`前の`sp`を調べます。
-- `sepc`が同じまま繰り返す: 同期exceptionを通常復帰させるならinstruction幅だけ進める設計が必要です。
-  MiniOSはtestのbreakpointを成功resetするため通常継続しません。
-- Rust handlerだけ直してもregister破損する: assemblyのsave/restore対称性を照合します。
-- Vectoredと誤解する: MiniOSは全trapが一つのBASEへ入るDirect modeです。
+- すぐに同じトラップへ戻る：`stvec`のアラインメント、保存したレジスターのオフセット、フレームサイズ、`sret`前の`sp`を調べます。
+- `sepc`が同じまま例外を繰り返す：同期例外から通常実行へ戻す場合は、命令幅だけ進める設計が必要です。
+  MiniOSのテストでは、ブレークポイントを検出すると正常終了するため、通常実行へは戻りません。
+- Rustのハンドラーだけ直してもレジスターが壊れる：アセンブリーコードの保存と復元が対称になっているか照合します。
+- Vectoredモードと取り違える：MiniOSでは全トラップが一つのBASEへ入るDirectモードを使います。
 
 ## 演習
 
-`ebreak`を一時的にillegal instructionへ替えると、`Exception(3)`から`Exception(2)`へ変わると予測
-できます。`scause`のinterrupt bitは0、`sepc`はそのinstruction、`stval`は実装依存でinstruction bits
-または0です。予測を書いてから実験し、必ず変更を戻してください。
+`ebreak`を一時的に不正命令へ替えると、`Exception(3)`から`Exception(2)`へ変わると予測できます。
+`scause`の割り込みビットは0、`sepc`はその命令、`stval`は実装によって命令ビットか0になります。
+結果を予測してから実験し、確認後は変更を戻してください。
 
 ## 次の章
 
-[第6章](06-panic-and-diagnostics.md)へ戻れます。次は
-[第8章: timer割り込み](08-timer-interrupts.md)で、通常復帰するinterrupt code 5を扱います。
+[第6章](06-panic-and-diagnostics.md)へ戻れます。
+次は[第8章「タイマー割り込み」](08-timer-interrupts.md)で、通常実行へ戻る割り込みコード5を扱います。

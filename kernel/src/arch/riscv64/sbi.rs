@@ -1,12 +1,12 @@
 use core::arch::asm;
 
-// Task 2 で分離したターゲット非依存型をこの ecall 境界から引き続き公開する。
+// ターゲットに依存しないSBI戻り値の型を、この`ecall`境界からも公開する。
 pub use minios_kernel::sbi::{SbiError, SbiRet};
 
-// SBI 仕様で TIME 拡張に固定された extension ID と set_timer の function ID である。
+// SBI仕様がTIME拡張に割り当てた拡張IDと、`set_timer`の関数IDである。
 const SBI_EXT_TIME: usize = 0x5449_4d45;
 const SBI_TIME_SET_TIMER: usize = 0;
-// SBI 仕様で SRST 拡張に固定された extension ID であり、OpenSBI と一致させる。
+// SBI仕様がSRST拡張に割り当てた拡張IDであり、OpenSBIの実装と一致させる。
 const SBI_EXT_SYSTEM_RESET: usize = 0x5352_5354;
 const SBI_SYSTEM_RESET: usize = 0;
 
@@ -20,12 +20,12 @@ pub enum ResetType {
 #[derive(Debug, Clone, Copy)]
 pub enum ResetReason {
     NoReason = 0,
-    // SBI SRST 仕様で system failure の reason ID は 1 に固定され、panic と予期外トラップを正常終了と区別する。
+    // SBI SRST仕様ではシステム障害の理由IDが1であり、パニックと予期しないトラップを正常終了から区別できる。
     SystemFailure = 1,
 }
 
 pub fn set_timer(deadline: u64) -> Result<usize, SbiError> {
-    // RV64 の a0 は 64 bit なので、絶対時刻を分割せず SBI TIME へ渡せる。
+    // RV64の`a0`は64ビット幅なので、絶対時刻を分割せずSBI TIMEへ渡せる。
     sbi_call(deadline as usize, 0, 0, SBI_TIME_SET_TIMER, SBI_EXT_TIME).into_result()
 }
 
@@ -52,8 +52,8 @@ fn sbi_call(
 ) -> SbiRet {
     let error: isize;
     let value: usize;
-    // Safety: SBI v0.2+ は a0..a2/a6/a7 の入出力 ABI を規定し、ecall 後の a0/a1 を
-    // error/value として返す。nostack はこの命令列がスタックを読書きしない条件である。
+    // Safety: SBI v0.2以降は`a0..a2/a6/a7`の入出力ABIを定め、`ecall`後の`a0/a1`をエラーと値として返す。
+    // この命令列はスタックを読み書きしないため、`nostack`を指定できる。
     unsafe {
         asm!(
             "ecall",
@@ -70,14 +70,14 @@ fn sbi_call(
 
 pub fn wait_for_interrupt() -> ! {
     loop {
-        // Safety: RISC-V の wfi は現在の特権モードで待機するだけで、メモリ参照をしない。
+        // Safety: RISC-Vの`wfi`は現在の特権モードで待機するだけで、メモリーを参照しない。
         unsafe { asm!("wfi", options(nomem, nostack)) };
     }
 }
 
 fn wait_with_interrupts_disabled() -> ! {
-    // Safety: S-mode の sstatus.SIE (bit 1) をクリアし、未初期化の割り込み処理へ
-    // 入らないようにする。SBI reset が返った異常経路だけから呼び出す。
+    // Safety: S-modeの`sstatus.SIE`（ビット1）を消し、初期化されていない割り込み処理へ入ることを防ぐ。
+    // SBIリセットが戻った異常経路だけから呼び出す。
     unsafe { asm!("csrci sstatus, 2", options(nomem, nostack)) };
     wait_for_interrupt()
 }

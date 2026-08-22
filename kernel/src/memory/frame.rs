@@ -1,6 +1,6 @@
 pub const PAGE_SIZE: usize = 4096;
 
-/// allocatorから払い出された物理pageを一意に表す所有権token。
+/// アロケーターから払い出された物理ページを一意に表す所有権の値。
 ///
 /// ```compile_fail
 /// use minios_kernel::memory::frame::PhysFrame;
@@ -19,7 +19,7 @@ pub const PAGE_SIZE: usize = 4096;
 pub struct PhysFrame(usize);
 
 impl PhysFrame {
-    /// 指定した物理addressの所有権tokenを作る。
+    /// 指定した物理アドレスの所有権を表す値を作る。
     ///
     /// ```compile_fail
     /// use minios_kernel::memory::frame::PhysFrame;
@@ -30,11 +30,11 @@ impl PhysFrame {
     ///
     /// # Safety
     ///
-    /// `start`がpage境界に整列して`Ok`を返す場合、callerはその物理pageを排他的に所有し、
-    /// 同じaddressを表す生存中の`PhysFrame`がほかにないことを保証しなければならない。
-    /// 未整列addressは所有権tokenを作らず`Unaligned`として返す。
+    /// `start`がページ境界にそろい`Ok`を返す場合、呼び出し側はその物理ページを排他的に所有し、
+    /// 同じアドレスを表す生存中の`PhysFrame`がほかにないことを保証しなければならない。
+    /// 境界にそろっていないアドレスでは所有権を作らず、`Unaligned`を返す。
     pub unsafe fn from_start(start: usize) -> Result<Self, FrameError> {
-        // 物理ページは MMU とハードウェアの 4 KiB 境界でしか表せないため、下位 bit を検査する。
+        // 物理ページはMMUとハードウェアが定める4 KiB境界で始まるため、下位ビットを検査する。
         if !start.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
         }
@@ -62,14 +62,14 @@ pub struct FrameStats {
     pub free: usize,
 }
 
-/// 物理 frame の所有権は一つの bitmap にだけ対応付ける。
+/// 物理フレームの所有権を一つのビットマップだけに対応付ける。
 ///
 /// ```compile_fail
 /// use minios_kernel::memory::frame::FrameAllocator;
 ///
-/// // Safety: compile-fail例では仮想的なtest範囲にほかの所有者がいない前提を置く。
+/// // Safety: コンパイル失敗例では、仮想的なテスト範囲にほかの所有者がいないと仮定する。
 /// let allocator = unsafe { FrameAllocator::<1>::new(0x4000, 0x8000) }.unwrap();
-/// // 複製すると同じ物理ページを二つの allocator が返せるため、所有者は複製できない。
+/// // 複製すると同じ物理ページを二つのアロケーターが返せるため、所有者は複製できない。
 /// let duplicate = allocator.clone();
 /// let _ = duplicate;
 /// ```
@@ -82,7 +82,7 @@ pub struct FrameAllocator<const WORDS: usize> {
 }
 
 impl<const WORDS: usize> FrameAllocator<WORDS> {
-    /// 指定した物理address範囲を管理するallocatorを作る。
+    /// 指定した物理アドレス範囲を管理するアロケーターを作る。
     ///
     /// ```compile_fail
     /// use minios_kernel::memory::frame::FrameAllocator;
@@ -101,11 +101,12 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
     ///
     /// # Safety
     ///
-    /// 検証成功時、callerは`base..end`の全物理pageがほかのallocatorやsubsystemから一切所有・
-    /// 管理されていない排他的な範囲であり、返したallocatorの生存中に別の所有者がclaimしないことを
-    /// 保証しなければならない。未整列・空・容量超過で`Err`を返す場合は範囲をclaimしない。
+    /// 検証に成功した場合、呼び出し側は`base..end`の全物理ページがほかのアロケーターや
+    /// サブシステムに所有または管理されていない排他的な範囲であることを保証しなければならない。
+    /// 返したアロケーターが生存している間は、別の所有者も同じ範囲を取得してはならない。
+    /// アラインメント、空の範囲、容量超過で`Err`を返す場合、この関数は範囲を取得しない。
     pub unsafe fn new(base: usize, end: usize) -> Result<Self, FrameError> {
-        // base と end は 4 KiB ページ境界でなければ、bitmap の一 bit を一物理ページへ安全に対応付けられない。
+        // `base`と`end`が4 KiB境界にそろわなければ、ビットマップの1ビットを1物理ページへ安全に対応付けられない。
         if !base.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
         }
@@ -113,7 +114,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
             return Err(FrameError::EmptyRange);
         }
 
-        // 上端は base より大きいことを確認済みなので、この差分はオーバーフローせずページ数を表す。
+        // 上端が`base`より大きいことを確認済みなので、この差分はオーバーフローせずページ数を表す。
         let frame_count = (end - base) / PAGE_SIZE;
         let capacity = WORDS.saturating_mul(u64::BITS as usize);
         if frame_count > capacity {
@@ -136,7 +137,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
             if self.bitmap[word_index] & bit == 0 {
                 self.bitmap[word_index] |= bit;
                 self.allocated += 1;
-                // frame_index は frame_count 未満で、new が検証した範囲内なのでこの物理アドレスは有効範囲から出ない。
+                // `frame_index`は`frame_count`未満であり、`new`が検証した物理アドレス範囲から外れない。
                 let start = self.base + frame_index * PAGE_SIZE;
                 return Some(PhysFrame(start));
             }
@@ -144,12 +145,12 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
         None
     }
 
-    /// 所有権tokenを消費して対応するpageをallocatorへ返す。
+    /// 所有権を表す値を消費し、対応するページをアロケーターへ返す。
     ///
     /// ```compile_fail
     /// use minios_kernel::memory::frame::FrameAllocator;
     ///
-    /// // Safety: compile-fail例では仮想的なtest範囲にほかの所有者がいない前提を置く。
+    /// // Safety: コンパイル失敗例では、仮想的なテスト範囲にほかの所有者がいないと仮定する。
     /// let mut allocator = unsafe { FrameAllocator::<1>::new(0x4000, 0x8000) }.unwrap();
     /// let frame = allocator.allocate().unwrap();
     /// allocator.deallocate(frame).unwrap();
@@ -157,7 +158,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
     /// ```
     pub fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
         let start = frame.start();
-        // PhysFrame は通常 from_start で生成されるが、型の将来変更にも備えて解放境界でも 4 KiB 整列を再確認する。
+        // `PhysFrame`は通常`from_start`で作るが、型を将来変更しても安全性を保てるよう、解放時にも4 KiB境界を確認する。
         if !start.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
         }
@@ -165,7 +166,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
             return Err(FrameError::OutOfRange);
         }
 
-        // start >= base を確認済みなので、この差分は安全に bitmap 用のページ番号へ変換できる。
+        // `start >= base`を確認済みなので、この差分は安全にビットマップ用のページ番号へ変換できる。
         let frame_index = (start - self.base) / PAGE_SIZE;
         if frame_index >= self.frame_count {
             return Err(FrameError::OutOfRange);
@@ -199,14 +200,14 @@ mod tests {
         base: usize,
         end: usize,
     ) -> Result<FrameAllocator<WORDS>, FrameError> {
-        // Safety: host testのaddressはdereferenceしない独立したbitmap modelであり、各fixtureの
-        // scopeでは対象範囲を管理するownerをこのallocator一つに限定する。
+        // Safety: ホストテストのアドレスは参照先へアクセスしない独立したビットマップモデルである。
+        // 各テスト用データの有効範囲では、このアロケーターだけが対象範囲を管理する。
         unsafe { FrameAllocator::new(base, end) }
     }
 
     fn forged_frame_fixture(start: usize) -> Result<PhysFrame, FrameError> {
-        // Safety: 不正解放の診断契約を観測するtestだけが、実memoryへ触れないtokenを意図的に
-        // forgeする。productionのsafe callerには同じ操作を公開しない。
+        // Safety: 不正解放の診断を確認するテストだけが、実際のメモリーへ触れない所有権の値を意図的に偽造する。
+        // 本番の安全な呼び出し側には、同じ操作を公開しない。
         unsafe { PhysFrame::from_start(start) }
     }
 

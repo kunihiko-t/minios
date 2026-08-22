@@ -1,35 +1,38 @@
-# QEMU `virt` memory map
+# QEMU `virt`のメモリーマップ
 
 MiniOSはQEMU `virt`を`-m 128M`で起動し、RAMを`0x8000_0000..0x8800_0000`として扱います。
-上端はexclusiveです。現在はDevice Treeを解析しないため、次のfixed layoutがruntime契約です。
+範囲の上端は含みません。
+現在はDevice Treeを解析しないため、次の固定配置が実行時の規約です。
 
-| 範囲・address | 所有者/用途 | MiniOSの扱い |
+| 範囲またはアドレス | 所有者と用途 | MiniOSでの扱い |
 | --- | --- | --- |
-| `0x8000_0000..0x8020_0000` | OpenSBI reserved RAMとkernel load前の低位領域 | allocator対象外。OpenSBI imageの実占有に加え、layout上の2 MiBを保守的に予約 |
-| `0x8020_0000` | kernel start / ELF entry配置域の先頭 | `linker.ld`のsection counter、OpenSBI `Next Address`、QEMU `-kernel`の一致点 |
-| `0x8020_0000..__kernel_end` | `.text/.rodata/.data/.bss`、64 KiB boot stack、bitmap | kernel自身が占有。`__kernel_end`はlinkerが4 KiB alignedでexportする可変symbol |
-| `align_up(__kernel_end, 0x1000)..0x8800_0000` | allocatable physical RAM | `unsafe`な`FrameAllocator::new`で、このallocatorだけが排他的にclaim。upper boundはexclusive |
-| `0x8800_0000` | 128 MiB RAM upper bound | `PHYSICAL_MEMORY_END`。このaddress以上は絶対にallocateしない |
-| `0x1000_0000..0x1000_1000` | 16550 compatible UART MMIO | RAM外のdevice window。base `0x1000_0000`へvolatile access |
+| `0x8000_0000..0x8020_0000` | OpenSBI予約RAMとカーネル読み込み位置より下の領域 | アロケーターの対象外。OpenSBIイメージの実占有に加え、配置上の2 MiBを保守的に予約 |
+| `0x8020_0000` | カーネルの先頭とELFエントリーの配置位置 | `linker.ld`のロケーションカウンター、OpenSBIの`Next Address`、QEMUの`-kernel`が一致する位置 |
+| `0x8020_0000..__kernel_end` | `.text`、`.rodata`、`.data`、`.bss`、64 KiBの起動用スタック、ビットマップ | カーネル自身が占有。`__kernel_end`はリンカーが4 KiB境界で公開する可変のシンボル |
+| `align_up(__kernel_end, 0x1000)..0x8800_0000` | 割り当て可能な物理RAM | `unsafe`な`FrameAllocator::new`で一つのアロケーターだけが排他的に取得。上端は範囲に含まない |
+| `0x8800_0000` | 128 MiB RAMの上端 | `PHYSICAL_MEMORY_END`。このアドレス以上は割り当てない |
+| `0x1000_0000..0x1000_1000` | 16550互換UARTのMMIO | RAM外の機器用領域。ベースアドレス`0x1000_0000`へvolatileアクセス |
 
-## OpenSBI reservedとkernel start
+## OpenSBIの予約領域とカーネルの先頭
 
-QEMUのOpenSBI logではfirmware baseが`0x8000_0000`、MiniOSのnext addressが`0x8020_0000`です。
-firmwareの実image sizeだけを推測してfreeにせず、この2 MiB全域をallocatorから外します。これにより
-firmware versionで内部heapやscratch配置が変わってもkernelと衝突しません。
+QEMUのOpenSBIログでは、ファームウェアのベースアドレスは`0x8000_0000`、MiniOSの次アドレスは`0x8020_0000`です。
+ファームウェアの実際のイメージサイズだけを推測して未使用と見なさず、この2 MiB全域をアロケーターから外します。
+この予約により、ファームウェアのバージョンによって内部ヒープや作業領域の配置が変わっても、カーネルと衝突しません。
 
-## `__kernel_end`とallocatable RAM
+## `__kernel_end`から割り当て可能なRAMまで
 
-kernel sizeはbuildごとに変わるためfree startを固定addressにしません。linkerが全sectionとboot stackの後へ
-`__kernel_end`を置き、Rust側はaddressだけを取得して4 KiBへ上向きalignmentします。bitmapも`.bss`内にある
-のでこの境界より下です。allocator上端はQEMU `-m 128M`と同じ`0x8800_0000`です。
+カーネルの大きさはビルドごとに変わるため、未使用領域の開始位置を固定アドレスにはしません。
+リンカーは全セクションと起動用スタックの後ろへ`__kernel_end`を置きます。
+Rust側はそのアドレスだけを取得し、4 KiB境界へ上向きにそろえます。
+ビットマップも`.bss`内にあるため、この境界より下にあります。
+アロケーターの上端は、QEMUの`-m 128M`と一致する`0x8800_0000`です。
 
-OpenSBIから渡されるDTBは検証環境でRAM高位に置かれますが、現在のmilestoneは内容を読みません。将来DTBを
-保持して解析する段階では、そのblobの実rangeをDevice Treeから確定し、allocator予約へ追加する必要があります。
+OpenSBIから渡されるDTBは、検証環境ではRAMの高位に置かれますが、現在の段階では内容を読みません。
+将来DTBを解析するときは、Blobが実際に使う範囲をDevice Treeから確定し、アロケーターの予約領域へ追加する必要があります。
 
-## UARTはRAMではない
+## UARTをRAMとして扱わない
 
-`0x1000_0000`は128 MiB RAM範囲外ですがCPUのphysical address spaceにあります。normal load/store構文を
-使えてもdevice side effectを持つため、`read_volatile`/`write_volatile`以外でaccessしません。
+`0x1000_0000`は128 MiBのRAM範囲外ですが、CPUの物理アドレス空間には存在します。
+通常のロード命令とストア命令でアクセスできても、読み書きには機器への作用があるため、`read_volatile`と`write_volatile`以外は使いません。
 
-[architecture](architecture.md) | [troubleshooting](troubleshooting.md)
+[全体構成](architecture.md) | [問題の切り分け方](troubleshooting.md)

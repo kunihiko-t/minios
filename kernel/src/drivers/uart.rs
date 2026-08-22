@@ -1,6 +1,6 @@
 use core::fmt;
 
-// QEMU virt の 16550 互換 UART に予約された固定 MMIO ベースアドレスである。
+// QEMU virtの16550互換UARTに予約された、固定のMMIOベースアドレスである。
 const UART_BASE: usize = 0x1000_0000;
 const LINE_STATUS_OFFSET: usize = 5;
 const RECEIVE_READY: u8 = 1 << 0;
@@ -12,8 +12,8 @@ pub struct Uart {
 
 impl Uart {
     pub const fn qemu_virt() -> Self {
-        // Safety: UART_BASE は QEMU virt の仕様で UART レジスタを指す固定アドレスであり、
-        // この型は RISC-V QEMU カーネルだけで使うため、この生ポインタは MMIO に限定される。
+        // Safety: `UART_BASE`はQEMU virtの仕様でUARTレジスターを指す固定アドレスである。
+        // この型はRISC-V向けQEMUカーネルだけで使うため、生ポインターの参照先はMMIO領域に限られる。
         Self {
             base: UART_BASE as *mut u8,
         }
@@ -23,8 +23,8 @@ impl Uart {
         while self.line_status() & TRANSMIT_READY == 0 {
             core::hint::spin_loop();
         }
-        // Safety: base は qemu_virt が作る 16550 MMIO 領域であり、offset 0 は送信保持
-        // レジスタである。volatile によりコンパイラがデバイス書き込みを省略しない。
+        // Safety: `base`は`qemu_virt`が作る16550のMMIO領域であり、オフセット0は送信保持レジスターである。
+        // volatileな書き込みにより、コンパイラーが機器への操作を省略しない。
         unsafe { core::ptr::write_volatile(self.base, byte) };
     }
 
@@ -32,8 +32,8 @@ impl Uart {
         while !self.has_byte() {
             core::hint::spin_loop();
         }
-        // Safety: base は qemu_virt が作る 16550 MMIO 領域であり、offset 0 は受信保持
-        // レジスタである。volatile によりデバイス読み出しをキャッシュしない。
+        // Safety: `base`は`qemu_virt`が作る16550のMMIO領域であり、オフセット0は受信保持レジスターである。
+        // volatileな読み取りにより、コンパイラーが前回の値を再利用しない。
         unsafe { core::ptr::read_volatile(self.base) }
     }
 
@@ -42,8 +42,8 @@ impl Uart {
     }
 
     fn line_status(&self) -> u8 {
-        // Safety: base + 5 は 16550 Line Status Register であり、この固定オフセットは
-        // QEMU virt の UART 仕様に従う。volatile 読み出しで状態ビットを毎回取得する。
+        // Safety: `base + 5`は16550のLine Status Registerであり、この固定オフセットはQEMU virtのUART仕様に従う。
+        // volatileな読み取りで状態ビットを毎回取得する。
         unsafe { core::ptr::read_volatile(self.base.add(LINE_STATUS_OFFSET)) }
     }
 }

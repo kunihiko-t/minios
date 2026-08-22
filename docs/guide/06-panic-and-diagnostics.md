@@ -1,51 +1,51 @@
-# 6. panicと緊急診断
+# 6. パニックと緊急診断
 
 ## 学習目標
 
-`no_std` kernelのpanic handlerが残す情報と、通常console lockを避けるemergency UART経路、
-診断後にfailure resetする理由を説明できるようになります。
+`no_std`カーネルのパニックハンドラーが残す情報を学びます。
+通常のコンソールロックを避ける緊急用UARTと、診断後に異常終了する理由も説明できるようになります。
 
 ## 背景
 
-panicはformat処理中や割り込み中にも起こります。通常consoleの内部状態やlockがすでに壊れている
-可能性があるため、同じ経路を再利用するとdeadlockし、最も必要な診断が消えます。回復不能な
-状態で処理を続ければ、元の原因とは別の二次障害も生じます。
+パニックは、書式処理中や割り込み中にも起こります。
+通常のコンソール内部の状態やロックがすでに壊れている可能性があるため、同じ経路を再利用するとデッドロックし、必要な診断を出せなくなります。
+回復方法を定めていない状態で処理を続けると、元の原因とは別の二次障害も起こります。
 
 ## 実装
 
-[`panic`](../../kernel/src/main.rs)はmessage、取得できる場合のsource fileとline、初期化済みなら
-boot hart IDを出します。hart IDは他の初期化より前にatomicへ記録します。
+[`panic`](../../kernel/src/main.rs)は、メッセージ、取得できる場合のソースファイルと行番号、初期化済みであれば起動ハートIDを出力します。
+ハートIDは、ほかの初期化より前にアトミック変数へ記録します。
 
-[`emergency_print`](../../kernel/src/console.rs)は局所的な`Uart`を作り、共有formatterやconsole lockを
-取りません。出力後はSBI System Resetへ`Shutdown`と`SystemFailure`を渡します。SBI call自体が
-失敗した場合も数値errorを直接UARTへ残し、S-mode割り込みを止めた`wfi` loopへ入ります。
+[`emergency_print`](../../kernel/src/console.rs)は局所的な`Uart`を作り、共有の書式処理とコンソールロックを使いません。
+出力後は、SBI System Resetへ`Shutdown`と`SystemFailure`を渡します。
+SBI呼び出し自体が失敗した場合も数値エラーをUARTへ直接残し、S-modeの割り込みを止めた`wfi`ループへ入ります。
 
 ## 実行と確認
 
-通常の回帰確認は次です。
+通常の回帰テストは次のコマンドで実行します。
 
 ```sh
 cargo xtask test trap
 ```
 
-panicを一時的に観察するときは`kernel_main`のtrap初期化後へ`panic!("exercise")`を置き、
-`cargo xtask run`で`MiniOS panic`、file、line、hart IDが揃うことを確認します。終了statusはfailureに
-なるのが正しいため、観察後は変更を戻します。
+パニックを観察するときは、`kernel_main`のトラップ初期化後へ一時的に`panic!("exercise")`を置きます。
+`cargo xtask run`を実行し、`MiniOS panic`、ファイル名、行番号、ハートIDがそろうことを確認してください。
+異常終了のため、終了ステータスは0以外が正しい結果です。
+確認後は変更を戻します。
 
 ## よくある失敗
 
-- panic後に無出力で停止: panic handlerが通常`println!`を通していないか確認します。
-- file/lineが出ない: `PanicInfo::location()`は常に存在するとは限りません。`None`分岐も必要です。
-- panic後も実行が続く: recovery規約がないのでSBI failure resetへ必ず到達させます。
-- 診断中にallocationする: heapもallocatorの整合性も信用できません。固定bufferすら不要な経路を
-  小さく保ちます。
+- パニック後に何も出ず停止する：パニックハンドラーが通常の`println!`を使っていないか確認します。
+- ファイル名や行番号が出ない：`PanicInfo::location()`は常に値を返すとは限らないため、`None`も扱います。
+- パニック後も実行が続く：回復方法を定めていないため、SBIの異常終了リセットへ到達させます。
+- 診断中にメモリーを確保する：ヒープとアロケーターの整合性を信用できないため、固定バッファーも不要な小さい経路に保ちます。
 
 ## 演習
 
-通常consoleがlock保持中にpanicした場合のwait graphを書いてください。次にemergency pathが
-参照する状態を列挙し、UART baseとformat arguments以外の共有mutable stateがないことを確認します。
+通常のコンソールがロックを持ったままパニックした場合について、待ち関係の図を書いてください。
+次に緊急経路が参照する状態を列挙し、UARTのベースアドレスと書式引数以外に、共有された可変状態がないことを確認します。
 
 ## 次の章
 
-[第5章](05-uart.md)へ戻れます。次は[第7章: 例外・割り込み](07-traps-and-interrupts.md)で、
-CPUが通常control flowを離れる入口を作ります。
+[第5章](05-uart.md)へ戻れます。
+次は[第7章「例外と割り込み」](07-traps-and-interrupts.md)で、CPUが通常の制御の流れから離れる入口を作ります。

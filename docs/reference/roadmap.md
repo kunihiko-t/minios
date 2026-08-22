@@ -1,39 +1,40 @@
-# 発展roadmap
+# 発展ロードマップ
 
-現在のacceptanceを各段階で維持し、次の順序で一つずつ設計します。各項目の「前提」が前段階の完了gateです。
+現在の受け入れテストを各段階で保ちながら、次の順序で一つずつ設計します。
+各項目の「前提」が、実装を始めるための条件です。
 
 1. **Device Tree**
-   - 前提: OpenSBIの`a1`をboot ABIどおり保持できる。
-   - 完了: DTB parserをhost fixtureで検証し、RAM、UART、timebaseをfixed constantなしで取得する。
-2. **dynamic heap**
-   - 前提: usable RAMとreserved rangeをDevice Treeで確定し、physical page ownershipを守れる。
-   - 完了: allocation/deallocation/exhaustionをtestし、kernel collectionの失敗規約を定める。
-3. **Sv39 virtual memory**
-   - 前提: page-table pageをphysical allocatorとheapから安全に所有できる。
-   - 完了: kernel section permission、identity移行、UART MMIO mapping、page fault診断をQEMUで確認する。
-4. **user mode**
-   - 前提: kernel/user mappingとtrap時のkernel stackがある。
-   - 完了: `sret`でU-mode codeを実行し、privileged operationが安全にtrapする。
-5. **system calls**
-   - 前提: user trap frameを保存してkernelへ戻れる。
-   - 完了: syscall number/argument/return ABI、unknown number、bad pointerを検証する。
-6. **processes**
-   - 前提: syscallでyield/exitでき、address space、kernel stack、trap frameを所有できる。
-   - 完了: single-hart schedulerで複数processのcontext switchとcleanupを検証する。
-7. **VirtIO block**
-   - 前提: heap、physical/virtual変換、interrupt wait、DMA buffer ownershipがある。
-   - 完了: read-only sector I/O、descriptor exhaustion、device errorをQEMUで検証する。
-8. **filesystem**
-   - 前提: block sector readが安定し、buffer lifetimeを管理できる。
-   - 完了: small read-only filesystemでlookup/readとcorrupt metadata拒否を検証する。
-9. **multi-hart**
-   - 前提: schedulerとallocatorのshared state、interrupt-critical sectionが明確である。
-   - 完了: per-hart stack、IPI、lock、atomic orderingを追加しrace testを設計する。
-10. **networking**
-    - 前提: VirtIO queue、timer timeout、buffer ownership、concurrent process実行がある。
-    - 完了: VirtIO net、packet parser、ARP/IPの順にmalformed packetとtimeoutを検証する。
-11. **real hardware**
-    - 前提: Device Tree駆動でQEMU fixed assumptionを除去し、対象boardのfirmware/driver契約を読める。
-    - 完了: serial-only bootから始め、実機ごとのtimer、interrupt controller、storageを段階移植する。
+   - 前提：OpenSBIの`a1`を起動ABIどおり保持できる。
+   - 完了：DTBパーサーをホスト上のテスト用データで検証し、RAM、UART、タイムベースを固定定数なしで取得する。
+2. **動的ヒープ**
+   - 前提：利用可能なRAMと予約範囲をDevice Treeから確定し、物理ページの所有権を守れる。
+   - 完了：確保、解放、枯渇をテストし、カーネル内のコレクションが確保に失敗したときの規約を定める。
+3. **Sv39仮想メモリー**
+   - 前提：ページテーブル用のページを、物理アロケーターとヒープから安全に所有できる。
+   - 完了：カーネル各セクションのアクセス権、恒等写像からの移行、UARTのMMIO写像、ページフォールトの診断をQEMUで確認する。
+4. **ユーザーモード**
+   - 前提：カーネルとユーザーの写像を分離し、トラップ時に使うカーネルスタックを用意できる。
+   - 完了：`sret`でU-modeのコードを実行し、特権操作が安全にトラップすることを確認する。
+5. **システムコール**
+   - 前提：ユーザーのトラップフレームを保存してカーネルへ戻れる。
+   - 完了：システムコール番号、引数、戻り値のABI、未知の番号、不正なポインターを検証する。
+6. **プロセス**
+   - 前提：システムコールで`yield`と`exit`を実行でき、アドレス空間、カーネルスタック、トラップフレームを所有できる。
+   - 完了：シングルハートのスケジューラーで、複数プロセスのコンテキスト切り替えと後始末を検証する。
+7. **VirtIOブロック機器**
+   - 前提：ヒープ、物理アドレスと仮想アドレスの変換、割り込み待ち、DMAバッファーの所有権がある。
+   - 完了：読み取り専用のセクター入出力、ディスクリプター枯渇、機器エラーをQEMUで検証する。
+8. **ファイルシステム**
+   - 前提：ブロック機器からセクターを安定して読み、バッファーの生存期間を管理できる。
+   - 完了：小さな読み取り専用ファイルシステムで検索と読み取り、壊れたメタデータの拒否を検証する。
+9. **マルチハート**
+   - 前提：スケジューラーとアロケーターの共有状態、割り込み禁止区間が明確である。
+   - 完了：ハートごとのスタック、IPI、ロック、アトミックなメモリー順序を追加し、競合を調べるテストを設計する。
+10. **ネットワーク**
+    - 前提：VirtIOキュー、タイマーの時間切れ、バッファーの所有権、複数プロセスの並行実行がある。
+    - 完了：VirtIOネットワーク、パケットパーサー、ARP、IPの順に、不正なパケットと時間切れを検証する。
+11. **実機**
+    - 前提：Device Treeから設定を取得してQEMUの固定値を除き、対象ボードのファームウェアとドライバーの規約を読める。
+    - 完了：シリアル出力だけの起動から始め、実機ごとのタイマー、割り込みコントローラー、ストレージを段階的に移植する。
 
-学習上の理由と各段階のexerciseは[第12章](../guide/12-next-steps.md)を参照してください。
+学習上の理由と各段階の演習は[第12章](../guide/12-next-steps.md)を参照してください。

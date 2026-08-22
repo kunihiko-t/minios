@@ -16,20 +16,20 @@ pub fn decode_scause(value: usize) -> TrapCause {
 
 #[cfg(target_arch = "riscv64")]
 pub fn init() {
-    // Safety: trap.SがC ABI symbolを4-byte整列で必ず公開するRISC-V buildだけで有効であり、
-    // addressを形成するだけでentry codeのmemoryを読み書きしない。
+    // Safety: RISC-Vビルドでは、`trap.S`が4バイト境界にそろえたC ABIシンボルを必ず公開する。
+    // この処理はアドレスを作るだけで、入口コードのメモリーを読み書きしない。
     unsafe extern "C" {
         fn __trap_entry();
     }
 
     let direct_entry = __trap_entry as *const () as usize;
-    // Safety: kernel_main は OpenSBI から S-mode で呼ばれ、__trap_entry は下位 2 bit が
-    // 0 になる 4-byte 整列済み BASE であり、Direct mode の全トラップを保存フレームで受ける。
+    // Safety: `kernel_main`はOpenSBIからS-modeで呼ばれている。
+    // `__trap_entry`は下位2ビットが0になる4バイト境界のBASEであり、Directモードの全トラップを保存フレームで受ける。
     unsafe { super::csr::write_stvec(direct_entry) };
 }
 
 #[cfg(target_arch = "riscv64")]
-// trap.S が生シンボル名と C ABI で call するため、この名前と ABI を変えてはならない。
+// `trap.S`がシンボル名とC ABIを直接指定して呼ぶため、この名前とABIを変えてはならない。
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_trap_handler() {
     let scause = super::csr::read_scause();
@@ -37,8 +37,8 @@ pub extern "C" fn rust_trap_handler() {
     let stval = super::csr::read_stval();
     let cause = decode_scause(scause);
 
-    // supervisor timer interrupt の code 5 だけを通常復帰可能な割り込みとして扱う。
-    // SBI が再設定を拒否した場合は次回 deadline を保証できないため、診断して失敗停止する。
+    // Supervisorタイマー割り込みの原因コード5だけを、通常実行へ戻れる割り込みとして扱う。
+    // SBIが再設定を拒否すると次の発火時刻を保証できないため、診断を出して異常終了する。
     if cause == TrapCause::Interrupt(5) {
         if let Err(error) = crate::time::handle_interrupt() {
             crate::fatal_timer_error("interrupt rearm", error);
@@ -47,10 +47,9 @@ pub extern "C" fn rust_trap_handler() {
     }
 
     #[cfg(feature = "qemu-test-trap")]
-    // RISC-V 特権仕様で breakpoint 同期例外の cause code は 3 に固定されるため、テスト成功分岐はこの値だけを受ける。
+    // RISC-V特権仕様では、同期ブレークポイント例外の原因コードが3に固定されているため、テスト成功分岐はこの値だけを受ける。
     if cause == TrapCause::Exception(3) {
-        // 同期例外は通常出力の途中に発生し得るため、共有ロックを使わない
-        // 局所 UART の緊急経路で marker を出す。
+        // 同期例外は通常出力の途中でも起こり得るため、共有ロックを使わない局所UARTの緊急経路でマーカーを出す。
         crate::console::emergency_print(format_args!("[MINIOS_TEST] trap: ok\r\n"));
         super::sbi::system_reset(
             super::sbi::ResetType::Shutdown,
@@ -58,8 +57,8 @@ pub extern "C" fn rust_trap_handler() {
         );
     }
 
-    // 予期しないトラップでは通常フォーマッタが保有中かもしれないため、
-    // 直接 UART 経路で原因と 3 CSR を一度に記録する。
+    // 予期しないトラップでは通常の書式処理がロックを保持している可能性がある。
+    // UARTへ直接書く経路を使い、原因と三つのCSRを一度に記録する。
     crate::console::emergency_print(format_args!(
         "MiniOS trap: cause={cause:?} scause={scause:#018x} sepc={sepc:#018x} stval={stval:#018x}\r\n"
     ));

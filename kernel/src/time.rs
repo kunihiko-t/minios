@@ -4,13 +4,13 @@ pub const TIMEBASE_HZ: u64 = 10_000_000;
 pub const TICKS_PER_SECOND: u64 = 100;
 pub const CYCLES_PER_TICK: u64 = 100_000;
 
-// QEMU virt の timebase と選んだ tick 周波数が固定周期と一致することをコンパイル時に保つ。
+// QEMU virtのタイムベースと選んだティック周波数が固定周期と一致することを、コンパイル時に確かめる。
 const _: () = assert!(TIMEBASE_HZ / TICKS_PER_SECOND == CYCLES_PER_TICK);
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 pub fn ticks() -> u64 {
-    // tick 値は他状態の公開を担わない単独の統計値なので Relaxed load で十分である。
+    // ティックはほかの状態の公開を担わない単独の統計値なので、`Relaxed`な読み取りで十分である。
     TICKS.load(Ordering::Relaxed)
 }
 
@@ -27,20 +27,20 @@ pub fn init() -> Result<(), minios_kernel::sbi::SbiError> {
     schedule_next()?;
 
     let sie = crate::arch::riscv64::csr::read_sie();
-    // Safety: trap::init 後で code 5 のハンドラと tick 状態が初期化済みであり、
-    // 既存の WARL bit を保存したまま STIE (bit 5) だけを有効にする。
+    // Safety: `trap::init`後であり、原因コード5のハンドラーとティックの状態は初期化済みである。
+    // 既存のWARLビットを保ったまま、STIE（ビット5）だけを有効にする。
     unsafe { crate::arch::riscv64::csr::write_sie(sie | (1 << 5)) };
 
     let sstatus = crate::arch::riscv64::csr::read_sstatus();
-    // Safety: STIE と最初の絶対 deadline を先に設定済みなので、既存 bit を保存しつつ
-    // 最後に global SIE (bit 1) を有効化しても未処理の割り込みへは入らない。
+    // Safety: STIEと最初の絶対デッドラインを先に設定している。
+    // 既存ビットを保ったまま、最後に全体のSIE（ビット1）を有効にしても、未設定の割り込み処理へは入らない。
     unsafe { crate::arch::riscv64::csr::write_sstatus(sstatus | (1 << 1)) };
     Ok(())
 }
 
 #[cfg(target_arch = "riscv64")]
 pub fn handle_interrupt() -> Result<(), minios_kernel::sbi::SbiError> {
-    // 単一 hart の handler だけが書き込み、読者は経過値だけを観測するため Relaxed で十分である。
+    // シングルハートのハンドラーだけが書き込み、読み手は経過値だけを観測するため、`Relaxed`で十分である。
     TICKS.fetch_add(1, Ordering::Relaxed);
     schedule_next()
 }

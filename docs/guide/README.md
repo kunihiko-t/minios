@@ -1,29 +1,29 @@
 # MiniOS学習ガイド
 
-このガイドは前章の成果を次章の前提にするhands-on教材です。初回は1から12まで順に読み、実装中は
-各章の「実行と確認」「よくある失敗」へ戻ってください。
+このガイドは、前の章で作った機能を次の章の土台にする実習教材です。
+初めて読むときは第1章から第12章まで順に進み、実装中は各章の「実行と確認」と「よくある失敗」を参照してください。
 
 ## 全12章
 
-1. [MiniOSで学ぶこと](01-introduction.md) — milestoneの範囲とhost/guest境界を分類できる。
-2. [開発環境とQEMU](02-setup.md) — Rust targetとQEMUを再現可能なcommandで診断できる。
-3. [`no_std`とlink配置](03-no-std-and-linking.md) — ELF sectionとkernel memory境界を説明できる。
-4. [OpenSBIからの起動](04-boot-with-opensbi.md) — firmware ABIからRust entryまでを追跡できる。
-5. [UARTで文字を出す・受け取る](05-uart.md) — volatile MMIOとconsole層の責務を区別できる。
-6. [panicと緊急診断](06-panic-and-diagnostics.md) — lock不要のfailure pathを設計できる。
-7. [RISC-Vの例外・割り込み](07-traps-and-interrupts.md) — CSRとtrap frameから原因を読める。
-8. [supervisor timer割り込み](08-timer-interrupts.md) — SBI deadlineと100 Hz tickを説明できる。
-9. [物理memoryとpage管理](09-physical-memory.md) — bitmap ownershipとstats不変条件を検証できる。
-10. [UART対話shell](10-shell.md) — bounded inputとcommand作用を分離できる。
-11. [test harnessの仕組み](11-test-harness.md) — host/QEMU/CIを同じ14 phaseで検証できる。
-12. [次に作るもの](12-next-steps.md) — 11個の発展項目をprerequisite順に計画できる。
+1. [MiniOSで学ぶこと](01-introduction.md)：到達点を知り、ホストとゲストの境界を分類する。
+2. [開発環境とQEMU](02-setup.md)：RustターゲットとQEMUを、再現可能なコマンドで診断する。
+3. [`no_std`とリンク配置](03-no-std-and-linking.md)：ELFセクションとカーネルのメモリー境界を説明する。
+4. [OpenSBIからの起動](04-boot-with-opensbi.md)：ファームウェアのABIからRustの入口までを追跡する。
+5. [UARTで文字を送受信する](05-uart.md)：volatileなMMIOとコンソール層の責務を区別する。
+6. [パニックと緊急診断](06-panic-and-diagnostics.md)：ロックを使わない異常終了経路を設計する。
+7. [RISC-Vの例外と割り込み](07-traps-and-interrupts.md)：CSRとトラップフレームから原因を読み取る。
+8. [Supervisorタイマー割り込み](08-timer-interrupts.md)：SBIのデッドラインと100 Hzのティックを説明する。
+9. [物理メモリーとページ管理](09-physical-memory.md)：ビットマップの所有権と統計値の不変条件を検証する。
+10. [UART対話シェル](10-shell.md)：入力長の制限とコマンドの作用を分離する。
+11. [テストハーネスの仕組み](11-test-harness.md)：ホスト、QEMU、CIを同じ14段階で検証する。
+12. [次に作るもの](12-next-steps.md)：11個の発展項目を前提条件の順に計画する。
 
-## navigationの約束
+## ガイド内の移動
 
-各章末の「次の章」には前章、次章、必要なreferenceへのlinkがあります。初回はnext linkをたどり、
-途中で用語やaddressを確認したらbrowserの戻る操作で同じ位置へ戻ります。第1章のpreviousと第12章の
-nextはこの索引です。章番号付きfile `01-...md`から`12-...md`はすべて、`学習目標`、`背景`、`実装`、
-`実行と確認`、`よくある失敗`、`演習`、`次の章`の7 sectionを持ち、`cargo xtask check`が構造を検査します。
+各章末の「次の章」には、前後の章と必要な資料へのリンクがあります。
+最初は「次の章」のリンクをたどり、用語やアドレスを確認したときはブラウザーの戻る操作で同じ位置へ戻ると読み進めやすくなります。
+第1章の前と第12章の次は、この索引です。
+`01-...md`から`12-...md`までの各章は、「学習目標」「背景」「実装」「実行と確認」「よくある失敗」「演習」「次の章」の七つの節を持ちます。
+`cargo xtask check`は、この構造も検査します。
 
-[repository README](../../README.md) | [architecture](../reference/architecture.md) |
-[troubleshooting](../reference/troubleshooting.md)
+[リポジトリのREADME](../../README.md) | [全体構成](../reference/architecture.md) | [問題の切り分け方](../reference/troubleshooting.md)

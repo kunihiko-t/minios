@@ -1,12 +1,12 @@
 # MiniOS
 
-MiniOSはRustとRISC-V 64でOSの基礎を段階的に学ぶための、小さな`no_std` kernelです。QEMU `virt`上の
-OpenSBIからS-modeで起動し、UART shell、trap、100 Hz timer、bitmap物理page allocatorを日本語教材と
-再現可能なtest harnessと一緒に提供します。
+MiniOSは、RustとRISC-V 64でOSの基礎を段階的に学ぶための小さな`no_std`カーネルです。
+QEMU `virt`上のOpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーターを備えています。
+日本語の学習ガイドと、同じ結果を繰り返し確認できるテストハーネスも用意しています。
 
-## quick start: 五つのcommand
+## 五つのコマンドで試す
 
-Rust 1.98.0、RISC-V target、QEMU 8.2.0以上を用意し、repository rootで順に実行します。
+Rust 1.98.0、RISC-Vターゲット、QEMU 8.2.0以上を用意し、リポジトリのルートで次のコマンドを順に実行します。
 
 ```sh
 cargo xtask setup
@@ -16,8 +16,8 @@ cargo xtask test
 cargo xtask check
 ```
 
-`cargo xtask run`はQEMUを対話起動します。promptが出たら次のように確認し、最後は`shutdown`で正常終了
-してください。
+`cargo xtask run`はQEMUを対話モードで起動します。
+プロンプトが表示されたら次のように動作を確かめ、最後に`shutdown`で正常終了してください。
 
 ```text
 MiniOS booting...
@@ -39,64 +39,66 @@ minios> shutdown
 shutting down
 ```
 
-`uptime`の数値は実行時点で変わりますが、`uptime: <n> ms`の直後に`ticks: <n>`が1行ずつ出ます。
-single-hart構成の`info`はbannerを維持し、その次の行で`hart id: 0`を報告します。
+`uptime`の数値は実行時点で変わりますが、`uptime: <n> ms`の直後に`ticks: <n>`が1行ずつ表示されます。
+シングルハート構成の`info`は、バナーに続けて`hart id: 0`を表示します。
 
-## supported matrix
+## 対応環境
 
-| 区分 | 対応範囲 | 検証・制約 |
+| 区分 | 対応範囲 | 検証条件と制約 |
 | --- | --- | --- |
-| host | Apple Silicon macOS | 主開発環境、QEMU 11.1.0で検証 |
-| host | Linux / Ubuntu 24.04 | GitHub Actions、QEMU 8.2 seriesを互換下限に使用 |
-| Rust | 1.98.0 stable | rustfmt、Clippy、`riscv64gc-unknown-none-elf`を固定 |
-| guest | RISC-V RV64GC / QEMU `virt` | OpenSBI、S-mode、1 hart、128 MiB RAM |
-| console | 16550 compatible UART | MMIO base `0x1000_0000`、QEMU serial stdio |
+| ホスト | Apple Silicon搭載macOS | 主な開発環境としてQEMU 11.1.0で検証 |
+| ホスト | LinuxおよびUbuntu 24.04 | GitHub Actionsで検証し、QEMU 8.2系を互換性の下限として使用 |
+| Rust | 安定版1.98.0 | rustfmt、Clippy、`riscv64gc-unknown-none-elf`を固定 |
+| ゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、1ハート、128 MiB RAM |
+| コンソール | 16550互換UART | MMIOベース`0x1000_0000`、QEMUのシリアル標準入出力 |
 
-Windows host、別QEMU machine、multi-hart、実機は現在のacceptance対象外です。
+Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在の受け入れテストに含まれません。
 
 ## 学習ガイド
 
-全体索引と各章のlearning outcomeは[学習ガイド](docs/guide/README.md)にあります。
+全体の索引と各章の到達目標は[学習ガイド](docs/guide/README.md)にあります。
 
 1. [MiniOSで学ぶこと](docs/guide/01-introduction.md)
 2. [開発環境とQEMU](docs/guide/02-setup.md)
-3. [`no_std`とlink配置](docs/guide/03-no-std-and-linking.md)
+3. [`no_std`とリンク配置](docs/guide/03-no-std-and-linking.md)
 4. [OpenSBIからの起動](docs/guide/04-boot-with-opensbi.md)
 5. [UART](docs/guide/05-uart.md)
-6. [panicと緊急診断](docs/guide/06-panic-and-diagnostics.md)
-7. [例外・割り込み](docs/guide/07-traps-and-interrupts.md)
-8. [timer割り込み](docs/guide/08-timer-interrupts.md)
-9. [物理page管理](docs/guide/09-physical-memory.md)
-10. [UART shell](docs/guide/10-shell.md)
-11. [test harness](docs/guide/11-test-harness.md)
+6. [パニックと緊急診断](docs/guide/06-panic-and-diagnostics.md)
+7. [例外と割り込み](docs/guide/07-traps-and-interrupts.md)
+8. [タイマー割り込み](docs/guide/08-timer-interrupts.md)
+9. [物理ページ管理](docs/guide/09-physical-memory.md)
+10. [UARTシェル](docs/guide/10-shell.md)
+11. [テストハーネス](docs/guide/11-test-harness.md)
 12. [次に作るもの](docs/guide/12-next-steps.md)
 
-## architectureとreference
+## 設計資料
 
-- [全体architectureと8-step boot flow](docs/reference/architecture.md)
-- [QEMU `virt` memory map](docs/reference/memory-map.md)
+- [全体構成と八つの起動段階](docs/reference/architecture.md)
+- [QEMU `virt`のメモリーマップ](docs/reference/memory-map.md)
 - [用語集](docs/reference/glossary.md)
-- [troubleshooting](docs/reference/troubleshooting.md)
-- [発展roadmap](docs/reference/roadmap.md)
+- [問題の切り分け方](docs/reference/troubleshooting.md)
+- [発展ロードマップ](docs/reference/roadmap.md)
 
-## test
+## テスト
 
-focused testは`cargo xtask test [all|boot|trap|timer|memory|shell]`、release gateは次です。
+対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|shell]`を使います。
+リリース前の全検査は次のコマンドで実行します。
 
 ```sh
 cargo xtask check
 ```
 
-format、Markdown link、guide構造、Clippy、cross build、host tests、QEMU 5経路を14 phaseで実行します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、Clippy、クロスビルド、ホストテスト、QEMUの5経路を14段階で検査します。
 
-## current limitations
+## 現在の制約
 
-dynamic heap、Sv39 virtual memory、user mode、system calls、process、VirtIO、filesystem、network、
-multi-hart、Device Tree解析、実機driverは未実装です。hardware address、10 MHz timebase、128 MiB上端は
-QEMU `virt`へ固定しています。shellはprintable ASCII最大128 bytesで、永続storageもsecurity境界も
-提供しません。
+動的ヒープ、Sv39仮想メモリー、ユーザーモード、システムコール、プロセス、VirtIO、ファイルシステム、ネットワーク、マルチハート、Device Tree解析、実機ドライバーは未実装です。
+ハードウェアアドレス、10 MHzのタイムベース、128 MiBの上端はQEMU `virt`に固定しています。
+シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
+永続ストレージとセキュリティー境界は提供しません。
 
-## license status
+## ライセンス
 
-このrepositoryには現時点で`LICENSE` fileがありません。したがって再利用・再配布条件はまだ明示
-されていません。公開利用へ移す前に、ownerが意図するlicenseを選び`LICENSE`とこの節を更新してください。
+このリポジトリには、現時点で`LICENSE`ファイルがありません。
+そのため、再利用と再配布の条件はまだ明示されていません。
+公開利用へ移す前に、所有者がライセンスを選び、`LICENSE`とこの節を更新してください。

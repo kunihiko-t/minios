@@ -2,87 +2,86 @@
 
 ## 学習目標
 
-現在のsingle-hart、physical-address kernelから機能を広げるとき、依存関係を壊さない11段階の順序を
-説明し、各段階の最小testを考えられるようになります。
+現在のシングルハート、物理アドレスだけを使うカーネルから機能を広げるときの、11段階の依存関係を説明できるようになります。
+各段階で最初に書くテストも考えます。
 
 ## 背景
 
-OS機能は独立に見えても、hardware発見、memory allocation、address-space分離、privilege境界、
-永続I/Oの順に土台を必要とします。たとえばfilesystemを先に書いてもblock deviceもheapもなければ、
-失敗がどの層にあるか分かりません。現在の`cargo xtask check`を安全網として維持し、一段ずつpublic
-contractとacceptanceを追加します。
+OSの機能には、ハードウェアの発見、メモリーの確保、アドレス空間の分離、特権境界、永続的な入出力という土台があります。
+たとえばファイルシステムを先に書いても、ブロック機器とヒープがなければ、失敗した層を切り分けられません。
+現在の`cargo xtask check`を安全網として保ち、一段ずつ公開APIと受け入れ条件を追加します。
 
 ## 実装
 
-推奨順序と前提は次のとおりです。
+次の順序で進めると、各段階の前提を一つずつ確認できます。
 
-1. **Device Tree解析** — 前提: OpenSBIの`a1`でDTB addressを保持できていること。
-   [`entry.S`のboot ABI](../../kernel/src/arch/riscv64/entry.S)から
-   [`kernel_main`のDTB境界](../../kernel/src/main.rs)へ渡る値を起点に、固定addressを
-   node/propertyから読むpure parserとfixture testを先に作ります。
-2. **dynamic heap** — 前提: Device Treeでusable RAMを確認し、物理page allocatorがunique ownershipと
-   statsを守ること。[現在のframe ownership](../../kernel/src/memory/frame.rs)の上に最初はsmall
-   allocatorを載せ、allocation failureを明示します。
-3. **Sv39 virtual memory** — 前提: page-table nodeをheapで確保できること。identity mappingから始め、
-   [現在のlinker section境界](../../kernel/linker.ld)をpermission設計の入力にして、UART MMIOと
-   kernel section permissionをtestします。
-4. **user mode** — 前提: kernel/user address spaceをSv39で分離できること。
-   [現在のS-mode trap frame](../../kernel/src/arch/riscv64/trap.S)を拡張して`sret`でU-modeへ入り、
-   privileged instructionがtrapすることを確認します。
-5. **system calls** — 前提: user trap frameとkernel stackがあること。register ABIを固定し、未知syscallの
-   errorもtestします。[現在のcause分岐](../../kernel/src/arch/riscv64/trap.rs)がsyscall dispatchを
-   追加する境界です。
-6. **processとscheduler** — 前提: syscallでyield/exitでき、address spaceとkernel stackを所有できること。
-   [現在のsingle-hart shell loop](../../kernel/src/shell/mod.rs)の一つの実行主体を置き換える形で、
-   cooperative schedulingから始めます。
-7. **VirtIO block** — 前提: heap、physical/virtual address変換、interrupt待機があること。descriptor ringと
-   read-only sector testを作ります。[UART driverのMMIO境界](../../kernel/src/drivers/uart.rs)は、
-   volatile accessとdevice固有状態をdriver内へ閉じ込める最小例です。
-8. **filesystem** — 前提: VirtIO blockのsector readが安定していること。小さなread-only filesystemから
-   始め、壊れたmetadataを拒否します。[固定長line buffer](../../kernel/src/shell/line.rs)のように、
-   入力容量と拒否状態を型の境界で明示します。
-9. **multi-hart** — 前提: schedulerとallocatorのshared state境界が明確なこと。per-hart stack、IPI、lock、
-   atomic orderingを追加します。[現在のtick atomic](../../kernel/src/time.rs)のordering理由を読み、
-   複数writerへ変わる状態だけを改めて設計します。
-10. **networking** — 前提: VirtIO、interrupt、buffer ownership、timer timeout、concurrent schedulingが
-    あること。[command parserのpure logic分離](../../kernel/src/shell/command.rs)を手本に、VirtIO netから
-    packet parser、ARP/IPへ進み、device I/Oなしでmalformed packetをhost testします。
-11. **real hardware** — 前提: Device Tree駆動でQEMU固定値を除去し、必要driverのdatasheetとboot firmware
-    契約を確認できること。[RISC-V arch公開境界](../../kernel/src/arch/riscv64/mod.rs)と
-    [QEMU UART constructor](../../kernel/src/drivers/uart.rs)をboard依存実装から分離し、serial console
-    だけのbootから移植します。
+1. **Device Tree解析**
+   前提は、OpenSBIの`a1`でDTBアドレスを保持できていることです。
+   [`entry.S`の起動ABI](../../kernel/src/arch/riscv64/entry.S)から[`kernel_main`のDTB境界](../../kernel/src/main.rs)へ渡る値を起点にし、固定アドレスをノードとプロパティーから読む純粋なパーサーとテスト用データを先に作ります。
+2. **動的ヒープ**
+   前提は、Device Treeで利用可能なRAMを確認し、物理ページアロケーターが一意な所有権と統計値を守ることです。
+   [現在のフレーム所有権](../../kernel/src/memory/frame.rs)の上に小さなアロケーターを載せ、確保失敗を明示します。
+3. **Sv39仮想メモリー**
+   前提は、ページテーブルのノードをヒープで確保できることです。
+   恒等写像から始め、[現在のリンカーセクション境界](../../kernel/linker.ld)をアクセス権設計の入力にして、UARTのMMIOとカーネル各セクションのアクセス権をテストします。
+4. **ユーザーモード**
+   前提は、カーネルとユーザーのアドレス空間をSv39で分離できることです。
+   [現在のS-modeトラップフレーム](../../kernel/src/arch/riscv64/trap.S)を拡張して`sret`でU-modeへ入り、特権命令がトラップすることを確認します。
+5. **システムコール**
+   前提は、ユーザーのトラップフレームとカーネルスタックがあることです。
+   レジスターABIを固定し、未知のシステムコールがエラーになることもテストします。
+   [現在の原因分岐](../../kernel/src/arch/riscv64/trap.rs)が、システムコールの振り分けを追加する境界です。
+6. **プロセスとスケジューラー**
+   前提は、システムコールで`yield`と`exit`を実行でき、アドレス空間とカーネルスタックの所有権を持てることです。
+   [現在のシングルハート用シェルループ](../../kernel/src/shell/mod.rs)にある一つの実行主体を置き換える形で、協調的スケジューリングから始めます。
+7. **VirtIOブロック機器**
+   前提は、ヒープ、物理アドレスと仮想アドレスの変換、割り込み待ちがあることです。
+   ディスクリプターリングと読み取り専用のセクターテストを作ります。
+   [UARTドライバーのMMIO境界](../../kernel/src/drivers/uart.rs)は、volatileアクセスと機器固有の状態をドライバー内へ閉じ込める最小例です。
+8. **ファイルシステム**
+   前提は、VirtIOブロック機器からセクターを安定して読めることです。
+   小さな読み取り専用ファイルシステムから始め、壊れたメタデータを拒否します。
+   [固定長の行バッファー](../../kernel/src/shell/line.rs)と同じように、入力容量と拒否状態を型の境界で明示します。
+9. **マルチハート**
+   前提は、スケジューラーとアロケーターが共有する状態の境界が明確であることです。
+   ハートごとのスタック、IPI、ロック、アトミックなメモリー順序を追加します。
+   [現在のティック用アトミック変数](../../kernel/src/time.rs)を読み、書き手が複数になる状態だけを設計し直します。
+10. **ネットワーク**
+    前提は、VirtIO、割り込み、バッファーの所有権、タイマーの時間切れ、並行スケジューリングがあることです。
+    [コマンドパーサーの純粋ロジック](../../kernel/src/shell/command.rs)を手本に、VirtIOネットワーク、パケットパーサー、ARP、IPの順に進みます。
+    機器入出力なしで、不正なパケットをホストテストできるようにします。
+11. **実機**
+    前提は、Device Treeから設定を取得してQEMUの固定値を取り除き、必要なドライバーのデータシートと起動ファームウェアの規約を確認できることです。
+    [RISC-V固有コードの公開境界](../../kernel/src/arch/riscv64/mod.rs)と[QEMU UARTの生成処理](../../kernel/src/drivers/uart.rs)をボード依存の実装から分離し、シリアルコンソールだけの起動から移植します。
 
-詳細なmilestoneと完了条件は[発展roadmap](../reference/roadmap.md)にも整理しています。
+各段階の完了条件は[発展ロードマップ](../reference/roadmap.md)にも整理しています。
 
 ## 実行と確認
 
-各段階を始める前後で次を実行します。
+各段階を始める前と、実装を終えた後に次のコマンドを実行します。
 
 ```sh
 cargo xtask check
 ```
 
-新機能のfocused REDを先に観測し、GREEN後に14 phaseへ戻ります。新しいhardware pathを追加したら、
-host pure-logic testだけでなく専用QEMU markerまたはinteractive transcriptをacceptanceへ加えます。
+新機能について、まず失敗する小さいテストを確認し、実装後に14段階の全検査へ戻ります。
+新しいハードウェア経路を追加した場合は、ホスト上の純粋ロジックテストだけでなく、専用のQEMUマーカーか対話記録も受け入れ条件へ加えます。
 
 ## よくある失敗
 
-- 複数段階を一度に入れる: failure sourceが曖昧になります。前段のpublic contractをcommitしてから進みます。
-- fixed addressを新driverへ複製する: Device Tree段階の成果を使い、QEMU固有fallbackを一箇所にします。
-- heap導入後に無制限allocationする: allocation failureはkernelでも通常の境界条件です。
-- multi-hartを早期に入れる: single-hartで隠れていたownershipとinterrupt ordering問題が全層へ広がります。
+- 複数の段階を同時に実装する：失敗した層が分かりにくくなります。
+  前の段階の公開APIをコミットしてから進みます。
+- 固定アドレスを新しいドライバーへ複製する：Device Tree解析の結果を使い、QEMU固有の代替値は一か所に置きます。
+- ヒープ導入後に上限なく確保する：カーネルでもメモリー不足は通常の境界条件なので、失敗を処理します。
+- マルチハートを早い段階で導入する：シングルハートで見えなかった所有権と割り込み順序の問題が全層へ広がります。
 
 ## 演習
 
-最も興味のある項目を一つ選び、そのdirect prerequisite、host test可能なpure logic、QEMUでしか確認
-できない境界、失敗時diagnosticを四列の表にしてください。prerequisiteが未完なら、一つ前の項目へ
-戻って同じ表を作ります。
+最も興味のある項目を一つ選び、直接の前提条件、ホストでテストできる純粋ロジック、QEMUでしか確認できない境界、失敗時の診断を四列の表にしてください。
+前提条件が未完成なら、一つ前の項目へ戻って同じ表を作ります。
 
 ## 次の章
 
-[第11章: テストハーネス](11-test-harness.md)へ戻ると、発展中も維持するacceptanceの入口を
-確認できます。基礎教材の次は[発展roadmap](../reference/roadmap.md)を最終navigationとして開き、
-選んだmilestoneの前提と完了条件を書き出してください。[ガイド索引](README.md)から必要な章を再読し、
-[architecture](../reference/architecture.md)、[memory map](../reference/memory-map.md)、
-[用語集](../reference/glossary.md)、[troubleshooting](../reference/troubleshooting.md)も実装中の参照資料として
-使えます。
+[第11章「テストハーネスの仕組み」](11-test-harness.md)へ戻ると、発展中も保つ検査の入口を確認できます。
+次に[発展ロードマップ](../reference/roadmap.md)を開き、選んだ段階の前提と完了条件を書き出してください。
+[ガイド索引](README.md)、[全体構成](../reference/architecture.md)、[メモリーマップ](../reference/memory-map.md)、[用語集](../reference/glossary.md)、[問題の切り分け方](../reference/troubleshooting.md)も実装中の資料として使えます。

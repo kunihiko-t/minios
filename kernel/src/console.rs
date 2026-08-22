@@ -8,26 +8,25 @@ pub fn _print(arguments: fmt::Arguments<'_>) {
 }
 
 pub fn emergency_print(arguments: fmt::Arguments<'_>) {
-    // panic/トラップ経路では通常出力が整形中でも待たない。局所 UART から
-    // MMIO へ直接書き、共有フォーマッタロックやグローバル状態に依存しない。
+    // パニックやトラップでは、通常出力の書式処理が終わるのを待てない。
+    // 局所的なUARTからMMIOへ直接書き、共有の書式処理やグローバル状態に依存しない。
     let mut uart = Uart::qemu_virt();
     let _ = uart.write_fmt(arguments);
 }
 
 pub fn emergency_sbi_error(error: isize) {
-    // SBI reset 失敗時も通常出力の保有状態は信用できないため、
-    // emergency_print の局所 UART 経路だけを使う。
+    // SBIリセットが失敗した時点では通常出力の状態を信用できないため、`emergency_print`の局所UART経路だけを使う。
     emergency_print(format_args!("MiniOS: SBI reset error {error}\r\n"));
 }
 
 pub fn read_byte() -> u8 {
-    // 受信待ちは UART の状態レジスタを polling する。割り込み自体は有効なため、
-    // 待機中も supervisor timer の trap は通常どおり処理される。
+    // UARTの状態レジスターを繰り返し読み、受信を待つ。
+    // 割り込みは有効なため、待機中もSupervisorタイマーのトラップを処理できる。
     Uart::qemu_virt().read_byte()
 }
 
 pub fn write_byte(byte: u8) {
-    // shell の一文字 echo も通常出力と同じ UART MMIO 経路へ直列化して送る。
+    // シェルの1文字エコーも、通常出力と同じUARTのMMIO経路へ順に送る。
     Uart::qemu_virt().write_byte(byte);
 }
 

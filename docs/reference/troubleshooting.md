@@ -1,97 +1,84 @@
-# troubleshooting
+# 問題の切り分け方
 
-まず症状に最も近い項目を選び、diagnostic commandをそのままrepository rootで実行します。複数の
-原因を同時に直さず、最初の失敗を一つ解消して同じcommandを再実行してください。
+症状に最も近い項目を選び、診断コマンドをリポジトリのルートでそのまま実行してください。
+複数の原因を同時に直さず、最初の失敗を一つ解消してから同じコマンドを再実行します。
 
-## Rustが1.98.0 stableではない
+## Rustが安定版1.98.0ではない
 
-- **症状:** `Rust <version> is not supported; exact Rust 1.98.0 stable is required`、またはrustc versionの
-  parse errorで`cargo xtask setup`が停止します。
-- **diagnostic command:** `rustc --version && rustup show active-toolchain`
-- **likely cause:** 別stableを明示している、PATH上のrustcがrustup pinを迂回している、または
-  `1.98.0-nightly`/`-dev`のようなsuffix付きcompilerです。
-- **corrective action:** `rustup toolchain install 1.98.0`を実行し、repositoryの
-  `rust-toolchain.toml`が選ばれるshellから`cargo xtask setup`を再実行します。numeric部分だけを比較して
-  suffixを無視したり、pin fileを別versionへ変更したりしません。
+- **症状**：`Rust <version> is not supported; exact Rust 1.98.0 stable is required`、またはrustcのバージョン解析エラーで`cargo xtask setup`が停止する。
+- **診断コマンド**：`rustc --version && rustup show active-toolchain`
+- **考えられる原因**：別の安定版を明示している、`PATH`上のrustcがrustupの固定を迂回している、または`1.98.0-nightly`と`1.98.0-dev`のような接尾辞付きコンパイラーを使っている。
+- **修正方法**：`rustup toolchain install 1.98.0`を実行し、リポジトリの`rust-toolchain.toml`が選ばれるシェルから`cargo xtask setup`を再実行する。
+  数値部分だけを比較して接尾辞を無視したり、固定用ファイルを別のバージョンへ変更したりしない。
 
-## RISC-V targetがない
+## RISC-Vターゲットがない
 
-- **症状:** `can't find crate for core`または`Rust target riscv64gc-unknown-none-elf is not installed`。
-- **diagnostic command:** `rustup target list --installed --toolchain 1.98.0`
-- **likely cause:** 固定toolchainにbare-metal RISC-V target componentが導入されていません。
-- **corrective action:** `rustup target add riscv64gc-unknown-none-elf --toolchain 1.98.0`を実行し、
-  `cargo xtask setup`を再実行します。
+- **症状**：`can't find crate for core`、または`Rust target riscv64gc-unknown-none-elf is not installed`と表示される。
+- **診断コマンド**：`rustup target list --installed --toolchain 1.98.0`
+- **考えられる原因**：固定したツールチェーンに、ベアメタルRISC-V用のターゲット部品が入っていない。
+- **修正方法**：`rustup target add riscv64gc-unknown-none-elf --toolchain 1.98.0`を実行し、`cargo xtask setup`を再実行する。
 
 ## QEMUがない、または古い
 
-- **症状:** `qemu-system-riscv64 is not installed`、command not found、またはversion floor error。
-- **diagnostic command:** `qemu-system-riscv64 --version`
-- **likely cause:** QEMU未導入、PATH不一致、または8.2.0未満です。
-- **corrective action:** macOSは`brew install qemu`、Ubuntu/Debianは
-  `sudo apt-get install qemu-system-misc`を使い、`cargo xtask setup`で検出結果を確認します。
+- **症状**：`qemu-system-riscv64 is not installed`、`command not found`、または最低バージョンを満たさないというエラーが出る。
+- **診断コマンド**：`qemu-system-riscv64 --version`
+- **考えられる原因**：QEMUが未導入、`PATH`が一致していない、またはバージョンが8.2.0未満である。
+- **修正方法**：macOSでは`brew install qemu`、UbuntuとDebianでは`sudo apt-get install qemu-system-misc`を使い、`cargo xtask setup`で検出結果を確認する。
 
-## linker sectionが重なる
+## リンカーのセクションが重なる
 
-- **症状:** cross buildのlinkerがoverlap、region、relocation errorで停止します。
-- **diagnostic command:** `cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf`
-- **likely cause:** `0x8020_0000` start、4 KiB alignment、small data/BSS回収、boot stack、`__kernel_end`の
-  いずれかを壊しています。
-- **corrective action:** [`linker.ld`](../../kernel/linker.ld)を[memory map](memory-map.md)と照合し、
-  `cargo test -p xtask cargo::tests::linker_places_small_data_and_bss_probes_inside_boundaries`も実行します。
+- **症状**：クロスビルドのリンカーが、領域の重複または再配置のエラーで停止する。
+- **診断コマンド**：`cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf`
+- **考えられる原因**：開始位置`0x8020_0000`、4 KiBのアラインメント、小さなデータとBSSの回収、起動用スタック、`__kernel_end`のいずれかが崩れている。
+- **修正方法**：[`linker.ld`](../../kernel/linker.ld)を[メモリーマップ](memory-map.md)と照合し、`cargo test -p xtask cargo::tests::linker_places_small_data_and_bss_probes_inside_boundaries`も実行する。
 
 ## UART出力がない
 
-- **症状:** OpenSBIまでは見えるが`[ok] traps`や`MiniOS booting...`が一行も出ません。
-- **diagnostic command:** `cargo xtask test boot`
-- **likely cause:** kernel entryへ到達していない、stack/BSS初期化が壊れた、UART base `0x1000_0000`または
-  Line Status bitを誤っています。
-- **corrective action:** transcriptの`Domain0 Next Address`が`0x8020_0000`か確認し、`entry.S`の`sp`と
-  BSS loop、UART transmit-ready bit 5、volatile writeの順に調べます。
+- **症状**：OpenSBIの出力は見えるが、`[ok] traps`と`MiniOS booting...`が一行も出ない。
+- **診断コマンド**：`cargo xtask test boot`
+- **考えられる原因**：カーネルの入口へ到達していない、スタックかBSSの初期化が壊れている、UARTのベースアドレス`0x1000_0000`かLine Status Registerのビットを誤っている。
+- **修正方法**：記録内の`Domain0 Next Address`が`0x8020_0000`か確認し、`entry.S`の`sp`、BSSループ、UARTの送信可能ビット5、volatileな書き込みの順に調べる。
 
-## 起動直後にtrapする
+## 起動直後にトラップする
 
-- **症状:** prompt前に`unexpected trap`と`scause/sepc/stval`が出る、または同じtrapを繰り返します。
-- **diagnostic command:** `cargo xtask test trap`
-- **likely cause:** `stvec` alignment、trap frame offset、save/restore非対称、SIEを準備前に有効化した可能性が
-  あります。
-- **corrective action:** `scause`のinterrupt bit/cause codeをdecodeし、`sepc`をsymbol位置へ対応付けます。
-  `trap.S`の256-byte frameとx1/x3..x31の対称性、trap→timer→SIEの初期化順を直します。
+- **症状**：プロンプトの前に`unexpected trap`と`scause/sepc/stval`が出る、または同じトラップを繰り返す。
+- **診断コマンド**：`cargo xtask test trap`
+- **考えられる原因**：`stvec`のアラインメント、トラップフレームのオフセット、保存と復元の非対称、準備前のSIE有効化のいずれかに問題がある。
+- **修正方法**：`scause`の割り込みビットと原因コードを分け、`sepc`をシンボルの位置へ対応付ける。
+  `trap.S`の256バイトフレームとx1およびx3からx31までの対称性、トラップ、タイマー、SIEという初期化順も確認する。
 
-## timer testがtimeoutする
+## タイマーテストが時間切れになる
 
-- **症状:** `cargo xtask test timer`が5秒でtimeoutしtimer markerがありません。
-- **diagnostic command:** `cargo xtask test timer`
-- **likely cause:** SBI TIME extension/function、10 MHzから100,000 cycleへの換算、STIE/SIE、cause 5 dispatch、
-  または再予約が壊れています。
-- **corrective action:** `time` CSRから`now + 100_000`というabsolute deadlineを渡すこと、STIE bit 5の後に
-  global SIE bit 1を立てること、handlerがSBI errorを隠さないことを確認します。
+- **症状**：`cargo xtask test timer`が5秒で時間切れになり、タイマーのマーカーがない。
+- **診断コマンド**：`cargo xtask test timer`
+- **考えられる原因**：SBI TIMEの拡張IDか関数ID、10 MHzから100,000サイクルへの換算、STIEとSIE、原因コード5の振り分け、再予約のいずれかが壊れている。
+- **修正方法**：`time` CSRで読んだ値に100,000を加えた絶対デッドラインを渡すこと、STIEのビット5より後に全体のSIEビット1を立てること、ハンドラーがSBIエラーを隠さないことを確認する。
 
-## shell入力がoverflowする
+## シェル入力が上限を超える
 
-- **症状:** 129 byte以上の行で`error: input exceeds 128 bytes`が表示されます。Backspace後も実行されません。
-- **diagnostic command:** `cargo test -p minios-kernel --lib shell::line::tests`
-- **likely cause:** 通常は設計どおりのbounded inputです。短い入力でも起きるならcapacity countかCR/LF処理の
-  regressionです。
-- **corrective action:** 長い行を短くして再入力します。実装修正時はoverflow後のBackspaceでinvalid stateを
-  解除せず、次promptの`clear()`だけで戻るfocused testを維持します。
+- **症状**：129バイト以上の行で`error: input exceeds 128 bytes`が表示され、Backspaceを押しても実行されない。
+- **診断コマンド**：`cargo test -p minios-kernel --lib shell::line::tests`
+- **考えられる原因**：長い入力では設計どおりの動作である。
+  短い入力でも起きる場合は、容量の計算かCRとLFの処理が退行している。
+- **修正方法**：長い行を短くして再入力する。
+  実装を直す場合も、上限を超えた後のBackspaceで無効状態を解除せず、次のプロンプトで呼ぶ`clear()`だけが戻す個別テストを保つ。
 
-## QEMU processが残る
+## QEMUプロセスが残る
 
-- **症状:** test終了後も`qemu-system-riscv64`が実行中、terminalが戻らない、または次testが干渉します。
-- **diagnostic command:** `pgrep -fl qemu-system-riscv64`
-- **likely cause:** 手動sessionで`shutdown`していないか、timeout pathがkill後にwaitできていません。
-- **corrective action:** 対話sessionでは`shutdown`を使います。自動testではerrorに出たcommand/deadline/cleanup
-  診断を保存し、`cargo test -p xtask qemu::tests::timeout_reaps_process_and_preserves_both_streams`を実行します。
-  所有していないQEMU processを一括killしないでください。
+- **症状**：テスト終了後も`qemu-system-riscv64`が動いている、端末へ制御が戻らない、または次のテストへ干渉する。
+- **診断コマンド**：`pgrep -fl qemu-system-riscv64`
+- **考えられる原因**：手動セッションで`shutdown`していない、または時間切れの経路が終了後に`wait`で回収できていない。
+- **修正方法**：対話セッションでは`shutdown`を使う。
+  自動テストでは、エラーに表示されたコマンド、制限時間、回収時の診断を保存し、`cargo test -p xtask qemu::tests::timeout_reaps_process_and_preserves_both_streams`を実行する。
+  自分が起動していないQEMUプロセスを一括終了しない。
 
 ## CIだけ失敗する
 
-- **症状:** local `cargo xtask check`は通るがUbuntu GitHub Actionsだけ失敗します。
-- **diagnostic command:** `cargo xtask setup && cargo xtask check`
-- **likely cause:** case-sensitive path、format差分、Ubuntu package版QEMU 8.2のversion suffix、cacheではなく未commit
-  fileへの依存、またはlocalとCIのtoolchain差です。
-- **corrective action:** CI logの最初のfailed phaseを同じexact commandで再現します。tracked filesを
-  `git status --short`で確認し、Rust 1.98.0とQEMU floorをsetup出力で照合します。CI専用skipを追加せず、
-  common xtask境界のportable bugを修正します。
+- **症状**：ローカルの`cargo xtask check`は通るが、Ubuntu上のGitHub Actionsだけ失敗する。
+- **診断コマンド**：`cargo xtask setup && cargo xtask check`
+- **考えられる原因**：大文字と小文字を区別するパス、書式の差分、Ubuntu版QEMU 8.2の接尾辞、コミットしていないファイルへの依存、ローカルとCIのツールチェーン差のいずれかである。
+- **修正方法**：CIログで最初に失敗した段階を、同じコマンドで再現する。
+  `git status --short`で追跡ファイルを確認し、`setup`の出力でRust 1.98.0とQEMUの下限を照合する。
+  CIだけで検査を飛ばさず、共通の`xtask`境界にある移植性の問題を直す。
 
-[README](../../README.md) | [architecture](architecture.md) | [学習ガイド](../guide/README.md)
+[README](../../README.md) | [全体構成](architecture.md) | [学習ガイド](../guide/README.md)

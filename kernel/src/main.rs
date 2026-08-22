@@ -25,22 +25,22 @@ const UNKNOWN_HART_ID: usize = usize::MAX;
 static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(UNKNOWN_HART_ID);
 
 #[cfg(target_arch = "riscv64")]
-// QEMU virt を 128 MiB で起動するため、RAM の上端 0x8800_0000 を allocator の固定境界とする。
+// QEMU virtを128 MiBで起動するため、RAMの上端`0x8800_0000`をアロケーターの固定境界とする。
 const PHYSICAL_MEMORY_END: usize = 0x8800_0000;
 
 #[cfg(target_arch = "riscv64")]
-// Safety: linker.ldがRISC-V kernel image末尾に必ず定義するC ABI symbolであり、Rust側は
-// addr_of!でaddressを形成するだけで、extern staticの内容をread/writeしない。
+// Safety: `linker.ld`がRISC-Vカーネルイメージの末尾に必ず定義するC ABIシンボルである。
+// Rust側は`addr_of!`でアドレスを作るだけで、外部staticの内容を読み書きしない。
 unsafe extern "C" {
     static __kernel_end: u8;
 }
 
 #[cfg(target_arch = "riscv64")]
-// リンカの entry.S は `kernel_main` という外部 C ABI シンボルを呼ぶ。OpenSBI の
-// a0/a1 を hart_id/dtb としてそのまま受け取るため、この名前と ABI を変えてはならない。
+// `entry.S`は、外部C ABIシンボル`kernel_main`を呼び出す。
+// OpenSBIの`a0/a1`を`hart_id/dtb`としてそのまま受け取るため、この名前とABIを変えてはならない。
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
-    // パニック診断が起動 hart を識別できるよう、他の初期化より前に公開する。
+    // パニック診断が起動ハートを識別できるよう、ほかの初期化より前に記録する。
     BOOT_HART_ID.store(hart_id, Ordering::Relaxed);
     // DTB は後のハードウェア検出で使うまで保持する OpenSBI の ABI 引数である。
     let _ = dtb;
@@ -52,10 +52,10 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     crate::println!("[ok] timer");
 
     let managed_memory_start = kernel_memory_start();
-    // Safety: OpenSBIが使う0x8000_0000..0x8020_0000と、linkerが配置する
-    // 0x8020_0000..managed_memory_startのkernel imageを除外している。QEMU `virt`の
-    // RAM上端0x8800_0000までをclaimするsubsystemはこの局所allocatorだけであり、
-    // その生存中に同じ範囲を管理する別allocatorを作らない。
+    // Safety: OpenSBIが使う`0x8000_0000..0x8020_0000`と、リンカーが配置する
+    // `0x8020_0000..managed_memory_start`のカーネルイメージを除外している。
+    // QEMU `virt`のRAM上端`0x8800_0000`までを所有するのは、この局所アロケーターだけである。
+    // このアロケーターが生存している間は、同じ範囲を管理する別の所有者を作らない。
     let mut frames =
         match unsafe { FrameAllocator::<512>::new(managed_memory_start, PHYSICAL_MEMORY_END) } {
             Ok(frames) => frames,
@@ -82,8 +82,8 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
 
     #[cfg(feature = "qemu-test-trap")]
     {
-        // Safety: ebreak はメモリやスタックを変更せず同期 breakpoint 例外を発生させる。
-        // trap::init 後であり、ハンドラが成功 reset することがこのテスト ABI である。
+        // Safety: `ebreak`はメモリーとスタックを変更せず、同期ブレークポイント例外を発生させる。
+        // `trap::init`は完了しており、ハンドラーがテスト成功としてリセットする規約になっている。
         unsafe { core::arch::asm!("ebreak", options(nomem, nostack)) };
     }
 
@@ -104,16 +104,16 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
 
 #[cfg(target_arch = "riscv64")]
 fn kernel_memory_start() -> usize {
-    // __kernel_end は linker.ld が実在する image 境界として定義する。addr_of! はその
-    // アドレスを形成するだけで、extern static のメモリ内容を読み取らない。
+    // `__kernel_end`は、`linker.ld`がカーネルイメージの実在する境界として定義する。
+    // `addr_of!`はアドレスを作るだけで、外部staticのメモリー内容を読み取らない。
     let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
-    // linker.ld はこのシンボルを 4 KiB 整列で出力するが、将来の linker 変更後も先頭ページを上へ丸めて image を保護する。
+    // `linker.ld`はこのシンボルを4 KiB境界にそろえるが、将来リンカーを変更してもイメージを保護できるよう、ここでも上向きに丸める。
     align_up_to_page(kernel_end)
 }
 
 #[cfg(target_arch = "riscv64")]
 fn align_up_to_page(address: usize) -> usize {
-    // linker image は 0x8800_0000 より十分低い物理アドレスにあるため、PAGE_SIZE - 1 の加算は usize をオーバーフローしない。
+    // カーネルイメージは`0x8800_0000`より十分低い位置にあるため、`PAGE_SIZE - 1`を加えても`usize`を超えない。
     (address + (PAGE_SIZE - 1)) & !(PAGE_SIZE - 1)
 }
 
@@ -128,7 +128,7 @@ fn run_memory_test(frames: &mut FrameAllocator<512>) -> ! {
         Some(frame) => frame,
         None => fatal_memory_test(),
     };
-    // allocator の公開契約は 4 KiB ごとの物理 frame なので、返却アドレスが区別され整列していることを実機範囲で確認する。
+    // アロケーターは4 KiB単位の物理フレームを返すため、二つのアドレスが異なり、境界にそろっていることをゲスト上で確認する。
     if first == second || first.start() % PAGE_SIZE != 0 || second.start() % PAGE_SIZE != 0 {
         fatal_memory_test();
     }
@@ -174,7 +174,7 @@ fn fatal_timer_error(operation: &str, error: minios_kernel::sbi::SbiError) -> ! 
 
 #[cfg(target_arch = "riscv64")]
 fn fatal_memory_error(error: FrameError) -> ! {
-    // linker 範囲と bitmap 容量の不整合では安全な free page 集合を作れないため、診断して失敗理由で停止する。
+    // リンカーの範囲とビットマップ容量が一致しなければ、安全な未使用ページ集合を作れないため、診断を出して異常終了する。
     crate::console::emergency_print(format_args!("MiniOS memory: {error:?}\r\n"));
     arch::riscv64::sbi::system_reset(
         arch::riscv64::sbi::ResetType::Shutdown,

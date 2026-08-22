@@ -20,8 +20,8 @@ impl<const N: usize> LineBuffer<N> {
     }
 
     pub fn push(&mut self, byte: u8) -> Result<(), LineError> {
-        // 制御文字と非 ASCII を格納しないことで、公開された安全な操作だけでは
-        // bytes[..len] の UTF-8 不変条件を壊せない。
+        // 制御文字とASCII以外の値を格納しないため、公開された安全な操作だけでは
+        // `bytes[..len]`が正しいUTF-8であるという不変条件を壊せない。
         if !(b' '..=b'~').contains(&byte) {
             return Err(LineError::NonPrintable);
         }
@@ -43,8 +43,8 @@ impl<const N: usize> LineBuffer<N> {
     }
 
     pub fn as_str(&self) -> &str {
-        // push は printable ASCII だけを格納し、len は格納済み範囲だけを指す。
-        // unchecked 変換を使わず、将来この不変条件が崩れた場合も安全に失敗させる。
+        // `push`は印字可能なASCIIだけを格納し、`len`は格納済みの範囲だけを指す。
+        // 未検査の変換を使わないため、将来この不変条件が崩れた場合も安全に失敗する。
         core::str::from_utf8(&self.bytes[..self.len])
             .expect("LineBuffer must contain printable ASCII")
     }
