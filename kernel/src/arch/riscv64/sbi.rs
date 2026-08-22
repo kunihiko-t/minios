@@ -18,6 +18,7 @@ pub enum ResetType {
 #[derive(Debug, Clone, Copy)]
 pub enum ResetReason {
     NoReason = 0,
+    // SBI SRST 仕様で system failure の reason ID は 1 に固定され、panic と予期外トラップを正常終了と区別する。
     SystemFailure = 1,
 }
 

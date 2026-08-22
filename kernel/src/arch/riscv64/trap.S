@@ -73,5 +73,7 @@ __trap_entry:
     ld t6, 232(sp)
     /* 割り込まれたspはフレーム幅を戻すだけで完全に復元でき、可変スロットを要しない。 */
     addi sp, sp, 256
+    /* Rust ハンドラから戻る経路は sepc/sstatus を書き換えない契約のため、
+     * ハードウェアがトラップ入口で保存した再開先と特権状態を sret がそのまま使える。 */
     sret
 .size __trap_entry, . - __trap_entry

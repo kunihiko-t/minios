@@ -37,6 +37,7 @@ pub extern "C" fn rust_trap_handler() {
     let cause = decode_scause(scause);
 
     #[cfg(feature = "qemu-test-trap")]
+    // RISC-V 特権仕様で breakpoint 同期例外の cause code は 3 に固定されるため、テスト成功分岐はこの値だけを受ける。
     if cause == TrapCause::Exception(3) {
         // 同期例外は通常出力の途中に発生し得るため、共有ロックを使わない
         // 局所 UART の緊急経路で marker を出す。
