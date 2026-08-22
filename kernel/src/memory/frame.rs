@@ -6,7 +6,7 @@ pub struct PhysFrame(usize);
 impl PhysFrame {
     pub fn from_start(start: usize) -> Result<Self, FrameError> {
         // 物理ページは MMU とハードウェアの 4 KiB 境界でしか表せないため、下位 bit を検査する。
-        if start % PAGE_SIZE != 0 {
+        if !start.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
         }
         Ok(Self(start))
@@ -54,7 +54,7 @@ pub struct FrameAllocator<const WORDS: usize> {
 impl<const WORDS: usize> FrameAllocator<WORDS> {
     pub fn new(base: usize, end: usize) -> Result<Self, FrameError> {
         // base と end は 4 KiB ページ境界でなければ、bitmap の一 bit を一物理ページへ安全に対応付けられない。
-        if base % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
+        if !base.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
         }
         if base >= end {
@@ -63,7 +63,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
 
         // 上端は base より大きいことを確認済みなので、この差分はオーバーフローせずページ数を表す。
         let frame_count = (end - base) / PAGE_SIZE;
-        let capacity = WORDS.checked_mul(u64::BITS as usize).unwrap_or(usize::MAX);
+        let capacity = WORDS.saturating_mul(u64::BITS as usize);
         if frame_count > capacity {
             return Err(FrameError::CapacityExceeded);
         }
@@ -95,7 +95,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
     pub fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
         let start = frame.start();
         // PhysFrame は通常 from_start で生成されるが、型の将来変更にも備えて解放境界でも 4 KiB 整列を再確認する。
-        if start % PAGE_SIZE != 0 {
+        if !start.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
         }
         if start < self.base {

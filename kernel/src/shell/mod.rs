@@ -37,10 +37,8 @@ pub fn run(_hart_id: usize, frames: &mut FrameAllocator<512>) -> ! {
                         crate::print!("\x08 \x08");
                     }
                 }
-                b' '..=b'~' => {
-                    if line.push(byte).is_ok() {
-                        crate::console::write_byte(byte);
-                    }
+                b' '..=b'~' if line.push(byte).is_ok() => {
+                    crate::console::write_byte(byte);
                 }
                 _ => {}
             }

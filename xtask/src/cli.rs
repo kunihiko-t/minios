@@ -3,11 +3,18 @@ pub enum Command {
     Setup,
     Build,
     Run,
-    TestBoot,
-    TestTimer,
-    TestTrap,
-    TestMemory,
-    TestShell,
+    Test(TestFilter),
+    Check,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestFilter {
+    All,
+    Boot,
+    Trap,
+    Timer,
+    Memory,
+    Shell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,16 +23,38 @@ pub enum CliError {
     UnknownCommand(String),
 }
 
+pub fn help() -> &'static str {
+    "MiniOS development commands:\n\
+  cargo xtask setup\n\
+  cargo xtask build\n\
+  cargo xtask run\n\
+  cargo xtask test [all|boot|trap|timer|memory|shell]\n\
+  cargo xtask check"
+}
+
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
     match args {
         [command] if command == "setup" => Ok(Command::Setup),
         [command] if command == "build" => Ok(Command::Build),
         [command] if command == "run" => Ok(Command::Run),
-        [command, test] if command == "test" && test == "boot" => Ok(Command::TestBoot),
-        [command, test] if command == "test" && test == "timer" => Ok(Command::TestTimer),
-        [command, test] if command == "test" && test == "trap" => Ok(Command::TestTrap),
-        [command, test] if command == "test" && test == "memory" => Ok(Command::TestMemory),
-        [command, test] if command == "test" && test == "shell" => Ok(Command::TestShell),
+        [command] if command == "test" => Ok(Command::Test(TestFilter::All)),
+        [command, test] if command == "test" && test == "all" => Ok(Command::Test(TestFilter::All)),
+        [command, test] if command == "test" && test == "boot" => {
+            Ok(Command::Test(TestFilter::Boot))
+        }
+        [command, test] if command == "test" && test == "trap" => {
+            Ok(Command::Test(TestFilter::Trap))
+        }
+        [command, test] if command == "test" && test == "timer" => {
+            Ok(Command::Test(TestFilter::Timer))
+        }
+        [command, test] if command == "test" && test == "memory" => {
+            Ok(Command::Test(TestFilter::Memory))
+        }
+        [command, test] if command == "test" && test == "shell" => {
+            Ok(Command::Test(TestFilter::Shell))
+        }
+        [command] if command == "check" => Ok(Command::Check),
         [] => Err(CliError::MissingCommand),
         [command, ..] => Err(CliError::UnknownCommand(command.clone())),
     }
@@ -34,6 +63,22 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn parses_all_public_commands() {
+        assert_eq!(parse(&owned(&["build"])), Ok(Command::Build));
+        assert_eq!(parse(&owned(&["run"])), Ok(Command::Run));
+        assert_eq!(parse(&owned(&["test"])), Ok(Command::Test(TestFilter::All)));
+        assert_eq!(
+            parse(&owned(&["test", "timer"])),
+            Ok(Command::Test(TestFilter::Timer))
+        );
+        assert_eq!(parse(&owned(&["check"])), Ok(Command::Check));
+    }
 
     #[test]
     fn parses_setup_command() {
@@ -47,19 +92,19 @@ mod tests {
         assert_eq!(parse(&["run".to_owned()]), Ok(Command::Run));
         assert_eq!(
             parse(&["test".to_owned(), "boot".to_owned()]),
-            Ok(Command::TestBoot)
+            Ok(Command::Test(TestFilter::Boot))
         );
         assert_eq!(
             parse(&["test".to_owned(), "timer".to_owned()]),
-            Ok(Command::TestTimer)
+            Ok(Command::Test(TestFilter::Timer))
         );
         assert_eq!(
             parse(&["test".to_owned(), "trap".to_owned()]),
-            Ok(Command::TestTrap)
+            Ok(Command::Test(TestFilter::Trap))
         );
         assert_eq!(
             parse(&["test".to_owned(), "memory".to_owned()]),
-            Ok(Command::TestMemory)
+            Ok(Command::Test(TestFilter::Memory))
         );
     }
 
@@ -73,10 +118,25 @@ mod tests {
     }
 
     #[test]
+    fn help_advertises_every_public_command_and_test_filter() {
+        let help = help();
+
+        for command in [
+            "cargo xtask setup",
+            "cargo xtask build",
+            "cargo xtask run",
+            "cargo xtask test [all|boot|trap|timer|memory|shell]",
+            "cargo xtask check",
+        ] {
+            assert!(help.contains(command), "missing help entry: {command}");
+        }
+    }
+
+    #[test]
     fn parses_shell_test_command() {
         assert_eq!(
             parse(&["test".to_owned(), "shell".to_owned()]),
-            Ok(Command::TestShell)
+            Ok(Command::Test(TestFilter::Shell))
         );
     }
 }

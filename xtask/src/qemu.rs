@@ -22,6 +22,14 @@ const SHELL_EXPECTED_OUTPUT: &[&str] = &[
     "unknown command: not-a-command; try 'help'",
     "shutting down",
 ];
+const SHELL_PROMPTED_COMMANDS: &[&str] = &[
+    "minios> help",
+    "minios> info",
+    "minios> uptime",
+    "minios> memory",
+    "minios> not-a-command",
+    "minios> shutdown",
+];
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
 
@@ -65,7 +73,10 @@ pub enum QemuError {
         status: Option<i32>,
         output: String,
     },
-    TimedOut(String),
+    TimedOut {
+        deadline: Duration,
+        output: String,
+    },
     MissingMarker {
         expected: &'static str,
         output: String,
@@ -90,9 +101,10 @@ impl fmt::Display for QemuError {
                     .unwrap_or_else(|| "unknown".to_owned()),
                 output.trim_end()
             ),
-            Self::TimedOut(output) => write!(
+            Self::TimedOut { deadline, output } => write!(
                 formatter,
-                "QEMU test timed out after five seconds:\n{}",
+                "QEMU test timed out after {:.3} seconds:\n{}",
+                deadline.as_secs_f64(),
                 output.trim_end()
             ),
             Self::MissingMarker { expected, output } => write!(
@@ -157,7 +169,7 @@ fn run_shell_command(
     let started = Instant::now();
 
     if let Err(failure) = wait_for_output(&mut child, &readers, SHELL_PROMPT, started, deadline) {
-        return finish_shell_failure(child, readers, failure);
+        return finish_shell_failure(child, readers, deadline, failure);
     }
 
     let write_result = child
@@ -183,7 +195,7 @@ fn run_shell_command(
             let output = readers.join().map_err(QemuError::Wait)?;
             Ok(CompletedProcess { status, output })
         }
-        Err(failure) => finish_shell_failure(child, readers, failure.into()),
+        Err(failure) => finish_shell_failure(child, readers, deadline, failure.into()),
     }
 }
 
@@ -210,6 +222,7 @@ fn wait_for_output(
 fn finish_shell_failure(
     mut child: Child,
     readers: LiveOutputReaders,
+    deadline: Duration,
     failure: ShellFailure,
 ) -> Result<CompletedProcess, QemuError> {
     let cleanup = terminate_and_reap(&mut child);
@@ -219,7 +232,7 @@ fn finish_shell_failure(
         output.push_str(&error);
     }
     match failure {
-        ShellFailure::TimedOut => Err(QemuError::TimedOut(output)),
+        ShellFailure::TimedOut => Err(QemuError::TimedOut { deadline, output }),
         ShellFailure::Poll(error) => Err(QemuError::Wait(format!("{error}\n{output}"))),
         ShellFailure::Exited => Err(QemuError::MissingShellOutput {
             expected: SHELL_PROMPT,
@@ -257,7 +270,7 @@ fn run_command_with_capture(
                 output.push_str("\nQEMU cleanup error: ");
                 output.push_str(&error);
             }
-            Err(QemuError::TimedOut(output))
+            Err(QemuError::TimedOut { deadline, output })
         }
         Err(WaitFailure::Poll(error)) => {
             let cleanup = terminate_and_reap(&mut child);
@@ -468,6 +481,14 @@ fn verify_shell_result(status: Option<i32>, output: &str) -> Result<String, Qemu
             output: output.to_owned(),
         });
     }
+    for expected in SHELL_PROMPTED_COMMANDS {
+        if !output.contains(expected) {
+            return Err(QemuError::MissingShellOutput {
+                expected,
+                output: output.to_owned(),
+            });
+        }
+    }
     for expected in SHELL_EXPECTED_OUTPUT {
         if !output.contains(expected) {
             return Err(QemuError::MissingShellOutput {
@@ -642,13 +663,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shell_result_requires_each_prompt_and_command_echo() {
+        let output = complete_shell_output().replace("minios> memory", "memory");
+
+        assert_eq!(
+            verify_shell_result(Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                expected: "minios> memory",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn timeout_error_reports_the_configured_deadline() {
+        let error = QemuError::TimedOut {
+            deadline: Duration::from_millis(1250),
+            output: "partial UART transcript".to_owned(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "QEMU test timed out after 1.250 seconds:\npartial UART transcript"
+        );
+    }
+
     fn complete_shell_output() -> String {
         [
+            "minios> help",
             "help      Show available commands",
+            "minios> info",
             "MiniOS 0.1.0 on RISC-V 64",
+            "minios> uptime",
             "uptime: 10 ms",
+            "minios> memory",
             "memory: total=32231 allocated=0 free=32231 pages",
+            "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
+            "minios> shutdown",
             "shutting down",
         ]
         .join("\n")
@@ -692,7 +745,7 @@ mod tests {
         let error = run_command_with_capture(command, Duration::from_millis(50))
             .expect_err("sleeping process must time out");
         let output = match error {
-            QemuError::TimedOut(output) => output,
+            QemuError::TimedOut { output, .. } => output,
             other => panic!("expected timeout, got {other:?}"),
         };
 

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-misc
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: riscv64gc-unknown-none-elf
+          components: rustfmt, clippy
+      - name: Cache Cargo data and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - name: Diagnose the environment
+        run: cargo xtask setup
+      - name: Run unified checks
+        run: cargo xtask check

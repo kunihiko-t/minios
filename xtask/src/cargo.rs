@@ -10,17 +10,30 @@ const RISCV_TARGET: &str = "riscv64gc-unknown-none-elf";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CargoError {
-    Spawn(String),
-    Failed { status: Option<i32>, output: String },
+    Spawn {
+        command: String,
+        error: String,
+    },
+    Failed {
+        command: String,
+        status: Option<i32>,
+        output: String,
+    },
 }
 
 impl fmt::Display for CargoError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Spawn(error) => write!(formatter, "could not start cargo build: {error}"),
-            Self::Failed { status, output } => write!(
+            Self::Spawn { command, error } => {
+                write!(formatter, "could not start {command}: {error}")
+            }
+            Self::Failed {
+                command,
+                status,
+                output,
+            } => write!(
                 formatter,
-                "cargo build failed with status {}:\n{}",
+                "{command} failed with status {}:\n{}",
                 status
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "unknown".to_owned()),
@@ -42,8 +55,7 @@ pub fn build_kernel_for_test(feature: &str) -> Result<PathBuf, CargoError> {
 
 fn build_kernel_with_feature(feature: Option<&str>) -> Result<PathBuf, CargoError> {
     let workspace = workspace_root();
-    let mut command = Command::new("cargo");
-    command.current_dir(&workspace).args([
+    let mut args = vec![
         "build",
         "-p",
         KERNEL_PACKAGE,
@@ -51,23 +63,38 @@ fn build_kernel_with_feature(feature: Option<&str>) -> Result<PathBuf, CargoErro
         KERNEL_BINARY,
         "--target",
         RISCV_TARGET,
-    ]);
+    ];
     if let Some(feature) = feature {
-        command.args(["--features", feature]);
+        args.extend(["--features", feature]);
     }
 
+    run(&args)?;
+    Ok(kernel_binary_path(&workspace))
+}
+
+pub fn run(args: &[&str]) -> Result<String, CargoError> {
+    let command_name = format!("cargo {}", args.join(" "));
+    let mut command = Command::new("cargo");
+    command.current_dir(workspace_root()).args(args);
     let output = command.output().map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => CargoError::Spawn("cargo is not installed".to_owned()),
-        _ => CargoError::Spawn(error.to_string()),
+        io::ErrorKind::NotFound => CargoError::Spawn {
+            command: command_name.clone(),
+            error: "cargo is not installed".to_owned(),
+        },
+        _ => CargoError::Spawn {
+            command: command_name.clone(),
+            error: error.to_string(),
+        },
     })?;
+    let output_text = combine_output(&output.stdout, &output.stderr);
     if !output.status.success() {
         return Err(CargoError::Failed {
+            command: command_name,
             status: output.status.code(),
-            output: combine_output(&output.stdout, &output.stderr),
+            output: output_text,
         });
     }
-
-    Ok(kernel_binary_path(&workspace))
+    Ok(output_text)
 }
 
 pub fn kernel_binary_path(workspace: &Path) -> PathBuf {
@@ -100,6 +127,25 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn failed_operation_preserves_command_status_and_diagnostics() {
+        let error =
+            run(&["minios-invalid-operation"]).expect_err("unknown Cargo operation must fail");
+
+        match error {
+            CargoError::Failed {
+                command,
+                status,
+                output,
+            } => {
+                assert_eq!(command, "cargo minios-invalid-operation");
+                assert!(status.is_some_and(|status| status != 0));
+                assert!(output.contains("no such command"));
+            }
+            other => panic!("expected failed Cargo command, got {other:?}"),
+        }
+    }
 
     #[test]
     fn linker_places_small_data_and_bss_probes_inside_boundaries() {

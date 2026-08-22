@@ -14,9 +14,9 @@ fn main() {
 
 fn error_message(error: &cli::CliError) -> String {
     match error {
-        cli::CliError::MissingCommand => "missing xtask command; try: cargo xtask setup".to_owned(),
+        cli::CliError::MissingCommand => format!("missing xtask command\n\n{}", cli::help()),
         cli::CliError::UnknownCommand(command) => {
-            format!("unknown xtask command: {command}; try: cargo xtask setup")
+            format!("unknown xtask command: {command}\n\n{}", cli::help())
         }
     }
 }

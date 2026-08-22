@@ -3,9 +3,9 @@ pub mod cli;
 pub mod qemu;
 pub mod tools;
 
-use std::fmt;
+use std::{fmt, io::Write, time::Instant};
 
-use cli::Command;
+use cli::{Command, TestFilter};
 
 #[derive(Debug)]
 pub enum XtaskError {
@@ -44,6 +44,179 @@ impl From<qemu::QemuError> for XtaskError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Format,
+    ClippyXtask,
+    ClippyKernelLib,
+    ClippyKernelBin,
+    BuildKernel,
+    KernelUnitTests,
+    XtaskUnitTests,
+    Qemu(qemu::TestKind),
+}
+
+impl Phase {
+    fn cargo_args(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Format => Some(&["fmt", "--all", "--", "--check"]),
+            Self::ClippyXtask => Some(&[
+                "clippy",
+                "-p",
+                "xtask",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+            Self::ClippyKernelLib => Some(&[
+                "clippy",
+                "-p",
+                "minios-kernel",
+                "--lib",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+            Self::ClippyKernelBin => Some(&[
+                "clippy",
+                "-p",
+                "minios-kernel",
+                "--bin",
+                "minios-kernel",
+                "--target",
+                "riscv64gc-unknown-none-elf",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+            Self::BuildKernel => Some(&[
+                "build",
+                "-p",
+                "minios-kernel",
+                "--bin",
+                "minios-kernel",
+                "--target",
+                "riscv64gc-unknown-none-elf",
+            ]),
+            Self::KernelUnitTests => Some(&["test", "-p", "minios-kernel", "--lib"]),
+            Self::XtaskUnitTests => Some(&["test", "-p", "xtask"]),
+            Self::Qemu(_) => None,
+        }
+    }
+
+    fn command(self) -> String {
+        if let Some(args) = self.cargo_args() {
+            return format!("cargo {}", args.join(" "));
+        }
+        match self {
+            Self::Qemu(qemu::TestKind::Boot) => "QEMU boot test".to_owned(),
+            Self::Qemu(qemu::TestKind::Trap) => "QEMU trap test".to_owned(),
+            Self::Qemu(qemu::TestKind::Timer) => "QEMU timer test".to_owned(),
+            Self::Qemu(qemu::TestKind::Memory) => "QEMU memory test".to_owned(),
+            Self::Qemu(qemu::TestKind::Shell) => "QEMU shell test".to_owned(),
+            _ => unreachable!("Cargo phases returned above"),
+        }
+    }
+}
+
+fn test_phases() -> Vec<Phase> {
+    vec![
+        Phase::KernelUnitTests,
+        Phase::XtaskUnitTests,
+        Phase::Qemu(qemu::TestKind::Boot),
+        Phase::Qemu(qemu::TestKind::Trap),
+        Phase::Qemu(qemu::TestKind::Timer),
+        Phase::Qemu(qemu::TestKind::Memory),
+        Phase::Qemu(qemu::TestKind::Shell),
+    ]
+}
+
+fn check_phases() -> Vec<Phase> {
+    vec![
+        Phase::Format,
+        Phase::ClippyXtask,
+        Phase::ClippyKernelLib,
+        Phase::ClippyKernelBin,
+        Phase::BuildKernel,
+        Phase::KernelUnitTests,
+        Phase::XtaskUnitTests,
+        Phase::Qemu(qemu::TestKind::Boot),
+        Phase::Qemu(qemu::TestKind::Trap),
+        Phase::Qemu(qemu::TestKind::Timer),
+        Phase::Qemu(qemu::TestKind::Memory),
+        Phase::Qemu(qemu::TestKind::Shell),
+    ]
+}
+
+fn run_phases<E>(
+    phases: &[Phase],
+    output: &mut impl Write,
+    mut action: impl FnMut(Phase) -> Result<String, E>,
+) -> Result<(), E> {
+    let all_started = Instant::now();
+    for (index, phase) in phases.iter().copied().enumerate() {
+        let number = index + 1;
+        let _ = writeln!(output, "[{number}/{}] {}", phases.len(), phase.command());
+        let started = Instant::now();
+        match action(phase) {
+            Ok(transcript) => {
+                if !transcript.is_empty() {
+                    let _ = write!(output, "{transcript}");
+                    if !transcript.ends_with('\n') {
+                        let _ = writeln!(output);
+                    }
+                }
+                let _ = writeln!(
+                    output,
+                    "phase {number}/{} passed (elapsed: {:.3}s)",
+                    phases.len(),
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    output,
+                    "phase {number}/{} failed (elapsed: {:.3}s)",
+                    phases.len(),
+                    started.elapsed().as_secs_f64()
+                );
+                let _ = writeln!(
+                    output,
+                    "summary: FAILED at phase {number}/{}; {index} passed, 1 failed (elapsed: {:.3}s)",
+                    phases.len(),
+                    all_started.elapsed().as_secs_f64()
+                );
+                return Err(error);
+            }
+        }
+    }
+    let _ = writeln!(
+        output,
+        "summary: PASSED all {} phases (elapsed: {:.3}s)",
+        phases.len(),
+        all_started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
+    if let Some(args) = phase.cargo_args() {
+        return cargo::run(args).map_err(XtaskError::Cargo);
+    }
+    let Phase::Qemu(kind) = phase else {
+        unreachable!("Cargo phases returned above")
+    };
+    // 起動遅延は許容しつつ、停止したゲストを早期に診断できる統一期限を使う。
+    qemu::run_test(kind, std::time::Duration::from_secs(5)).map_err(XtaskError::Qemu)
+}
+
+fn run_phase_plan(phases: &[Phase]) -> Result<(), XtaskError> {
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    run_phases(phases, &mut output, execute_phase)
+}
+
 pub fn run(command: Command) -> Result<(), XtaskError> {
     match command {
         Command::Setup => tools::check_setup()?,
@@ -51,32 +224,81 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
             cargo::build_kernel(false)?;
         }
         Command::Run => qemu::run_kernel()?,
-        Command::TestBoot => {
-            let transcript =
-                qemu::run_test(qemu::TestKind::Boot, std::time::Duration::from_secs(5))?;
-            print!("{transcript}");
+        Command::Test(TestFilter::All) => run_phase_plan(&test_phases())?,
+        Command::Test(TestFilter::Boot) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Boot)])?,
+        Command::Test(TestFilter::Trap) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Trap)])?,
+        Command::Test(TestFilter::Timer) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Timer)])?,
+        Command::Test(TestFilter::Memory) => {
+            run_phase_plan(&[Phase::Qemu(qemu::TestKind::Memory)])?
         }
-        Command::TestTimer => {
-            let transcript =
-                qemu::run_test(qemu::TestKind::Timer, std::time::Duration::from_secs(5))?;
-            print!("{transcript}");
-        }
-        Command::TestTrap => {
-            let transcript =
-                qemu::run_test(qemu::TestKind::Trap, std::time::Duration::from_secs(5))?;
-            print!("{transcript}");
-        }
-        Command::TestMemory => {
-            // 仮想化環境の起動遅延を許容しつつハングを検出する既存 QEMU テスト契約の 5 秒期限を使う。
-            let transcript =
-                qemu::run_test(qemu::TestKind::Memory, std::time::Duration::from_secs(5))?;
-            print!("{transcript}");
-        }
-        Command::TestShell => {
-            let transcript =
-                qemu::run_test(qemu::TestKind::Shell, std::time::Duration::from_secs(5))?;
-            print!("{transcript}");
-        }
+        Command::Test(TestFilter::Shell) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Shell)])?,
+        Command::Check => run_phase_plan(&check_phases())?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_orders_host_then_every_qemu_path() {
+        assert_eq!(
+            test_phases(),
+            vec![
+                Phase::KernelUnitTests,
+                Phase::XtaskUnitTests,
+                Phase::Qemu(qemu::TestKind::Boot),
+                Phase::Qemu(qemu::TestKind::Trap),
+                Phase::Qemu(qemu::TestKind::Timer),
+                Phase::Qemu(qemu::TestKind::Memory),
+                Phase::Qemu(qemu::TestKind::Shell),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_orders_compiler_operations_then_host_and_qemu_tests() {
+        assert_eq!(
+            check_phases(),
+            vec![
+                Phase::Format,
+                Phase::ClippyXtask,
+                Phase::ClippyKernelLib,
+                Phase::ClippyKernelBin,
+                Phase::BuildKernel,
+                Phase::KernelUnitTests,
+                Phase::XtaskUnitTests,
+                Phase::Qemu(qemu::TestKind::Boot),
+                Phase::Qemu(qemu::TestKind::Trap),
+                Phase::Qemu(qemu::TestKind::Timer),
+                Phase::Qemu(qemu::TestKind::Memory),
+                Phase::Qemu(qemu::TestKind::Shell),
+            ]
+        );
+    }
+
+    #[test]
+    fn phase_runner_stops_at_first_failure_and_summarizes_it() {
+        let phases = [Phase::Format, Phase::ClippyXtask, Phase::BuildKernel];
+        let mut invoked = Vec::new();
+        let mut output = Vec::new();
+
+        let result = run_phases(&phases, &mut output, |phase| {
+            invoked.push(phase);
+            if phase == Phase::ClippyXtask {
+                Err("clippy failed")
+            } else {
+                Ok(String::new())
+            }
+        });
+
+        assert_eq!(result, Err("clippy failed"));
+        assert_eq!(invoked, vec![Phase::Format, Phase::ClippyXtask]);
+        let output = String::from_utf8(output).expect("phase output must be UTF-8");
+        assert!(output.contains("[1/3] cargo fmt --all -- --check"));
+        assert!(output.contains("[2/3] cargo clippy -p xtask --all-targets -- -D warnings"));
+        assert!(output.contains("elapsed:"));
+        assert!(output.contains("summary: FAILED at phase 2/3; 1 passed, 1 failed"));
+    }
 }
