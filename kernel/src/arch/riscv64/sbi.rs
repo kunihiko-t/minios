@@ -1,5 +1,7 @@
 use core::arch::asm;
 
+// Task 2 で分離したターゲット非依存型をこの ecall 境界から引き続き公開する。
+#[allow(unused_imports)]
 pub use minios_kernel::sbi::{SbiError, SbiRet};
 
 // SBI 仕様で SRST 拡張に固定された extension ID であり、OpenSBI と一致させる。
@@ -16,6 +18,7 @@ pub enum ResetType {
 #[derive(Debug, Clone, Copy)]
 pub enum ResetReason {
     NoReason = 0,
+    SystemFailure = 1,
 }
 
 pub fn system_reset(reset_type: ResetType, reason: ResetReason) -> ! {

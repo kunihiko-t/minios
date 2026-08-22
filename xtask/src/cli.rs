@@ -4,6 +4,7 @@ pub enum Command {
     Build,
     Run,
     TestBoot,
+    TestTrap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         [command] if command == "build" => Ok(Command::Build),
         [command] if command == "run" => Ok(Command::Run),
         [command, test] if command == "test" && test == "boot" => Ok(Command::TestBoot),
+        [command, test] if command == "test" && test == "trap" => Ok(Command::TestTrap),
         [] => Err(CliError::MissingCommand),
         [command, ..] => Err(CliError::UnknownCommand(command.clone())),
     }
@@ -34,12 +36,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_kernel_build_run_and_boot_test_commands() {
+    fn parses_kernel_build_run_and_test_commands() {
         assert_eq!(parse(&["build".to_owned()]), Ok(Command::Build));
         assert_eq!(parse(&["run".to_owned()]), Ok(Command::Run));
         assert_eq!(
             parse(&["test".to_owned(), "boot".to_owned()]),
             Ok(Command::TestBoot)
+        );
+        assert_eq!(
+            parse(&["test".to_owned(), "trap".to_owned()]),
+            Ok(Command::TestTrap)
         );
     }
 

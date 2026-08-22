@@ -5,6 +5,10 @@
 //! RISC-V 固有の起動、CSR、SBI、MMIO は `main.rs` 以下で
 //! `target_arch = "riscv64"` に限定し、ホストのライブラリテストを保ちます。
 
+// ホストテストでは純粋なトラップ解読を `arch::riscv64` から検証する。RISC-V
+// バイナリ側は `main.rs` の arch を使い、起動シンボルの二重定義を避ける。
+#[cfg(not(target_arch = "riscv64"))]
+pub mod arch;
 pub mod sbi;
 
 #[cfg(test)]

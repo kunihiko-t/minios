@@ -33,6 +33,14 @@ impl fmt::Display for CargoError {
 impl std::error::Error for CargoError {}
 
 pub fn build_kernel(qemu_test_boot: bool) -> Result<PathBuf, CargoError> {
+    build_kernel_with_feature(qemu_test_boot.then_some("qemu-test-boot"))
+}
+
+pub fn build_kernel_for_test(feature: &str) -> Result<PathBuf, CargoError> {
+    build_kernel_with_feature(Some(feature))
+}
+
+fn build_kernel_with_feature(feature: Option<&str>) -> Result<PathBuf, CargoError> {
     let workspace = workspace_root();
     let mut command = Command::new("cargo");
     command.current_dir(&workspace).args([
@@ -44,8 +52,8 @@ pub fn build_kernel(qemu_test_boot: bool) -> Result<PathBuf, CargoError> {
         "--target",
         RISCV_TARGET,
     ]);
-    if qemu_test_boot {
-        command.args(["--features", "qemu-test-boot"]);
+    if let Some(feature) = feature {
+        command.args(["--features", feature]);
     }
 
     let output = command.output().map_err(|error| match error.kind() {

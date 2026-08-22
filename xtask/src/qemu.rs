@@ -9,10 +9,28 @@ use std::{
 use crate::cargo;
 
 const BOOT_MARKER: &str = "[MINIOS_TEST] boot: ok";
+const TRAP_MARKER: &str = "[MINIOS_TEST] trap: ok";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestKind {
     Boot,
+    Trap,
+}
+
+impl TestKind {
+    fn feature(self) -> &'static str {
+        match self {
+            Self::Boot => "qemu-test-boot",
+            Self::Trap => "qemu-test-trap",
+        }
+    }
+
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Boot => BOOT_MARKER,
+            Self::Trap => TRAP_MARKER,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,9 +38,15 @@ pub enum QemuError {
     Build(cargo::CargoError),
     Spawn(String),
     Wait(String),
-    Failed { status: Option<i32>, output: String },
+    Failed {
+        status: Option<i32>,
+        output: String,
+    },
     TimedOut(String),
-    MissingMarker(String),
+    MissingMarker {
+        expected: &'static str,
+        output: String,
+    },
 }
 
 impl fmt::Display for QemuError {
@@ -41,12 +65,12 @@ impl fmt::Display for QemuError {
             ),
             Self::TimedOut(output) => write!(
                 formatter,
-                "QEMU boot test timed out after five seconds:\n{}",
+                "QEMU test timed out after five seconds:\n{}",
                 output.trim_end()
             ),
-            Self::MissingMarker(output) => write!(
+            Self::MissingMarker { expected, output } => write!(
                 formatter,
-                "QEMU exited successfully but did not print {BOOT_MARKER}:\n{}",
+                "QEMU exited successfully but did not print {expected}:\n{}",
                 output.trim_end()
             ),
         }
@@ -72,13 +96,11 @@ pub fn run_kernel() -> Result<(), QemuError> {
 }
 
 pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError> {
-    let kernel = match kind {
-        TestKind::Boot => cargo::build_kernel(true).map_err(QemuError::Build)?,
-    };
+    let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
     let mut command = Command::new("qemu-system-riscv64");
     command.args(qemu_args(&kernel));
     let completed = run_command_with_capture(command, deadline)?;
-    verify_boot_result(completed.status.code(), &completed.output)
+    verify_test_result(kind, completed.status.code(), &completed.output)
 }
 
 #[derive(Debug)]
@@ -220,15 +242,22 @@ fn contains_pair(args: &[String], flag: &str, value: &str) -> bool {
         .any(|pair| pair[0] == flag && pair[1] == value)
 }
 
-fn verify_boot_result(status: Option<i32>, output: &str) -> Result<String, QemuError> {
+fn verify_test_result(
+    kind: TestKind,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
     if status != Some(0) {
         return Err(QemuError::Failed {
             status,
             output: output.to_owned(),
         });
     }
-    if !output.contains(BOOT_MARKER) {
-        return Err(QemuError::MissingMarker(output.to_owned()));
+    if !output.contains(kind.marker()) {
+        return Err(QemuError::MissingMarker {
+            expected: kind.marker(),
+            output: output.to_owned(),
+        });
     }
     Ok(output.to_owned())
 }
@@ -268,8 +297,24 @@ mod tests {
         let output = "MiniOS booting...\n";
 
         assert_eq!(
-            verify_boot_result(Some(0), output),
-            Err(QemuError::MissingMarker(output.to_owned()))
+            verify_test_result(TestKind::Boot, Some(0), output),
+            Err(QemuError::MissingMarker {
+                expected: BOOT_MARKER,
+                output: output.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn successful_trap_requires_the_exact_trap_marker() {
+        let output = "[MINIOS_TEST] boot: ok\n";
+
+        assert_eq!(
+            verify_test_result(TestKind::Trap, Some(0), output),
+            Err(QemuError::MissingMarker {
+                expected: TRAP_MARKER,
+                output: output.to_owned(),
+            })
         );
     }
 
