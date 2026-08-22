@@ -3,6 +3,8 @@ use core::fmt;
 // QEMU virt の 16550 互換 UART に予約された固定 MMIO ベースアドレスである。
 const UART_BASE: usize = 0x1000_0000;
 const LINE_STATUS_OFFSET: usize = 5;
+// Task 6 で UART 受信を接続するまでの計画済み API 用ビットなので、この項目だけ未使用を許容する。
+#[allow(dead_code)]
 const RECEIVE_READY: u8 = 1 << 0;
 const TRANSMIT_READY: u8 = 1 << 5;
 
@@ -28,6 +30,8 @@ impl Uart {
         unsafe { core::ptr::write_volatile(self.base, byte) };
     }
 
+    // Task 6 で入力ループから呼ぶ公開 API を先に保つため、このマイルストーン間だけ未使用を許容する。
+    #[allow(dead_code)]
     pub fn read_byte(&mut self) -> u8 {
         while !self.has_byte() {
             core::hint::spin_loop();
@@ -37,6 +41,8 @@ impl Uart {
         unsafe { core::ptr::read_volatile(self.base) }
     }
 
+    // Task 6 で非ブロッキング受信に使う公開 API なので、この項目だけ一時的に未使用を許容する。
+    #[allow(dead_code)]
     pub fn has_byte(&self) -> bool {
         self.line_status() & RECEIVE_READY != 0
     }
