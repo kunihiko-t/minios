@@ -1,6 +1,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Setup,
+    Build,
+    Run,
+    TestBoot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +15,9 @@ pub enum CliError {
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
     match args {
         [command] if command == "setup" => Ok(Command::Setup),
+        [command] if command == "build" => Ok(Command::Build),
+        [command] if command == "run" => Ok(Command::Run),
+        [command, test] if command == "test" && test == "boot" => Ok(Command::TestBoot),
         [] => Err(CliError::MissingCommand),
         [command, ..] => Err(CliError::UnknownCommand(command.clone())),
     }
@@ -25,6 +31,16 @@ mod tests {
     fn parses_setup_command() {
         let args = vec!["setup".to_owned()];
         assert_eq!(parse(&args), Ok(Command::Setup));
+    }
+
+    #[test]
+    fn parses_kernel_build_run_and_boot_test_commands() {
+        assert_eq!(parse(&["build".to_owned()]), Ok(Command::Build));
+        assert_eq!(parse(&["run".to_owned()]), Ok(Command::Run));
+        assert_eq!(
+            parse(&["test".to_owned(), "boot".to_owned()]),
+            Ok(Command::TestBoot)
+        );
     }
 
     #[test]

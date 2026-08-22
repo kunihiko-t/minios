@@ -3,6 +3,16 @@ name = "minios-kernel"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+build = "build.rs"
+
+[features]
+qemu-test-boot = []
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "minios-kernel"
+path = "src/main.rs"
+test = false
+bench = false
