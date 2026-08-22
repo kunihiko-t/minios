@@ -66,6 +66,12 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
                 qemu::run_test(qemu::TestKind::Trap, std::time::Duration::from_secs(5))?;
             print!("{transcript}");
         }
+        Command::TestMemory => {
+            // 仮想化環境の起動遅延を許容しつつハングを検出する既存 QEMU テスト契約の 5 秒期限を使う。
+            let transcript =
+                qemu::run_test(qemu::TestKind::Memory, std::time::Duration::from_secs(5))?;
+            print!("{transcript}");
+        }
     }
     Ok(())
 }
