@@ -116,7 +116,11 @@ pub fn parse_qemu_version(output: &str) -> Result<Version, ToolError> {
     let version = line
         .strip_prefix("QEMU emulator version ")
         .ok_or(ToolError::MalformedQemuVersion)?;
-    let mut components = version.split('.');
+    let version_token = version
+        .split_whitespace()
+        .next()
+        .ok_or(ToolError::MalformedQemuVersion)?;
+    let mut components = version_token.split('.');
     let major = parse_component(components.next())?;
     let minor = parse_component(components.next())?;
     let patch = parse_component(components.next())?;
@@ -222,25 +226,47 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_version_from_the_first_qemu_output_line() {
-        let output = "QEMU emulator version 9.2.3\nQEMU is free software";
+    fn parses_the_local_version_from_the_first_qemu_output_line() {
+        let output = "QEMU emulator version 11.1.0\nQEMU is free software";
 
         assert_eq!(
             parse_qemu_version(output),
             Ok(Version {
-                major: 9,
+                major: 11,
+                minor: 1,
+                patch: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_a_packaged_qemu_version_with_a_suffix() {
+        let output = "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.6)\nCopyright";
+
+        assert_eq!(
+            parse_qemu_version(output),
+            Ok(Version {
+                major: 8,
                 minor: 2,
-                patch: 3,
+                patch: 2,
             })
         );
     }
 
     #[test]
     fn rejects_malformed_qemu_version_output() {
-        assert_eq!(
-            parse_qemu_version("QEMU emulator version 9.2\n"),
-            Err(ToolError::MalformedQemuVersion)
-        );
+        for output in [
+            "QEMU emulator version 9.2\n",
+            "QEMU emulator version 9.x.3\n",
+            "",
+            "QEMU version 9.2.3\n",
+        ] {
+            assert_eq!(
+                parse_qemu_version(output),
+                Err(ToolError::MalformedQemuVersion),
+                "unexpectedly accepted {output:?}"
+            );
+        }
     }
 
     #[test]
