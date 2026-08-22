@@ -43,6 +43,9 @@ RISC-V Supervisor Binary Interfaceのfirmware implementationです。QEMUからM
 ## page
 
 memoryを固定sizeで管理する単位です。MiniOSのphysical pageは4 KiBで、先頭addressは4096-byte alignedです。
+`PhysFrame`はallocatorから払い出された1 pageの排他所有を表すtokenで、`Clone`/`Copy`できず、解放時に
+消費されます。tokenを作る`unsafe`境界は、同addressの別tokenや別subsystem ownerがいないことをcallerへ
+要求します。この境界はalignmentを検査しますが、hardware上の所有者重複を自動検出するものではありません。
 
 ## privilege mode
 

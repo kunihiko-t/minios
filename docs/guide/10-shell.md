@@ -23,6 +23,10 @@ shutdown`または`Unknown`へ分類するpure functionです。作用はshell l
 counter、memoryは一意なallocatorへのmutable reference、clearは`\x1b[2J\x1b[H`、shutdownはSBI
 SRSTを使います。
 
+OpenSBIから受け取ったhart IDは`run(hart_id, ...)`からcommand実行へ渡します。`info`は既存bannerの
+次行にhart IDを表示します。`uptime`は既存の`uptime_millis()`でmsを読み、追加の`time::ticks()`を
+次行へ表示します。timer割り込みは二つのread間にも入り得るため、両方を単調な観測値として扱います。
+
 ## 実行と確認
 
 ```text
@@ -35,13 +39,18 @@ clear     Clear the terminal
 shutdown  Shut down MiniOS
 minios> info
 MiniOS 0.1.0 on RISC-V 64
+hart id: 0
+minios> uptime
+uptime: 120 ms
+ticks: 12
 minios> memory
 memory: total=32231 allocated=0 free=32231 pages
 minios> unknown
 unknown command: unknown; try 'help'
 ```
 
-page数はkernel image sizeで変わり得るため形式を契約にし、固定値をAPIにしません。
+uptimeとtick数、page数は実行時点やkernel image sizeで変わり得るため、数値形式と行順を契約にし、
+固定値をAPIにしません。`info`のhart IDは現在の`-smp 1` acceptanceでは0です。
 
 ## よくある失敗
 

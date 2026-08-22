@@ -70,13 +70,17 @@ boot、trap、timer、memory は marker mode です。それぞれ専用 Cargo f
 ```
 
 marker がない status 0 は成功ではありません。これにより「QEMU は終了したが、目的の kernel
-経路へ到達しなかった」という偽陽性を防ぎます。
+経路へ到達しなかった」という偽陽性を防ぎます。CRLFをLFへ正規化した後の完全一致lineとして探すため、
+markerをprefix/suffixに含むだけの診断行や`ok`のnear-matchは成功扱いしません。
 
 shell は interactive mode です。通常 kernel の最初の `minios> ` を待ち、`help`、`info`、
 `uptime`、`memory`、`not-a-command`、`shutdown` を標準入力へ送ります。verifier は各 command
-の echo と毎回の新しい prompt、安定した応答、数値形式の uptime と memory 統計、最後の
-status 0 をすべて要求します。この一連の transcript で UART 送受信、parser、timer、allocator、
-SBI reset を同じ session 内で検査できます。
+の echo と毎回の新しい prompt、安定した応答、`hart id: 0`、数値形式のuptime/ticksとmemory統計、
+最後のstatus 0をすべて要求します。最初のprompt以降を一つのordered transcriptとして読み、helpの
+全6 responseも含めて各lineを位置付きで検証します。したがってresponseの並べ替え、prompt反復、
+`minios> helper`のようなprefix near-match、途中のunexpected lineは通りません。末尾の空行だけは
+許可します。この一連のtranscriptでUART送受信、parser、timer、allocator、SBI resetを同じsession内で
+検査できます。
 
 ### timeout、cleanup、失敗 transcript
 
@@ -141,8 +145,9 @@ Rust target: riscv64gc-unknown-none-elf
 QEMU: 11.1.0
 ```
 
-この章の手順は QEMU 11.1.0 で実際に検証しています。harness が受け入れる最低 version は
-8.2.0 です。Ubuntu 24.04 が提供する maintained QEMU 8.2 series と、長期互換のある `virt`、
+この章の手順は QEMU 11.1.0 で実際に検証しています。Rustはsuffixなしの1.98.0 stableとの完全一致を
+setupで要求し、別stableやnightly/dev suffixを拒否します。QEMUでharnessが受け入れる最低versionは
+8.2.0です。Ubuntu 24.04 が提供する maintained QEMU 8.2 series と、長期互換のある `virt`、
 UART、OpenSBI、process-control interface を CI の互換境界にします。
 
 次に統一入口を実行します。QEMU の version や phase の秒数は環境により変わります。

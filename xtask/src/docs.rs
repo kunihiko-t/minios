@@ -339,7 +339,19 @@ fn inline_destinations(line: &str) -> Vec<String> {
     let mut destinations = Vec::new();
     let mut cursor = 0;
     while cursor + 1 < characters.len() {
-        if characters[cursor] != ']' || characters[cursor + 1] != '(' {
+        if characters[cursor] == '`' && !is_escaped(&characters, cursor) {
+            let length = backtick_run_length(&characters, cursor);
+            if let Some(end) = inline_code_end(&characters, cursor + length, length) {
+                cursor = end;
+                continue;
+            }
+            cursor += length;
+            continue;
+        }
+        if characters[cursor] != ']'
+            || characters[cursor + 1] != '('
+            || is_escaped(&characters, cursor)
+        {
             cursor += 1;
             continue;
         }
@@ -350,6 +362,37 @@ fn inline_destinations(line: &str) -> Vec<String> {
         }
     }
     destinations
+}
+
+fn is_escaped(characters: &[char], cursor: usize) -> bool {
+    let preceding_backslashes = characters[..cursor]
+        .iter()
+        .rev()
+        .take_while(|character| **character == '\\')
+        .count();
+    preceding_backslashes % 2 == 1
+}
+
+fn backtick_run_length(characters: &[char], cursor: usize) -> usize {
+    characters[cursor..]
+        .iter()
+        .take_while(|character| **character == '`')
+        .count()
+}
+
+fn inline_code_end(characters: &[char], mut cursor: usize, opening_length: usize) -> Option<usize> {
+    while cursor < characters.len() {
+        if characters[cursor] != '`' {
+            cursor += 1;
+            continue;
+        }
+        let closing_length = backtick_run_length(characters, cursor);
+        if closing_length == opening_length {
+            return Some(cursor + closing_length);
+        }
+        cursor += closing_length;
+    }
+    None
 }
 
 fn parse_inline_destination(characters: &[char], mut cursor: usize) -> Option<(String, usize)> {
@@ -712,6 +755,62 @@ mod tests {
         temp.write(
             "README.md",
             "~~~~rust\nlet fixture = \"[missing](docs/missing.md)\";\n~~~~\n",
+        );
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn ignores_inline_destination_inside_an_inline_code_span() {
+        let temp = TestTree::new();
+        temp.write("README.md", "`[example](missing.md)`\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn inline_code_span_closes_only_on_the_same_backtick_run_length() {
+        let temp = TestTree::new();
+        temp.write("README.md", "``code `[example](missing.md)` still code``\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn ignores_an_escaped_closing_bracket_before_parenthesis() {
+        let temp = TestTree::new();
+        temp.write("README.md", "literal \\](missing.md)\n");
+
+        assert_eq!(check_local_links(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn finds_a_real_link_immediately_after_inline_code() {
+        let temp = TestTree::new();
+        temp.write(
+            "README.md",
+            "`[ignored](ignored.md)`[missing](real-missing.md)\n",
+        );
+
+        let error = check_local_links(temp.path()).unwrap_err();
+        assert_eq!(error.path(), Path::new("real-missing.md"));
+    }
+
+    #[test]
+    fn finds_a_real_link_immediately_after_an_escaped_pseudo_link() {
+        let temp = TestTree::new();
+        temp.write("README.md", "\\](ignored.md)[missing](real-missing.md)\n");
+
+        let error = check_local_links(temp.path()).unwrap_err();
+        assert_eq!(error.path(), Path::new("real-missing.md"));
+    }
+
+    #[test]
+    fn inline_code_and_escapes_accept_utf8_without_panicking() {
+        let temp = TestTree::new();
+        temp.write(
+            "README.md",
+            "日本語`[無視](存在しない.md)`と \\](存在しない.md)\n",
         );
 
         assert_eq!(check_local_links(temp.path()), Ok(()));

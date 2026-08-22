@@ -8,7 +8,7 @@ MiniOSはQEMU `virt`を`-m 128M`で起動し、RAMを`0x8000_0000..0x8800_0000`�
 | `0x8000_0000..0x8020_0000` | OpenSBI reserved RAMとkernel load前の低位領域 | allocator対象外。OpenSBI imageの実占有に加え、layout上の2 MiBを保守的に予約 |
 | `0x8020_0000` | kernel start / ELF entry配置域の先頭 | `linker.ld`のsection counter、OpenSBI `Next Address`、QEMU `-kernel`の一致点 |
 | `0x8020_0000..__kernel_end` | `.text/.rodata/.data/.bss`、64 KiB boot stack、bitmap | kernel自身が占有。`__kernel_end`はlinkerが4 KiB alignedでexportする可変symbol |
-| `align_up(__kernel_end, 0x1000)..0x8800_0000` | allocatable physical RAM | `FrameAllocator<512>`が4 KiB pageとして管理。upper boundはexclusive |
+| `align_up(__kernel_end, 0x1000)..0x8800_0000` | allocatable physical RAM | `unsafe`な`FrameAllocator::new`で、このallocatorだけが排他的にclaim。upper boundはexclusive |
 | `0x8800_0000` | 128 MiB RAM upper bound | `PHYSICAL_MEMORY_END`。このaddress以上は絶対にallocateしない |
 | `0x1000_0000..0x1000_1000` | 16550 compatible UART MMIO | RAM外のdevice window。base `0x1000_0000`へvolatile access |
 

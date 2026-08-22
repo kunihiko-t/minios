@@ -51,10 +51,16 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     }
     crate::println!("[ok] timer");
 
-    let mut frames = match FrameAllocator::<512>::new(kernel_memory_start(), PHYSICAL_MEMORY_END) {
-        Ok(frames) => frames,
-        Err(error) => fatal_memory_error(error),
-    };
+    let managed_memory_start = kernel_memory_start();
+    // Safety: OpenSBIが使う0x8000_0000..0x8020_0000と、linkerが配置する
+    // 0x8020_0000..managed_memory_startのkernel imageを除外している。QEMU `virt`の
+    // RAM上端0x8800_0000までをclaimするsubsystemはこの局所allocatorだけであり、
+    // その生存中に同じ範囲を管理する別allocatorを作らない。
+    let mut frames =
+        match unsafe { FrameAllocator::<512>::new(managed_memory_start, PHYSICAL_MEMORY_END) } {
+            Ok(frames) => frames,
+            Err(error) => fatal_memory_error(error),
+        };
     crate::println!("[ok] memory");
 
     #[cfg(feature = "qemu-test-memory")]
@@ -117,6 +123,7 @@ fn run_memory_test(frames: &mut FrameAllocator<512>) -> ! {
         Some(frame) => frame,
         None => fatal_memory_test(),
     };
+    let first_start = first.start();
     let second = match frames.allocate() {
         Some(frame) => frame,
         None => fatal_memory_test(),
@@ -132,7 +139,7 @@ fn run_memory_test(frames: &mut FrameAllocator<512>) -> ! {
         Some(frame) => frame,
         None => fatal_memory_test(),
     };
-    if reused != first {
+    if reused.start() != first_start {
         fatal_memory_test();
     }
     crate::println!("[MINIOS_TEST] memory: ok");

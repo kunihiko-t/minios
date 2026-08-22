@@ -31,9 +31,16 @@ clear     Clear the terminal
 shutdown  Shut down MiniOS
 minios> info
 MiniOS 0.1.0 on RISC-V 64
+hart id: 0
+minios> uptime
+uptime: 120 ms
+ticks: 12
 minios> shutdown
 shutting down
 ```
+
+`uptime`の数値は実行時点で変わりますが、`uptime: <n> ms`の直後に`ticks: <n>`が1行ずつ出ます。
+single-hart構成の`info`はbannerを維持し、その次の行で`hart id: 0`を報告します。
 
 ## supported matrix
 

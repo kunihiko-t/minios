@@ -12,7 +12,7 @@ use minios_kernel::memory::frame::FrameAllocator;
 const INPUT_CAPACITY: usize = 128;
 
 #[cfg(target_arch = "riscv64")]
-pub fn run(_hart_id: usize, frames: &mut FrameAllocator<512>) -> ! {
+pub fn run(hart_id: usize, frames: &mut FrameAllocator<512>) -> ! {
     let mut line = LineBuffer::<INPUT_CAPACITY>::new();
     loop {
         crate::print!("minios> ");
@@ -24,7 +24,7 @@ pub fn run(_hart_id: usize, frames: &mut FrameAllocator<512>) -> ! {
                 b'\r' | b'\n' => {
                     crate::println!();
                     match line.finish() {
-                        Ok(input) => execute(input, frames),
+                        Ok(input) => execute(input, hart_id, frames),
                         Err(LineError::Full) => {
                             crate::println!("error: input exceeds 128 bytes");
                         }
@@ -47,7 +47,7 @@ pub fn run(_hart_id: usize, frames: &mut FrameAllocator<512>) -> ! {
 }
 
 #[cfg(target_arch = "riscv64")]
-fn execute(input: &str, frames: &mut FrameAllocator<512>) {
+fn execute(input: &str, hart_id: usize, frames: &mut FrameAllocator<512>) {
     match parse_command(input) {
         Command::Empty => {}
         Command::Help => {
@@ -60,9 +60,13 @@ fn execute(input: &str, frames: &mut FrameAllocator<512>) {
         }
         Command::Info => {
             crate::println!("MiniOS 0.1.0 on RISC-V 64");
+            crate::println!("hart id: {hart_id}");
         }
         Command::Uptime => {
-            crate::println!("uptime: {} ms", crate::time::uptime_millis());
+            let uptime_millis = crate::time::uptime_millis();
+            let ticks = crate::time::ticks();
+            crate::println!("uptime: {uptime_millis} ms");
+            crate::println!("ticks: {ticks}");
         }
         Command::Memory => {
             let stats = frames.stats();

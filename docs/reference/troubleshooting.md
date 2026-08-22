@@ -3,6 +3,17 @@
 まず症状に最も近い項目を選び、diagnostic commandをそのままrepository rootで実行します。複数の
 原因を同時に直さず、最初の失敗を一つ解消して同じcommandを再実行してください。
 
+## Rustが1.98.0 stableではない
+
+- **症状:** `Rust <version> is not supported; exact Rust 1.98.0 stable is required`、またはrustc versionの
+  parse errorで`cargo xtask setup`が停止します。
+- **diagnostic command:** `rustc --version && rustup show active-toolchain`
+- **likely cause:** 別stableを明示している、PATH上のrustcがrustup pinを迂回している、または
+  `1.98.0-nightly`/`-dev`のようなsuffix付きcompilerです。
+- **corrective action:** `rustup toolchain install 1.98.0`を実行し、repositoryの
+  `rust-toolchain.toml`が選ばれるshellから`cargo xtask setup`を再実行します。numeric部分だけを比較して
+  suffixを無視したり、pin fileを別versionへ変更したりしません。
+
 ## RISC-V targetがない
 
 - **症状:** `can't find crate for core`または`Rust target riscv64gc-unknown-none-elf is not installed`。

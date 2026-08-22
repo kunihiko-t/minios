@@ -39,6 +39,8 @@ pub enum ToolError {
         stderr: String,
     },
     MissingRustTarget,
+    MalformedRustcVersion,
+    UnsupportedRustcVersion(String),
     MalformedQemuVersion,
     UnsupportedQemuVersion(Version),
 }
@@ -79,6 +81,14 @@ impl fmt::Display for ToolError {
             Self::MissingRustTarget => write!(
                 formatter,
                 "Rust target {RISCV_TARGET} is not installed. Install it with: rustup target add {RISCV_TARGET}"
+            ),
+            Self::MalformedRustcVersion => write!(
+                formatter,
+                "could not parse rustc version; expected rustc X.Y.Z with an optional build description"
+            ),
+            Self::UnsupportedRustcVersion(version) => write!(
+                formatter,
+                "Rust {version} is not supported; exact Rust 1.98.0 stable is required"
             ),
             Self::MalformedQemuVersion => {
                 write!(formatter, "could not parse QEMU emulator version X.Y.Z")
@@ -141,8 +151,40 @@ pub fn parse_qemu_version(output: &str) -> Result<Version, ToolError> {
     Ok(version)
 }
 
+pub fn parse_rustc_version(output: &str) -> Result<Version, ToolError> {
+    let line = output
+        .lines()
+        .next()
+        .ok_or(ToolError::MalformedRustcVersion)?;
+    let mut fields = line.split_whitespace();
+    if fields.next() != Some("rustc") {
+        return Err(ToolError::MalformedRustcVersion);
+    }
+    let token = fields.next().ok_or(ToolError::MalformedRustcVersion)?;
+    let (numeric, suffix) = match token.split_once('-') {
+        Some((_numeric, "")) => {
+            return Err(ToolError::MalformedRustcVersion);
+        }
+        Some((numeric, suffix))
+            if suffix
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '.') =>
+        {
+            (numeric, Some(suffix))
+        }
+        Some(_) => return Err(ToolError::MalformedRustcVersion),
+        None => (token, None),
+    };
+    let version = parse_numeric_version(numeric).ok_or(ToolError::MalformedRustcVersion)?;
+    if suffix.is_some() || version != pinned_rust_version() {
+        return Err(ToolError::UnsupportedRustcVersion(token.to_owned()));
+    }
+    Ok(version)
+}
+
 pub fn check_setup() -> Result<(), ToolError> {
     let rustc = run_command("rustc", &["--version"])?;
+    parse_rustc_version(&rustc)?;
     println!("Rust: {}", first_line(&rustc)?);
 
     let targets = run_command("rustup", &["target", "list", "--installed"])?;
@@ -167,6 +209,29 @@ fn minimum_qemu_version() -> Version {
         minor: 2,
         patch: 0,
     }
+}
+
+fn pinned_rust_version() -> Version {
+    Version {
+        major: 1,
+        minor: 98,
+        patch: 0,
+    }
+}
+
+fn parse_numeric_version(token: &str) -> Option<Version> {
+    let mut components = token.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next()?.parse().ok()?;
+    let patch = components.next()?.parse().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some(Version {
+        major,
+        minor,
+        patch,
+    })
 }
 
 fn parse_component(component: Option<&str>) -> Result<u32, ToolError> {
@@ -202,7 +267,10 @@ fn run_command(command: &'static str, args: &[&str]) -> Result<String, ToolError
 }
 
 fn first_line(output: &str) -> Result<&str, ToolError> {
-    output.lines().next().ok_or(ToolError::MalformedQemuVersion)
+    output
+        .lines()
+        .next()
+        .ok_or(ToolError::MalformedRustcVersion)
 }
 
 #[cfg(test)]
@@ -223,6 +291,69 @@ mod tests {
             missing_qemu_message(HostPlatform::Linux),
             "qemu-system-riscv64 is not installed. Install it with: sudo apt install qemu-system-misc"
         );
+    }
+
+    #[test]
+    fn accepts_the_exact_pinned_stable_rustc_version() {
+        let output = "rustc 1.98.0 (88d9e12ae 2026-08-18)\n";
+
+        assert_eq!(
+            parse_rustc_version(output),
+            Ok(Version {
+                major: 1,
+                minor: 98,
+                patch: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_different_stable_rustc_version_precisely() {
+        let error = parse_rustc_version("rustc 1.98.1 (future)\n")
+            .expect_err("a non-pinned stable compiler must be rejected");
+
+        assert_eq!(
+            error,
+            ToolError::UnsupportedRustcVersion("1.98.1".to_owned())
+        );
+        assert_eq!(
+            error.to_string(),
+            "Rust 1.98.1 is not supported; exact Rust 1.98.0 stable is required"
+        );
+    }
+
+    #[test]
+    fn rejects_a_rustc_channel_suffix_precisely() {
+        let error = parse_rustc_version("rustc 1.98.0-nightly (nightly)\n")
+            .expect_err("a suffixed compiler is not the pinned stable compiler");
+
+        assert_eq!(
+            error,
+            ToolError::UnsupportedRustcVersion("1.98.0-nightly".to_owned())
+        );
+        assert_eq!(
+            error.to_string(),
+            "Rust 1.98.0-nightly is not supported; exact Rust 1.98.0 stable is required"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_rustc_version_output_without_panicking() {
+        for output in [
+            "",
+            "cargo 1.98.0\n",
+            "rustc\n",
+            "rustc 1.98\n",
+            "rustc 1.x.0\n",
+            "rustc 1.98.0.1\n",
+            "rustc 1.98.0-\n",
+        ] {
+            assert_eq!(
+                parse_rustc_version(output),
+                Err(ToolError::MalformedRustcVersion),
+                "unexpectedly accepted {output:?}"
+            );
+        }
     }
 
     #[test]

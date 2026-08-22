@@ -15,13 +15,17 @@ cross buildでは、host compilerが使えることとguest用standard library c
 
 `cargo xtask setup`は次を調べます。
 
-- `rustc --version`: projectが固定するRust stable 1.98.0
+- `rustc --version`: version tokenがsuffixなしのRust stable 1.98.0と完全一致すること
 - `rustup target list --installed`: bare-metal guest target
 - `qemu-system-riscv64 --version`: QEMU 8.2.0以上
 
 Apple Silicon macOSではQEMU 11.1.0で検証しました。Ubuntu 24.04のQEMU 8.2 seriesをCI互換の
 下限にし、suffix付きpackage versionも解析します。関係するhost実装は
 [`xtask/src/tools.rs`](../../xtask/src/tools.rs)です。
+
+Rustは「1.98以上」ではなくexact pinです。`1.98.1`など別stableや`1.98.0-nightly`/`-dev`のような
+channel suffixも拒否し、検出したtokenと必要な`1.98.0 stable`をerrorに表示します。QEMUだけは
+8.2.0以上というcompatibility floorであり、この二つのversion policyを混同しません。
 
 ## 実行と確認
 
@@ -36,6 +40,13 @@ commit hashやQEMUのminor versionは環境により変わります。三項目�
 準備完了です。
 
 ## よくある失敗
+
+### Rustが固定versionではない
+
+`Rust <version> is not supported; exact Rust 1.98.0 stable is required`と出たら、
+`rustc --version`と`rustup show active-toolchain`を確認します。repositoryの`rust-toolchain.toml`を
+変更せず、`rustup toolchain install 1.98.0`を実行してからsetupを再実行してください。nightlyやdev
+suffixを持つcompilerは、numeric部分が1.98.0でもacceptance対象外です。
 
 ### RISC-V targetがない
 

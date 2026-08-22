@@ -17,21 +17,8 @@ const TRAP_MARKER: &str = "[MINIOS_TEST] trap: ok";
 const MEMORY_MARKER: &str = "[MINIOS_TEST] memory: ok";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] = b"help\ninfo\nuptime\nmemory\nnot-a-command\nshutdown\n";
-const SHELL_EXPECTED_OUTPUT: &[&str] = &[
-    "help      Show available commands",
-    "MiniOS 0.1.0 on RISC-V 64",
-    "unknown command: not-a-command; try 'help'",
-    "shutting down",
-];
-const SHELL_PROMPTED_COMMANDS: &[&str] = &[
-    "minios> help",
-    "minios> info",
-    "minios> uptime",
-    "minios> memory",
-    "minios> not-a-command",
-    "minios> shutdown",
-];
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
+const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +134,7 @@ impl fmt::Display for QemuError {
                 output,
             } => write!(
                 formatter,
-                "QEMU shell transcript did not contain {expected:?}:\ncommand: {command}\n{}",
+                "QEMU shell transcript did not match expected line/position {expected:?}:\ncommand: {command}\n{}",
                 output.trim_end()
             ),
         }
@@ -563,7 +550,8 @@ fn verify_test_result(
             output: output.to_owned(),
         });
     }
-    if !output.contains(kind.marker()) {
+    let normalized = output.replace("\r\n", "\n");
+    if !normalized.lines().any(|line| line == kind.marker()) {
         return Err(QemuError::MissingMarker {
             command: command.to_owned(),
             expected: kind.marker(),
@@ -585,44 +573,121 @@ fn verify_shell_result(
             output: output.to_owned(),
         });
     }
-    for expected in SHELL_PROMPTED_COMMANDS {
-        if !output.contains(expected) {
-            return Err(QemuError::MissingShellOutput {
-                command: command.to_owned(),
-                expected,
-                output: output.to_owned(),
-            });
-        }
-    }
-    for expected in SHELL_EXPECTED_OUTPUT {
-        if !output.contains(expected) {
-            return Err(QemuError::MissingShellOutput {
-                command: command.to_owned(),
-                expected,
-                output: output.to_owned(),
-            });
-        }
-    }
-    if !output.lines().any(line_has_uptime) {
-        return Err(QemuError::MissingShellOutput {
-            command: command.to_owned(),
-            expected: SHELL_UPTIME_FORMAT,
-            output: output.to_owned(),
-        });
-    }
-    if !output.lines().any(line_has_memory_stats) {
-        return Err(QemuError::MissingShellOutput {
-            command: command.to_owned(),
-            expected: SHELL_MEMORY_FORMAT,
-            output: output.to_owned(),
-        });
+    let normalized = output.replace("\r\n", "\n");
+    let lines: Vec<_> = normalized.lines().collect();
+    let Some(first_prompt) = lines.iter().position(|line| line.starts_with(SHELL_PROMPT)) else {
+        return Err(shell_transcript_error(command, "minios> help", output));
+    };
+    let transcript = &lines[first_prompt..];
+    let mut cursor = 0;
+
+    expect_shell_line(transcript, &mut cursor, "minios> help")
+        .and_then(|()| {
+            expect_shell_line(transcript, &mut cursor, "help      Show available commands")
+        })
+        .and_then(|()| {
+            expect_shell_line(transcript, &mut cursor, "info      Show system information")
+        })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "uptime    Show elapsed time"))
+        .and_then(|()| {
+            expect_shell_line(
+                transcript,
+                &mut cursor,
+                "memory    Show physical memory statistics",
+            )
+        })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "clear     Clear the terminal"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "shutdown  Shut down MiniOS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> info"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "MiniOS 0.1.0 on RISC-V 64"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "hart id: 0"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> uptime"))
+        .and_then(|()| {
+            expect_shell_dynamic_line(
+                transcript,
+                &mut cursor,
+                SHELL_UPTIME_FORMAT,
+                line_has_uptime,
+            )
+        })
+        .and_then(|()| {
+            expect_shell_dynamic_line(transcript, &mut cursor, SHELL_TICKS_FORMAT, line_has_ticks)
+        })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> memory"))
+        .and_then(|()| {
+            expect_shell_dynamic_line(
+                transcript,
+                &mut cursor,
+                SHELL_MEMORY_FORMAT,
+                line_has_memory_stats,
+            )
+        })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
+        .and_then(|()| {
+            expect_shell_line(
+                transcript,
+                &mut cursor,
+                "unknown command: not-a-command; try 'help'",
+            )
+        })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> shutdown"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "shutting down"))
+        .map_err(|expected| shell_transcript_error(command, expected, output))?;
+
+    if transcript[cursor..].iter().any(|line| !line.is_empty()) {
+        return Err(shell_transcript_error(
+            command,
+            "end of shell transcript",
+            output,
+        ));
     }
     Ok(output.to_owned())
+}
+
+fn shell_transcript_error(command: &str, expected: &'static str, output: &str) -> QemuError {
+    QemuError::MissingShellOutput {
+        command: command.to_owned(),
+        expected,
+        output: output.to_owned(),
+    }
+}
+
+fn expect_shell_line(
+    lines: &[&str],
+    cursor: &mut usize,
+    expected: &'static str,
+) -> Result<(), &'static str> {
+    if lines.get(*cursor).copied() != Some(expected) {
+        return Err(expected);
+    }
+    *cursor += 1;
+    Ok(())
+}
+
+fn expect_shell_dynamic_line(
+    lines: &[&str],
+    cursor: &mut usize,
+    expected: &'static str,
+    matches: fn(&str) -> bool,
+) -> Result<(), &'static str> {
+    let Some(line) = lines.get(*cursor).copied() else {
+        return Err(expected);
+    };
+    if !matches(line) {
+        return Err(expected);
+    }
+    *cursor += 1;
+    Ok(())
 }
 
 fn line_has_uptime(line: &str) -> bool {
     line.strip_prefix("uptime: ")
         .and_then(|value| value.strip_suffix(" ms"))
+        .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_ok())
+}
+
+fn line_has_ticks(line: &str) -> bool {
+    line.strip_prefix("ticks: ")
         .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_ok())
 }
 
@@ -699,6 +764,35 @@ mod tests {
     }
 
     #[test]
+    fn marker_must_be_an_exact_normalized_line() {
+        for output in [
+            "[MINIOS_TEST] boot: okay\n",
+            "prefix [MINIOS_TEST] boot: ok\n",
+            "[MINIOS_TEST] boot: ok suffix\n",
+        ] {
+            assert_eq!(
+                verify_test_result(TEST_COMMAND, TestKind::Boot, Some(0), output),
+                Err(QemuError::MissingMarker {
+                    command: TEST_COMMAND.to_owned(),
+                    expected: BOOT_MARKER,
+                    output: output.to_owned(),
+                }),
+                "accepted a near-match marker: {output:?}"
+            );
+        }
+
+        assert_eq!(
+            verify_test_result(
+                TEST_COMMAND,
+                TestKind::Boot,
+                Some(0),
+                "firmware\r\n[MINIOS_TEST] boot: ok\r\n"
+            ),
+            Ok("firmware\r\n[MINIOS_TEST] boot: ok\r\n".to_owned())
+        );
+    }
+
+    #[test]
     fn successful_trap_requires_the_exact_trap_marker() {
         let output = "[MINIOS_TEST] boot: ok\n";
 
@@ -744,7 +838,18 @@ mod tests {
     fn shell_result_rejects_each_missing_stable_output() {
         let complete = complete_shell_output();
 
-        for missing in SHELL_EXPECTED_OUTPUT {
+        for missing in [
+            "help      Show available commands",
+            "info      Show system information",
+            "uptime    Show elapsed time",
+            "memory    Show physical memory statistics",
+            "clear     Clear the terminal",
+            "shutdown  Shut down MiniOS",
+            "MiniOS 0.1.0 on RISC-V 64",
+            "hart id: 0",
+            "unknown command: not-a-command; try 'help'",
+            "shutting down",
+        ] {
             let output = complete.replace(missing, "");
             assert_eq!(
                 verify_shell_result(TEST_COMMAND, Some(0), &output),
@@ -766,6 +871,34 @@ mod tests {
             Err(QemuError::MissingShellOutput {
                 command: TEST_COMMAND.to_owned(),
                 expected: "uptime: <number> ms",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_requires_hart_zero_immediately_after_info() {
+        let output = complete_shell_output().replace("hart id: 0\n", "");
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
+                expected: "hart id: 0",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_requires_numeric_ticks_immediately_after_uptime() {
+        let output = complete_shell_output().replace("ticks: 1", "ticks: several");
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
+                expected: "ticks: <number>",
                 output,
             })
         );
@@ -811,6 +944,98 @@ mod tests {
     }
 
     #[test]
+    fn shell_result_rejects_prompt_prefix_near_matches() {
+        let output = complete_shell_output().replacen("minios> help", "minios> helper", 1);
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
+                expected: "minios> help",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_rejects_out_of_order_responses() {
+        let output = complete_shell_output().replace(
+            "help      Show available commands\ninfo      Show system information",
+            "info      Show system information\nhelp      Show available commands",
+        );
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
+                expected: "help      Show available commands",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_rejects_out_of_order_commands() {
+        let output = complete_shell_output().replace(
+            "minios> uptime\nuptime: 10 ms\nticks: 1\nminios> memory\nmemory: total=32231 allocated=0 free=32231 pages",
+            "minios> memory\nmemory: total=32231 allocated=0 free=32231 pages\nminios> uptime\nuptime: 10 ms\nticks: 1",
+        );
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
+                expected: "minios> uptime",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_rejects_a_repeated_prompt() {
+        let output = complete_shell_output().replace(
+            "MiniOS 0.1.0 on RISC-V 64\nhart id: 0",
+            "MiniOS 0.1.0 on RISC-V 64\nminios> info\nhart id: 0",
+        );
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
+                expected: "hart id: 0",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_rejects_unexpected_output_inside_the_sequence() {
+        let output = complete_shell_output().replace(
+            "ticks: 1\nminios> memory",
+            "ticks: 1\nunexpected\nminios> memory",
+        );
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
+                expected: "minios> memory",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_accepts_crlf_and_trailing_blank_lines() {
+        let output = complete_shell_output().replace('\n', "\r\n") + "\r\n\r\n";
+
+        assert_eq!(
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
+            Ok(output)
+        );
+    }
+
+    #[test]
     fn timeout_error_reports_the_configured_deadline() {
         let error = QemuError::TimedOut {
             command: TEST_COMMAND.to_owned(),
@@ -828,10 +1053,17 @@ mod tests {
         [
             "minios> help",
             "help      Show available commands",
+            "info      Show system information",
+            "uptime    Show elapsed time",
+            "memory    Show physical memory statistics",
+            "clear     Clear the terminal",
+            "shutdown  Shut down MiniOS",
             "minios> info",
             "MiniOS 0.1.0 on RISC-V 64",
+            "hart id: 0",
             "minios> uptime",
             "uptime: 10 ms",
+            "ticks: 1",
             "minios> memory",
             "memory: total=32231 allocated=0 free=32231 pages",
             "minios> not-a-command",

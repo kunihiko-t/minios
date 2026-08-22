@@ -1,10 +1,39 @@
 pub const PAGE_SIZE: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// allocatorから払い出された物理pageを一意に表す所有権token。
+///
+/// ```compile_fail
+/// use minios_kernel::memory::frame::PhysFrame;
+///
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<PhysFrame>();
+/// ```
+///
+/// ```compile_fail
+/// use minios_kernel::memory::frame::PhysFrame;
+///
+/// fn require_copy<T: Copy>() {}
+/// require_copy::<PhysFrame>();
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct PhysFrame(usize);
 
 impl PhysFrame {
-    pub fn from_start(start: usize) -> Result<Self, FrameError> {
+    /// 指定した物理addressの所有権tokenを作る。
+    ///
+    /// ```compile_fail
+    /// use minios_kernel::memory::frame::PhysFrame;
+    ///
+    /// let frame = PhysFrame::from_start(0x4000).unwrap();
+    /// let _ = frame;
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// `start`がpage境界に整列して`Ok`を返す場合、callerはその物理pageを排他的に所有し、
+    /// 同じaddressを表す生存中の`PhysFrame`がほかにないことを保証しなければならない。
+    /// 未整列addressは所有権tokenを作らず`Unaligned`として返す。
+    pub unsafe fn from_start(start: usize) -> Result<Self, FrameError> {
         // 物理ページは MMU とハードウェアの 4 KiB 境界でしか表せないため、下位 bit を検査する。
         if !start.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
@@ -12,7 +41,7 @@ impl PhysFrame {
         Ok(Self(start))
     }
 
-    pub const fn start(self) -> usize {
+    pub const fn start(&self) -> usize {
         self.0
     }
 }
@@ -38,7 +67,8 @@ pub struct FrameStats {
 /// ```compile_fail
 /// use minios_kernel::memory::frame::FrameAllocator;
 ///
-/// let allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+/// // Safety: compile-fail例では仮想的なtest範囲にほかの所有者がいない前提を置く。
+/// let allocator = unsafe { FrameAllocator::<1>::new(0x4000, 0x8000) }.unwrap();
 /// // 複製すると同じ物理ページを二つの allocator が返せるため、所有者は複製できない。
 /// let duplicate = allocator.clone();
 /// let _ = duplicate;
@@ -52,7 +82,29 @@ pub struct FrameAllocator<const WORDS: usize> {
 }
 
 impl<const WORDS: usize> FrameAllocator<WORDS> {
-    pub fn new(base: usize, end: usize) -> Result<Self, FrameError> {
+    /// 指定した物理address範囲を管理するallocatorを作る。
+    ///
+    /// ```compile_fail
+    /// use minios_kernel::memory::frame::FrameAllocator;
+    ///
+    /// let allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+    /// let _ = allocator;
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use minios_kernel::memory::frame::FrameAllocator;
+    ///
+    /// let first = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+    /// let overlapping = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+    /// let _ = (first, overlapping);
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// 検証成功時、callerは`base..end`の全物理pageがほかのallocatorやsubsystemから一切所有・
+    /// 管理されていない排他的な範囲であり、返したallocatorの生存中に別の所有者がclaimしないことを
+    /// 保証しなければならない。未整列・空・容量超過で`Err`を返す場合は範囲をclaimしない。
+    pub unsafe fn new(base: usize, end: usize) -> Result<Self, FrameError> {
         // base と end は 4 KiB ページ境界でなければ、bitmap の一 bit を一物理ページへ安全に対応付けられない。
         if !base.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned);
@@ -92,6 +144,17 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
         None
     }
 
+    /// 所有権tokenを消費して対応するpageをallocatorへ返す。
+    ///
+    /// ```compile_fail
+    /// use minios_kernel::memory::frame::FrameAllocator;
+    ///
+    /// // Safety: compile-fail例では仮想的なtest範囲にほかの所有者がいない前提を置く。
+    /// let mut allocator = unsafe { FrameAllocator::<1>::new(0x4000, 0x8000) }.unwrap();
+    /// let frame = allocator.allocate().unwrap();
+    /// allocator.deallocate(frame).unwrap();
+    /// let _ = allocator.deallocate(frame);
+    /// ```
     pub fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
         let start = frame.start();
         // PhysFrame は通常 from_start で生成されるが、型の将来変更にも備えて解放境界でも 4 KiB 整列を再確認する。
@@ -132,9 +195,24 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
 mod tests {
     use super::{FrameAllocator, FrameError, FrameStats, PhysFrame};
 
+    fn allocator_fixture<const WORDS: usize>(
+        base: usize,
+        end: usize,
+    ) -> Result<FrameAllocator<WORDS>, FrameError> {
+        // Safety: host testのaddressはdereferenceしない独立したbitmap modelであり、各fixtureの
+        // scopeでは対象範囲を管理するownerをこのallocator一つに限定する。
+        unsafe { FrameAllocator::new(base, end) }
+    }
+
+    fn forged_frame_fixture(start: usize) -> Result<PhysFrame, FrameError> {
+        // Safety: 不正解放の診断契約を観測するtestだけが、実memoryへ触れないtokenを意図的に
+        // forgeする。productionのsafe callerには同じ操作を公開しない。
+        unsafe { PhysFrame::from_start(start) }
+    }
+
     #[test]
     fn stats_report_all_frames_free_before_allocation() {
-        let allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
 
         assert_eq!(
             allocator.stats(),
@@ -148,7 +226,7 @@ mod tests {
 
     #[test]
     fn stats_report_one_used_frame_after_allocation() {
-        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
         allocator.allocate().unwrap();
 
         assert_eq!(
@@ -163,11 +241,11 @@ mod tests {
 
     #[test]
     fn rejected_deallocation_does_not_change_stats() {
-        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
         allocator.allocate().unwrap();
 
         assert_eq!(
-            allocator.deallocate(PhysFrame::from_start(0x9000).unwrap()),
+            allocator.deallocate(forged_frame_fixture(0x9000).unwrap()),
             Err(FrameError::OutOfRange)
         );
         assert_eq!(
@@ -182,7 +260,7 @@ mod tests {
 
     #[test]
     fn stats_restore_free_count_after_deallocation() {
-        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
         let frame = allocator.allocate().unwrap();
 
         allocator.deallocate(frame).unwrap();
@@ -199,18 +277,19 @@ mod tests {
 
     #[test]
     fn allocates_and_reuses_a_frame() {
-        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
         let first = allocator.allocate().unwrap();
+        let first_start = first.start();
         let second = allocator.allocate().unwrap();
         assert_eq!(first.start(), 0x4000);
         assert_eq!(second.start(), 0x5000);
         allocator.deallocate(first).unwrap();
-        assert_eq!(allocator.allocate().unwrap(), first);
+        assert_eq!(allocator.allocate().unwrap().start(), first_start);
     }
 
     #[test]
     fn returns_none_after_exhaustion() {
-        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x6000).unwrap();
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x6000).unwrap();
         assert_eq!(allocator.allocate().unwrap().start(), 0x4000);
         assert_eq!(allocator.allocate().unwrap().start(), 0x5000);
         assert_eq!(allocator.allocate(), None);
@@ -218,30 +297,34 @@ mod tests {
 
     #[test]
     fn rejects_a_double_free() {
-        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
         let frame = allocator.allocate().unwrap();
+        let start = frame.start();
         allocator.deallocate(frame).unwrap();
-        assert_eq!(allocator.deallocate(frame), Err(FrameError::DoubleFree));
+        assert_eq!(
+            allocator.deallocate(forged_frame_fixture(start).unwrap()),
+            Err(FrameError::DoubleFree)
+        );
     }
 
     #[test]
     fn rejects_an_out_of_range_frame() {
-        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
         assert_eq!(
-            allocator.deallocate(PhysFrame::from_start(0x9000).unwrap()),
+            allocator.deallocate(forged_frame_fixture(0x9000).unwrap()),
             Err(FrameError::OutOfRange)
         );
     }
 
     #[test]
     fn rejects_an_unaligned_frame_start() {
-        assert_eq!(PhysFrame::from_start(0x4001), Err(FrameError::Unaligned));
+        assert_eq!(forged_frame_fixture(0x4001), Err(FrameError::Unaligned));
     }
 
     #[test]
     fn rejects_unaligned_bounds() {
         assert_eq!(
-            FrameAllocator::<1>::new(0x4001, 0x8000),
+            allocator_fixture::<1>(0x4001, 0x8000),
             Err(FrameError::Unaligned)
         );
     }
@@ -249,7 +332,7 @@ mod tests {
     #[test]
     fn rejects_an_empty_range() {
         assert_eq!(
-            FrameAllocator::<1>::new(0x4000, 0x4000),
+            allocator_fixture::<1>(0x4000, 0x4000),
             Err(FrameError::EmptyRange)
         );
     }
@@ -257,7 +340,7 @@ mod tests {
     #[test]
     fn rejects_a_range_larger_than_its_bitmap() {
         assert_eq!(
-            FrameAllocator::<1>::new(0x4000, 0x45000),
+            allocator_fixture::<1>(0x4000, 0x45000),
             Err(FrameError::CapacityExceeded)
         );
     }

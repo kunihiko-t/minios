@@ -39,7 +39,10 @@ MiniOSはhardware依存部分を小さな境界へ閉じ込め、pure logicをho
 ### memory
 
 - `memory/frame.rs`: `PhysFrame`、`FrameError`、`FrameStats`、const-generic `FrameAllocator`を提供します。
-  4 KiB alignment、capacity、range、double freeを検証し、bitmapによるunique ownershipを守ります。
+  `FrameAllocator::new`は未所有の排他的物理範囲をclaimする`unsafe`境界で、4 KiB alignmentとcapacityは
+  実装が検査します。非`Clone`/`Copy`の`PhysFrame`とtokenを消費する`deallocate`により、claim後の
+  page所有権をsafe codeで複製・forgeできません。bitmapはrange/double freeを診断しますが、unsafe
+  callerやallocator外subsystemによるaliasは検出しません。
 - `memory/mod.rs`: physical frame管理のnamespaceです。virtual addressやheapの責務はまだありません。
 
 ### shell
@@ -48,7 +51,8 @@ MiniOSはhardware依存部分を小さな境界へ閉じ込め、pure logicをho
   として提供します。
 - `shell/command.rs`: trimmed inputをcommand enumへ分類するだけで、UARTやglobal stateへ作用しません。
 - `shell/mod.rs`: UART polling/echo、prompt、command dispatchを所有し、timerのread APIと一意なallocator
-  referenceを利用します。shutdownだけはtyped SBI reset境界へ渡します。
+  referenceを利用します。entryから受け取ったhart IDを`info`へ渡し、`uptime_millis()`と`ticks()`を
+  読んで`uptime: <n> ms`と`ticks: <n>`をこの順に出します。shutdownだけはtyped SBI reset境界へ渡します。
 
 ### host-testable library
 
@@ -64,7 +68,8 @@ MiniOSはhardware依存部分を小さな境界へ閉じ込め、pure logicをho
 - `cargo.rs`: Cargo subprocess、cross build、ELF path、command/status/stdout/stderr診断を担当します。
 - `qemu.rs`: QEMU `virt`引数、interactive/marker mode、deadline、concurrent pipe drain、kill/wait、transcript
   validationを所有します。
-- `docs.rs`: repository内Markdownのrelative inline linkとChapter 1–12の7必須sectionを検査します。
+- `docs.rs`: repository内Markdownについて、fenceとsame-length backtickのinline code spanおよびescaped
+  delimiterを除くrelative inline linkと、Chapter 1–12の7必須sectionを検査します。
 - `lib.rs`: public commandを14-phase planへ変換し、first failureで停止してelapsed summaryを出します。
 
 ## 8-step boot flow
@@ -74,12 +79,17 @@ MiniOSはhardware依存部分を小さな境界へ閉じ込め、pure logicをho
    入れてS-modeへ制御を渡します。
 3. **assembly前処理**: `_start`が`SIE`を止め、`__boot_stack_end`を`sp`へ設定します。
 4. **Rust不変条件**: `__bss_start..__bss_end`をzero化し、`kernel_main(hart_id, dtb)`をC ABIでcallします。
-5. **runtime初期化**: `kernel_main`がhart IDを記録し、trap vector、初回timer、physical frame allocatorの順に
-   初期化します。
+5. **runtime初期化**: `kernel_main`がhart IDを記録し、trap vector、初回timerの順に初期化します。
+   次にOpenSBIとkernel imageを除外した`__kernel_end..0x8800_0000`を、ほかのsubsystemがclaimして
+   いない根拠を示して局所physical frame allocatorへ排他的に渡します。
 6. **観測可能化**: `[ok] traps`、`[ok] timer`、`[ok] memory`とboot bannerをUARTへ出し、test featureなら
    markerとSBI resetへ進みます。
 7. **shell loop**: 通常buildは`minios> `を表示し、UART inputをbounded lineへechoしてcommandを処理します。
 8. **非同期timer**: shell実行中もsupervisor timer trapが入り、registerを保存、tick更新、次deadlineを予約、
    registerを復元して`sret`で中断位置へ戻ります。
+
+shellの安定したresponse境界は、`info`の`MiniOS 0.1.0 on RISC-V 64`→`hart id: 0`、`uptime`の
+`uptime: <n> ms`→`ticks: <n>`、`memory`のtotal/allocated/free形式です。QEMU verifierは最初のprompt
+以降について、command echoと全responseをこの順の完全一致lineとして検証します。
 
 addressと占有範囲は[memory map](memory-map.md)、略語は[用語集](glossary.md)を参照してください。
