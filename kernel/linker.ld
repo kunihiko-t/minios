@@ -21,6 +21,8 @@ SECTIONS
     .data : ALIGN(4K)
     {
         *(.data .data.*)
+        /* RISC-V の small initialized data も data 境界内へ回収する。 */
+        *(.sdata .sdata.*)
     }
 
     .bss : ALIGN(4K)
@@ -28,6 +30,8 @@ SECTIONS
         /* entry.S が Rust に入る前にこの範囲をゼロ化する契約。 */
         __bss_start = .;
         *(.bss .bss.*)
+        /* RISC-V の small zero-initialized data も entry.S のゼロ化範囲へ回収する。 */
+        *(.sbss .sbss.*)
         *(COMMON)
 
         . = ALIGN(16);

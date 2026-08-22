@@ -82,3 +82,172 @@ fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
     output.push_str(&String::from_utf8_lossy(stderr));
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        process::{self, Command},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    #[test]
+    fn linker_places_small_data_and_bss_probes_inside_boundaries() {
+        let fixture = std::env::temp_dir().join(format!(
+            "minios-linker-test-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir(&fixture).expect("must create linker test directory");
+        let source = fixture.join("small_bss.rs");
+        let elf = fixture.join("small_bss.elf");
+        fs::write(
+            &source,
+            r#"#![no_std]
+#![no_main]
+
+#[used]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".sbss.linker_probe")]
+static MINIOS_LINKER_SMALL_BSS_PROBE: u64 = 0;
+
+#[used]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".sdata.linker_probe")]
+static MINIOS_LINKER_SMALL_DATA_PROBE: u64 = 1;
+
+#[unsafe(no_mangle)]
+extern "C" fn _start() -> ! {
+    loop {}
+}
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
+    loop {}
+}
+"#,
+        )
+        .expect("must write linker fixture");
+
+        let linker = workspace_root().join("kernel/linker.ld");
+        let output = Command::new("rustc")
+            .args([
+                source.as_os_str(),
+                "--target".as_ref(),
+                RISCV_TARGET.as_ref(),
+                "-C".as_ref(),
+                "panic=abort".as_ref(),
+                "-C".as_ref(),
+                format!("link-arg=-T{}", linker.display()).as_ref(),
+                "-o".as_ref(),
+                elf.as_os_str(),
+            ])
+            .output()
+            .expect("rustc must start for linker fixture");
+        assert!(
+            output.status.success(),
+            "linker fixture compilation failed:\n{}",
+            combine_output(&output.stdout, &output.stderr)
+        );
+
+        let elf = fs::read(&elf).expect("must read fixture ELF");
+        let bss_section = elf_symbol_section(&elf, "MINIOS_LINKER_SMALL_BSS_PROBE");
+        let data_section = elf_symbol_section(&elf, "MINIOS_LINKER_SMALL_DATA_PROBE");
+        let _ = fs::remove_dir_all(&fixture);
+        assert_eq!(bss_section.as_deref(), Some(".bss"));
+        assert_eq!(data_section.as_deref(), Some(".data"));
+    }
+
+    fn elf_symbol_section(elf: &[u8], symbol: &str) -> Option<String> {
+        let section_headers = elf_section_headers(elf)?;
+        let symbol_table = section_headers.iter().find(|header| header.kind == 2)?;
+        let string_table = section_headers.get(symbol_table.link as usize)?;
+        let names = elf.get(string_table.offset..string_table.offset + string_table.size)?;
+
+        for offset in (symbol_table.offset..symbol_table.offset + symbol_table.size)
+            .step_by(symbol_table.entry_size)
+        {
+            let name_offset = read_u32(elf, offset)? as usize;
+            let section_index = read_u16(elf, offset + 6)? as usize;
+            if elf_string(names, name_offset)? == symbol {
+                return section_headers
+                    .get(section_index)
+                    .and_then(|header| {
+                        elf_string(elf_section_name_table(elf, &section_headers)?, header.name)
+                    })
+                    .map(str::to_owned);
+            }
+        }
+        None
+    }
+
+    #[derive(Clone, Copy)]
+    struct ElfSectionHeader {
+        name: usize,
+        kind: u32,
+        offset: usize,
+        size: usize,
+        link: u32,
+        entry_size: usize,
+    }
+
+    fn elf_section_headers(elf: &[u8]) -> Option<Vec<ElfSectionHeader>> {
+        if elf.get(0..4)? != b"\x7fELF" || *elf.get(4)? != 2 || *elf.get(5)? != 1 {
+            return None;
+        }
+        let table_offset = read_u64(elf, 40)? as usize;
+        let entry_size = read_u16(elf, 58)? as usize;
+        let count = read_u16(elf, 60)? as usize;
+        (0..count)
+            .map(|index| {
+                let offset = table_offset.checked_add(index.checked_mul(entry_size)?)?;
+                Some(ElfSectionHeader {
+                    name: read_u32(elf, offset)? as usize,
+                    kind: read_u32(elf, offset + 4)?,
+                    offset: read_u64(elf, offset + 24)? as usize,
+                    size: read_u64(elf, offset + 32)? as usize,
+                    link: read_u32(elf, offset + 40)?,
+                    entry_size: read_u64(elf, offset + 56)? as usize,
+                })
+            })
+            .collect()
+    }
+
+    fn elf_section_name_table<'a>(
+        elf: &'a [u8],
+        sections: &[ElfSectionHeader],
+    ) -> Option<&'a [u8]> {
+        let index = read_u16(elf, 62)? as usize;
+        let section = sections.get(index)?;
+        elf.get(section.offset..section.offset + section.size)
+    }
+
+    fn elf_string(table: &[u8], offset: usize) -> Option<&str> {
+        let bytes = table.get(offset..)?;
+        let end = bytes.iter().position(|byte| *byte == 0)?;
+        std::str::from_utf8(&bytes[..end]).ok()
+    }
+
+    fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+        Some(u16::from_le_bytes(
+            bytes.get(offset..offset + 2)?.try_into().ok()?,
+        ))
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(
+            bytes.get(offset..offset + 4)?.try_into().ok()?,
+        ))
+    }
+
+    fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+        Some(u64::from_le_bytes(
+            bytes.get(offset..offset + 8)?.try_into().ok()?,
+        ))
+    }
+}

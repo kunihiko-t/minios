@@ -1,7 +1,7 @@
 use std::{
-    fmt,
+    fmt, io,
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -75,41 +75,122 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
     let kernel = match kind {
         TestKind::Boot => cargo::build_kernel(true).map_err(QemuError::Build)?,
     };
-    let mut child = Command::new("qemu-system-riscv64")
-        .args(qemu_args(&kernel))
+    let mut command = Command::new("qemu-system-riscv64");
+    command.args(qemu_args(&kernel));
+    let completed = run_command_with_capture(command, deadline)?;
+    verify_boot_result(completed.status.code(), &completed.output)
+}
+
+#[derive(Debug)]
+struct CompletedProcess {
+    status: ExitStatus,
+    output: String,
+}
+
+fn run_command_with_capture(
+    mut command: Command,
+    deadline: Duration,
+) -> Result<CompletedProcess, QemuError> {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| QemuError::Spawn(error.to_string()))?;
-    let started = Instant::now();
+    let readers = OutputReaders::start(&mut child);
 
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| QemuError::Wait(error.to_string()))?
-        {
-            let output = child
-                .wait_with_output()
-                .map_err(|error| QemuError::Wait(error.to_string()))?;
-            return verify_boot_result(
-                status.code(),
-                &combine_output(&output.stdout, &output.stderr),
-            );
+    match wait_until_exit(&mut child, deadline) {
+        Ok(status) => {
+            let output = readers.join().map_err(QemuError::Wait)?;
+            Ok(CompletedProcess { status, output })
         }
-        if started.elapsed() >= deadline {
-            child
-                .kill()
-                .map_err(|error| QemuError::Wait(error.to_string()))?;
-            let output = child
-                .wait_with_output()
-                .map_err(|error| QemuError::Wait(error.to_string()))?;
-            return Err(QemuError::TimedOut(combine_output(
-                &output.stdout,
-                &output.stderr,
-            )));
+        Err(WaitFailure::TimedOut) => {
+            let cleanup = terminate_and_reap(&mut child);
+            let mut output = readers.join().unwrap_or_else(|error| error);
+            if let Err(error) = cleanup {
+                output.push_str("\nQEMU cleanup error: ");
+                output.push_str(&error);
+            }
+            Err(QemuError::TimedOut(output))
         }
-        thread::sleep(Duration::from_millis(10));
+        Err(WaitFailure::Poll(error)) => {
+            let cleanup = terminate_and_reap(&mut child);
+            let output = readers.join().unwrap_or_else(|error| error);
+            let cleanup = cleanup
+                .err()
+                .map(|error| format!("; cleanup also failed: {error}"))
+                .unwrap_or_default();
+            Err(QemuError::Wait(format!("{error}{cleanup}\n{output}")))
+        }
     }
+}
+
+enum WaitFailure {
+    TimedOut,
+    Poll(String),
+}
+
+fn wait_until_exit(child: &mut Child, deadline: Duration) -> Result<ExitStatus, WaitFailure> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() >= deadline => return Err(WaitFailure::TimedOut),
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(WaitFailure::Poll(error.to_string())),
+        }
+    }
+}
+
+fn terminate_and_reap(child: &mut Child) -> Result<(), String> {
+    let kill_error = child.kill().err().map(|error| error.to_string());
+    match child.wait() {
+        Ok(_) => Ok(()),
+        Err(wait_error) => {
+            let _ = child.kill();
+            let retry_wait = child.wait().err().map(|error| error.to_string());
+            Err(format!(
+                "kill error: {}; wait error: {}; retry wait error: {}",
+                kill_error.unwrap_or_else(|| "none".to_owned()),
+                wait_error,
+                retry_wait.unwrap_or_else(|| "none".to_owned())
+            ))
+        }
+    }
+}
+
+struct OutputReaders {
+    stdout: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr: thread::JoinHandle<io::Result<Vec<u8>>>,
+}
+
+impl OutputReaders {
+    fn start(child: &mut Child) -> Self {
+        let stdout = child.stdout.take().expect("stdout must be piped");
+        let stderr = child.stderr.take().expect("stderr must be piped");
+        Self {
+            stdout: thread::spawn(move || read_stream(stdout)),
+            stderr: thread::spawn(move || read_stream(stderr)),
+        }
+    }
+
+    fn join(self) -> Result<String, String> {
+        let stdout = join_reader(self.stdout)?;
+        let stderr = join_reader(self.stderr)?;
+        Ok(combine_output(&stdout, &stderr))
+    }
+}
+
+fn read_stream(mut stream: impl io::Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, String> {
+    reader
+        .join()
+        .map_err(|_| "output reader thread panicked".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 fn qemu_args(kernel: &Path) -> Vec<String> {
@@ -160,7 +241,12 @@ fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        fs,
+        path::Path,
+        process::{self, Command},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
 
@@ -185,5 +271,63 @@ mod tests {
             verify_boot_result(Some(0), output),
             Err(QemuError::MissingMarker(output.to_owned()))
         );
+    }
+
+    #[test]
+    fn drains_large_stdout_and_stderr_before_the_deadline() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "yes stdout | head -c 131072; yes stderr | head -c 131072 >&2; printf '[MINIOS_TEST] boot: ok'",
+        ]);
+
+        let completed = run_command_with_capture(command, Duration::from_secs(2))
+            .expect("concurrently drained process must complete");
+
+        assert_eq!(completed.status.code(), Some(0));
+        assert!(completed.output.len() >= 262_144);
+        assert!(completed.output.contains(BOOT_MARKER));
+    }
+
+    #[test]
+    fn timeout_reaps_process_and_preserves_both_streams() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "minios-qemu-test-pid-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after Unix epoch")
+                .as_nanos()
+        ));
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "echo $$ > '{}'; printf stdout-before-timeout; printf stderr-before-timeout >&2; exec sleep 30",
+                shell_quote_path(&pid_file)
+            ),
+        ]);
+
+        let error = run_command_with_capture(command, Duration::from_millis(50))
+            .expect_err("sleeping process must time out");
+        let output = match error {
+            QemuError::TimedOut(output) => output,
+            other => panic!("expected timeout, got {other:?}"),
+        };
+
+        assert!(output.contains("stdout-before-timeout"));
+        assert!(output.contains("stderr-before-timeout"));
+        let pid = fs::read_to_string(&pid_file).expect("timed-out process must record its PID");
+        let status = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill must start");
+        let _ = fs::remove_file(&pid_file);
+        assert!(!status.success(), "timed-out child must have been reaped");
+    }
+
+    fn shell_quote_path(path: &Path) -> String {
+        path.display().to_string().replace('\'', "'\\''")
     }
 }

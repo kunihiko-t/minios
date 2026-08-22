@@ -1,27 +1,10 @@
 use core::arch::asm;
 
+pub use minios_kernel::sbi::{SbiError, SbiRet};
+
 // SBI 仕様で SRST 拡張に固定された extension ID であり、OpenSBI と一致させる。
 const SBI_EXT_SYSTEM_RESET: usize = 0x5352_5354;
 const SBI_SYSTEM_RESET: usize = 0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SbiRet {
-    pub error: isize,
-    pub value: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SbiError(pub isize);
-
-impl SbiRet {
-    pub fn into_result(self) -> Result<usize, SbiError> {
-        if self.error == 0 {
-            Ok(self.value)
-        } else {
-            Err(SbiError(self.error))
-        }
-    }
-}
 
 #[repr(usize)]
 #[derive(Debug, Clone, Copy)]
