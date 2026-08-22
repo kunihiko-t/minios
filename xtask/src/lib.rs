@@ -72,6 +72,11 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
                 qemu::run_test(qemu::TestKind::Memory, std::time::Duration::from_secs(5))?;
             print!("{transcript}");
         }
+        Command::TestShell => {
+            let transcript =
+                qemu::run_test(qemu::TestKind::Shell, std::time::Duration::from_secs(5))?;
+            print!("{transcript}");
+        }
     }
     Ok(())
 }

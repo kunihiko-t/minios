@@ -7,6 +7,7 @@ pub enum Command {
     TestTimer,
     TestTrap,
     TestMemory,
+    TestShell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         [command, test] if command == "test" && test == "timer" => Ok(Command::TestTimer),
         [command, test] if command == "test" && test == "trap" => Ok(Command::TestTrap),
         [command, test] if command == "test" && test == "memory" => Ok(Command::TestMemory),
+        [command, test] if command == "test" && test == "shell" => Ok(Command::TestShell),
         [] => Err(CliError::MissingCommand),
         [command, ..] => Err(CliError::UnknownCommand(command.clone())),
     }
@@ -67,6 +69,14 @@ mod tests {
         assert_eq!(
             parse(&args),
             Err(CliError::UnknownCommand("unknown".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parses_shell_test_command() {
+        assert_eq!(
+            parse(&["test".to_owned(), "shell".to_owned()]),
+            Ok(Command::TestShell)
         );
     }
 }

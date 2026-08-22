@@ -1,7 +1,9 @@
 use std::{
-    fmt, io,
+    fmt,
+    io::{self, Read, Write},
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -12,6 +14,16 @@ const BOOT_MARKER: &str = "[MINIOS_TEST] boot: ok";
 const TIMER_MARKER: &str = "[MINIOS_TEST] timer: ok";
 const TRAP_MARKER: &str = "[MINIOS_TEST] trap: ok";
 const MEMORY_MARKER: &str = "[MINIOS_TEST] memory: ok";
+const SHELL_PROMPT: &str = "minios> ";
+const SHELL_SCRIPT: &[u8] = b"help\ninfo\nuptime\nmemory\nnot-a-command\nshutdown\n";
+const SHELL_EXPECTED_OUTPUT: &[&str] = &[
+    "help      Show available commands",
+    "MiniOS 0.1.0 on RISC-V 64",
+    "unknown command: not-a-command; try 'help'",
+    "shutting down",
+];
+const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
+const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestKind {
@@ -19,6 +31,7 @@ pub enum TestKind {
     Timer,
     Trap,
     Memory,
+    Shell,
 }
 
 impl TestKind {
@@ -28,6 +41,7 @@ impl TestKind {
             Self::Timer => "qemu-test-timer",
             Self::Trap => "qemu-test-trap",
             Self::Memory => "qemu-test-memory",
+            Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
 
@@ -37,6 +51,7 @@ impl TestKind {
             Self::Timer => TIMER_MARKER,
             Self::Trap => TRAP_MARKER,
             Self::Memory => MEMORY_MARKER,
+            Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
 }
@@ -52,6 +67,10 @@ pub enum QemuError {
     },
     TimedOut(String),
     MissingMarker {
+        expected: &'static str,
+        output: String,
+    },
+    MissingShellOutput {
         expected: &'static str,
         output: String,
     },
@@ -81,6 +100,11 @@ impl fmt::Display for QemuError {
                 "QEMU exited successfully but did not print {expected}:\n{}",
                 output.trim_end()
             ),
+            Self::MissingShellOutput { expected, output } => write!(
+                formatter,
+                "QEMU shell transcript did not contain {expected:?}:\n{}",
+                output.trim_end()
+            ),
         }
     }
 }
@@ -104,11 +128,104 @@ pub fn run_kernel() -> Result<(), QemuError> {
 }
 
 pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError> {
+    if kind == TestKind::Shell {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let mut command = Command::new("qemu-system-riscv64");
+        command.args(qemu_args(&kernel));
+        let completed = run_shell_command(command, deadline)?;
+        return verify_shell_result(completed.status.code(), &completed.output);
+    }
+
     let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
     let mut command = Command::new("qemu-system-riscv64");
     command.args(qemu_args(&kernel));
     let completed = run_command_with_capture(command, deadline)?;
     verify_test_result(kind, completed.status.code(), &completed.output)
+}
+
+fn run_shell_command(
+    mut command: Command,
+    deadline: Duration,
+) -> Result<CompletedProcess, QemuError> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| QemuError::Spawn(error.to_string()))?;
+    let readers = LiveOutputReaders::start(&mut child);
+    let started = Instant::now();
+
+    if let Err(failure) = wait_for_output(&mut child, &readers, SHELL_PROMPT, started, deadline) {
+        return finish_shell_failure(child, readers, failure);
+    }
+
+    let write_result = child
+        .stdin
+        .take()
+        .expect("shell test stdin must be piped")
+        .write_all(SHELL_SCRIPT);
+    if let Err(error) = write_result {
+        let cleanup = terminate_and_reap(&mut child);
+        let mut output = readers.join().unwrap_or_else(|join_error| join_error);
+        if let Err(cleanup_error) = cleanup {
+            output.push_str("\nQEMU cleanup error: ");
+            output.push_str(&cleanup_error);
+        }
+        return Err(QemuError::Wait(format!(
+            "could not write shell script: {error}\n{output}"
+        )));
+    }
+
+    let remaining = deadline.saturating_sub(started.elapsed());
+    match wait_until_exit(&mut child, remaining) {
+        Ok(status) => {
+            let output = readers.join().map_err(QemuError::Wait)?;
+            Ok(CompletedProcess { status, output })
+        }
+        Err(failure) => finish_shell_failure(child, readers, failure.into()),
+    }
+}
+
+fn wait_for_output(
+    child: &mut Child,
+    readers: &LiveOutputReaders,
+    expected: &str,
+    started: Instant,
+    deadline: Duration,
+) -> Result<(), ShellFailure> {
+    loop {
+        if readers.contains(expected) {
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => return Err(ShellFailure::Exited),
+            Ok(None) if started.elapsed() >= deadline => return Err(ShellFailure::TimedOut),
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(ShellFailure::Poll(error.to_string())),
+        }
+    }
+}
+
+fn finish_shell_failure(
+    mut child: Child,
+    readers: LiveOutputReaders,
+    failure: ShellFailure,
+) -> Result<CompletedProcess, QemuError> {
+    let cleanup = terminate_and_reap(&mut child);
+    let mut output = readers.join().unwrap_or_else(|error| error);
+    if let Err(error) = cleanup {
+        output.push_str("\nQEMU cleanup error: ");
+        output.push_str(&error);
+    }
+    match failure {
+        ShellFailure::TimedOut => Err(QemuError::TimedOut(output)),
+        ShellFailure::Poll(error) => Err(QemuError::Wait(format!("{error}\n{output}"))),
+        ShellFailure::Exited => Err(QemuError::MissingShellOutput {
+            expected: SHELL_PROMPT,
+            output,
+        }),
+    }
 }
 
 #[derive(Debug)]
@@ -157,6 +274,80 @@ fn run_command_with_capture(
 enum WaitFailure {
     TimedOut,
     Poll(String),
+}
+
+enum ShellFailure {
+    TimedOut,
+    Poll(String),
+    Exited,
+}
+
+impl From<WaitFailure> for ShellFailure {
+    fn from(failure: WaitFailure) -> Self {
+        match failure {
+            WaitFailure::TimedOut => Self::TimedOut,
+            WaitFailure::Poll(error) => Self::Poll(error),
+        }
+    }
+}
+
+struct LiveOutputReaders {
+    output: Arc<Mutex<Vec<u8>>>,
+    stdout: thread::JoinHandle<io::Result<()>>,
+    stderr: thread::JoinHandle<io::Result<()>>,
+}
+
+impl LiveOutputReaders {
+    fn start(child: &mut Child) -> Self {
+        let stdout = child.stdout.take().expect("stdout must be piped");
+        let stderr = child.stderr.take().expect("stderr must be piped");
+        let output = Arc::new(Mutex::new(Vec::new()));
+        Self {
+            stdout: spawn_live_reader(stdout, Arc::clone(&output)),
+            stderr: spawn_live_reader(stderr, Arc::clone(&output)),
+            output,
+        }
+    }
+
+    fn contains(&self, expected: &str) -> bool {
+        let output = self.output.lock().expect("live output mutex poisoned");
+        output
+            .windows(expected.len())
+            .any(|window| window == expected.as_bytes())
+    }
+
+    fn join(self) -> Result<String, String> {
+        join_live_reader(self.stdout)?;
+        join_live_reader(self.stderr)?;
+        let output = self.output.lock().map_err(|error| error.to_string())?;
+        Ok(String::from_utf8_lossy(&output).into_owned())
+    }
+}
+
+fn spawn_live_reader(
+    mut stream: impl Read + Send + 'static,
+    output: Arc<Mutex<Vec<u8>>>,
+) -> thread::JoinHandle<io::Result<()>> {
+    thread::spawn(move || {
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                return Ok(());
+            }
+            output
+                .lock()
+                .expect("live output mutex poisoned")
+                .extend_from_slice(&chunk[..read]);
+        }
+    })
+}
+
+fn join_live_reader(reader: thread::JoinHandle<io::Result<()>>) -> Result<(), String> {
+    reader
+        .join()
+        .map_err(|_| "live output reader thread panicked".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 fn wait_until_exit(child: &mut Child, deadline: Duration) -> Result<ExitStatus, WaitFailure> {
@@ -270,6 +461,60 @@ fn verify_test_result(
     Ok(output.to_owned())
 }
 
+fn verify_shell_result(status: Option<i32>, output: &str) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            status,
+            output: output.to_owned(),
+        });
+    }
+    for expected in SHELL_EXPECTED_OUTPUT {
+        if !output.contains(expected) {
+            return Err(QemuError::MissingShellOutput {
+                expected,
+                output: output.to_owned(),
+            });
+        }
+    }
+    if !output.lines().any(line_has_uptime) {
+        return Err(QemuError::MissingShellOutput {
+            expected: SHELL_UPTIME_FORMAT,
+            output: output.to_owned(),
+        });
+    }
+    if !output.lines().any(line_has_memory_stats) {
+        return Err(QemuError::MissingShellOutput {
+            expected: SHELL_MEMORY_FORMAT,
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+fn line_has_uptime(line: &str) -> bool {
+    line.strip_prefix("uptime: ")
+        .and_then(|value| value.strip_suffix(" ms"))
+        .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_ok())
+}
+
+fn line_has_memory_stats(line: &str) -> bool {
+    let Some(values) = line.strip_prefix("memory: total=") else {
+        return false;
+    };
+    let Some((total, values)) = values.split_once(" allocated=") else {
+        return false;
+    };
+    let Some((allocated, values)) = values.split_once(" free=") else {
+        return false;
+    };
+    let Some(free) = values.strip_suffix(" pages") else {
+        return false;
+    };
+    [total, allocated, free]
+        .into_iter()
+        .all(|value| !value.is_empty() && value.parse::<usize>().is_ok())
+}
+
 fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut output = String::from_utf8_lossy(stdout).into_owned();
     output.push_str(&String::from_utf8_lossy(stderr));
@@ -350,6 +595,63 @@ mod tests {
                 output: output.to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn shell_result_rejects_each_missing_stable_output() {
+        let complete = complete_shell_output();
+
+        for missing in SHELL_EXPECTED_OUTPUT {
+            let output = complete.replace(missing, "");
+            assert_eq!(
+                verify_shell_result(Some(0), &output),
+                Err(QemuError::MissingShellOutput {
+                    expected: missing,
+                    output,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn shell_result_rejects_a_nonnumeric_uptime() {
+        let output = complete_shell_output().replace("uptime: 10 ms", "uptime: nope ms");
+
+        assert_eq!(
+            verify_shell_result(Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                expected: "uptime: <number> ms",
+                output,
+            })
+        );
+    }
+
+    #[test]
+    fn shell_result_rejects_nonnumeric_memory_stats() {
+        let output = complete_shell_output().replace(
+            "memory: total=32231 allocated=0 free=32231 pages",
+            "memory: total=many allocated=none free=lots pages",
+        );
+
+        assert_eq!(
+            verify_shell_result(Some(0), &output),
+            Err(QemuError::MissingShellOutput {
+                expected: "memory: total=<number> allocated=<number> free=<number> pages",
+                output,
+            })
+        );
+    }
+
+    fn complete_shell_output() -> String {
+        [
+            "help      Show available commands",
+            "MiniOS 0.1.0 on RISC-V 64",
+            "uptime: 10 ms",
+            "memory: total=32231 allocated=0 free=32231 pages",
+            "unknown command: not-a-command; try 'help'",
+            "shutting down",
+        ]
+        .join("\n")
     }
 
     #[test]

@@ -8,6 +8,8 @@ mod console;
 #[cfg(target_arch = "riscv64")]
 mod drivers;
 #[cfg(target_arch = "riscv64")]
+mod shell;
+#[cfg(target_arch = "riscv64")]
 mod time;
 
 #[cfg(target_arch = "riscv64")]
@@ -48,7 +50,7 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     }
     crate::println!("[ok] timer");
 
-    let frames = match FrameAllocator::<512>::new(kernel_memory_start(), PHYSICAL_MEMORY_END) {
+    let mut frames = match FrameAllocator::<512>::new(kernel_memory_start(), PHYSICAL_MEMORY_END) {
         Ok(frames) => frames,
         Err(error) => fatal_memory_error(error),
     };
@@ -56,12 +58,8 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
 
     #[cfg(feature = "qemu-test-memory")]
     {
-        let mut frames = frames;
         run_memory_test(&mut frames);
     }
-
-    #[cfg(not(feature = "qemu-test-memory"))]
-    let _ = frames;
 
     crate::println!("MiniOS booting...");
     crate::println!("hart id: {hart_id}");
@@ -94,13 +92,14 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         );
     }
 
-    arch::riscv64::sbi::wait_for_interrupt()
+    shell::run(hart_id, &mut frames)
 }
 
 #[cfg(target_arch = "riscv64")]
 fn kernel_memory_start() -> usize {
-    // Safety: __kernel_end は linker.ld が実在する image 境界として定義し、そのアドレスを読むだけでメモリ内容にはアクセスしない。
-    let kernel_end = unsafe { core::ptr::addr_of!(__kernel_end) as usize };
+    // __kernel_end は linker.ld が実在する image 境界として定義する。addr_of! はその
+    // アドレスを形成するだけで、extern static のメモリ内容を読み取らない。
+    let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
     // linker.ld はこのシンボルを 4 KiB 整列で出力するが、将来の linker 変更後も先頭ページを上へ丸めて image を保護する。
     align_up_to_page(kernel_end)
 }

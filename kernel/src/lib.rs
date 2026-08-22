@@ -12,6 +12,8 @@ pub mod arch;
 pub mod memory;
 pub mod sbi;
 #[cfg(not(target_arch = "riscv64"))]
+pub mod shell;
+#[cfg(not(target_arch = "riscv64"))]
 pub mod time;
 
 #[cfg(test)]
