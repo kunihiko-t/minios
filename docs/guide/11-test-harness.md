@@ -80,8 +80,10 @@ SBI reset を同じ session 内で検査できます。
 
 各 QEMU test の deadline は5秒です。xtask は stdout と stderr を起動直後から別 thread で読み、
 pipe buffer が満杯になって guest が停止することを防ぎます。deadline を越えた場合は QEMU を
-kill して必ず `wait` し、子プロセスを残しません。エラーには設定された実際の deadline、受信済み
-stdout と stderr、cleanup 自体が失敗した場合はその診断も残ります。
+kill して必ず `wait` し、子プロセスを残しません。エラーには shell-safe に引用した実際の QEMU
+program、kernel path、全 flag、設定された deadline、受信済み stdout と stderr、cleanup 自体が
+失敗した場合はその診断も残ります。QEMU 起動前の build failure では Cargo command に test 用
+feature が残るため、どの guest image を準備していたかも追跡できます。
 
 marker 不足、shell 出力不足、非0 status の場合も transcript を省略しません。最後に見えた初期化
 段階や marker を、失敗した phase header と併せて読むと、build failure、guest 内の明示的失敗、
@@ -134,7 +136,8 @@ QEMU: 11.1.0
 ```
 
 この章の手順は QEMU 11.1.0 で実際に検証しています。harness が受け入れる最低 version は
-9.0.0 です。
+8.2.0 です。Ubuntu 24.04 が提供する maintained QEMU 8.2 series と、長期互換のある `virt`、
+UART、OpenSBI、process-control interface を CI の互換境界にします。
 
 次に統一入口を実行します。QEMU の version や phase の秒数は環境により変わります。
 

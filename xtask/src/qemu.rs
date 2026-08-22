@@ -10,6 +10,7 @@ use std::{
 
 use crate::cargo;
 
+const QEMU_PROGRAM: &str = "qemu-system-riscv64";
 const BOOT_MARKER: &str = "[MINIOS_TEST] boot: ok";
 const TIMER_MARKER: &str = "[MINIOS_TEST] timer: ok";
 const TRAP_MARKER: &str = "[MINIOS_TEST] trap: ok";
@@ -67,21 +68,31 @@ impl TestKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QemuError {
     Build(cargo::CargoError),
-    Spawn(String),
-    Wait(String),
+    Spawn {
+        command: String,
+        error: String,
+    },
+    Wait {
+        command: String,
+        error: String,
+    },
     Failed {
+        command: String,
         status: Option<i32>,
         output: String,
     },
     TimedOut {
+        command: String,
         deadline: Duration,
         output: String,
     },
     MissingMarker {
+        command: String,
         expected: &'static str,
         output: String,
     },
     MissingShellOutput {
+        command: String,
         expected: &'static str,
         output: String,
     },
@@ -91,30 +102,52 @@ impl fmt::Display for QemuError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Build(error) => error.fmt(formatter),
-            Self::Spawn(error) => write!(formatter, "could not start QEMU: {error}"),
-            Self::Wait(error) => write!(formatter, "could not wait for QEMU: {error}"),
-            Self::Failed { status, output } => write!(
+            Self::Spawn { command, error } => write!(
                 formatter,
-                "QEMU exited with status {}:\n{}",
+                "could not start QEMU:\ncommand: {command}\n{error}"
+            ),
+            Self::Wait { command, error } => write!(
+                formatter,
+                "could not wait for QEMU:\ncommand: {command}\n{error}"
+            ),
+            Self::Failed {
+                command,
+                status,
+                output,
+            } => write!(
+                formatter,
+                "QEMU exited with status {}:\ncommand: {command}\n{}",
                 status
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "unknown".to_owned()),
                 output.trim_end()
             ),
-            Self::TimedOut { deadline, output } => write!(
+            Self::TimedOut {
+                command,
+                deadline,
+                output,
+            } => write!(
                 formatter,
-                "QEMU test timed out after {:.3} seconds:\n{}",
+                "QEMU test timed out after {:.3} seconds:\ncommand: {command}\n{}",
                 deadline.as_secs_f64(),
                 output.trim_end()
             ),
-            Self::MissingMarker { expected, output } => write!(
+            Self::MissingMarker {
+                command,
+                expected,
+                output,
+            } => write!(
                 formatter,
-                "QEMU exited successfully but did not print {expected}:\n{}",
+                "QEMU exited successfully but did not print {expected}:\ncommand: {command}\n{}",
                 output.trim_end()
             ),
-            Self::MissingShellOutput { expected, output } => write!(
+            Self::MissingShellOutput {
+                command,
+                expected,
+                output,
+            } => write!(
                 formatter,
-                "QEMU shell transcript did not contain {expected:?}:\n{}",
+                "QEMU shell transcript did not contain {expected:?}:\ncommand: {command}\n{}",
                 output.trim_end()
             ),
         }
@@ -125,14 +158,16 @@ impl std::error::Error for QemuError {}
 
 pub fn run_kernel() -> Result<(), QemuError> {
     let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
-    let status = Command::new("qemu-system-riscv64")
-        .args(qemu_args(&kernel))
-        .status()
-        .map_err(|error| QemuError::Spawn(error.to_string()))?;
+    let (mut command, command_line) = qemu_command(&kernel);
+    let status = command.status().map_err(|error| QemuError::Spawn {
+        command: command_line.clone(),
+        error: error.to_string(),
+    })?;
     if status.success() {
         Ok(())
     } else {
         Err(QemuError::Failed {
+            command: command_line,
             status: status.code(),
             output: String::new(),
         })
@@ -142,21 +177,25 @@ pub fn run_kernel() -> Result<(), QemuError> {
 pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError> {
     if kind == TestKind::Shell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
-        let mut command = Command::new("qemu-system-riscv64");
-        command.args(qemu_args(&kernel));
-        let completed = run_shell_command(command, deadline)?;
-        return verify_shell_result(completed.status.code(), &completed.output);
+        let (command, command_line) = qemu_command(&kernel);
+        let completed = run_shell_command(command, command_line.clone(), deadline)?;
+        return verify_shell_result(&command_line, completed.status.code(), &completed.output);
     }
 
     let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
-    let mut command = Command::new("qemu-system-riscv64");
-    command.args(qemu_args(&kernel));
-    let completed = run_command_with_capture(command, deadline)?;
-    verify_test_result(kind, completed.status.code(), &completed.output)
+    let (command, command_line) = qemu_command(&kernel);
+    let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+    verify_test_result(
+        &command_line,
+        kind,
+        completed.status.code(),
+        &completed.output,
+    )
 }
 
 fn run_shell_command(
     mut command: Command,
+    command_line: String,
     deadline: Duration,
 ) -> Result<CompletedProcess, QemuError> {
     let mut child = command
@@ -164,12 +203,15 @@ fn run_shell_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| QemuError::Spawn(error.to_string()))?;
+        .map_err(|error| QemuError::Spawn {
+            command: command_line.clone(),
+            error: error.to_string(),
+        })?;
     let readers = LiveOutputReaders::start(&mut child);
     let started = Instant::now();
 
     if let Err(failure) = wait_for_output(&mut child, &readers, SHELL_PROMPT, started, deadline) {
-        return finish_shell_failure(child, readers, deadline, failure);
+        return finish_shell_failure(child, readers, command_line, deadline, failure);
     }
 
     let write_result = child
@@ -184,18 +226,24 @@ fn run_shell_command(
             output.push_str("\nQEMU cleanup error: ");
             output.push_str(&cleanup_error);
         }
-        return Err(QemuError::Wait(format!(
-            "could not write shell script: {error}\n{output}"
-        )));
+        return Err(QemuError::Wait {
+            command: command_line,
+            error: format!("could not write shell script: {error}\n{output}"),
+        });
     }
 
     let remaining = deadline.saturating_sub(started.elapsed());
     match wait_until_exit(&mut child, remaining) {
         Ok(status) => {
-            let output = readers.join().map_err(QemuError::Wait)?;
+            let output = readers.join().map_err(|error| QemuError::Wait {
+                command: command_line.clone(),
+                error,
+            })?;
             Ok(CompletedProcess { status, output })
         }
-        Err(failure) => finish_shell_failure(child, readers, deadline, failure.into()),
+        Err(failure) => {
+            finish_shell_failure(child, readers, command_line, deadline, failure.into())
+        }
     }
 }
 
@@ -222,6 +270,7 @@ fn wait_for_output(
 fn finish_shell_failure(
     mut child: Child,
     readers: LiveOutputReaders,
+    command: String,
     deadline: Duration,
     failure: ShellFailure,
 ) -> Result<CompletedProcess, QemuError> {
@@ -232,9 +281,17 @@ fn finish_shell_failure(
         output.push_str(&error);
     }
     match failure {
-        ShellFailure::TimedOut => Err(QemuError::TimedOut { deadline, output }),
-        ShellFailure::Poll(error) => Err(QemuError::Wait(format!("{error}\n{output}"))),
+        ShellFailure::TimedOut => Err(QemuError::TimedOut {
+            command,
+            deadline,
+            output,
+        }),
+        ShellFailure::Poll(error) => Err(QemuError::Wait {
+            command,
+            error: format!("{error}\n{output}"),
+        }),
         ShellFailure::Exited => Err(QemuError::MissingShellOutput {
+            command,
             expected: SHELL_PROMPT,
             output,
         }),
@@ -249,18 +306,25 @@ struct CompletedProcess {
 
 fn run_command_with_capture(
     mut command: Command,
+    command_line: String,
     deadline: Duration,
 ) -> Result<CompletedProcess, QemuError> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| QemuError::Spawn(error.to_string()))?;
+        .map_err(|error| QemuError::Spawn {
+            command: command_line.clone(),
+            error: error.to_string(),
+        })?;
     let readers = OutputReaders::start(&mut child);
 
     match wait_until_exit(&mut child, deadline) {
         Ok(status) => {
-            let output = readers.join().map_err(QemuError::Wait)?;
+            let output = readers.join().map_err(|error| QemuError::Wait {
+                command: command_line.clone(),
+                error,
+            })?;
             Ok(CompletedProcess { status, output })
         }
         Err(WaitFailure::TimedOut) => {
@@ -270,7 +334,11 @@ fn run_command_with_capture(
                 output.push_str("\nQEMU cleanup error: ");
                 output.push_str(&error);
             }
-            Err(QemuError::TimedOut { deadline, output })
+            Err(QemuError::TimedOut {
+                command: command_line,
+                deadline,
+                output,
+            })
         }
         Err(WaitFailure::Poll(error)) => {
             let cleanup = terminate_and_reap(&mut child);
@@ -279,7 +347,10 @@ fn run_command_with_capture(
                 .err()
                 .map(|error| format!("; cleanup also failed: {error}"))
                 .unwrap_or_default();
-            Err(QemuError::Wait(format!("{error}{cleanup}\n{output}")))
+            Err(QemuError::Wait {
+                command: command_line,
+                error: format!("{error}{cleanup}\n{output}"),
+            })
         }
     }
 }
@@ -427,6 +498,31 @@ fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8
         .map_err(|error| error.to_string())
 }
 
+fn qemu_command(kernel: &Path) -> (Command, String) {
+    let args = qemu_args(kernel);
+    let command_line = render_command(QEMU_PROGRAM, &args);
+    let mut command = Command::new(QEMU_PROGRAM);
+    command.args(&args);
+    (command, command_line)
+}
+
+#[cfg(test)]
+fn qemu_command_line(kernel: &Path) -> String {
+    render_command(QEMU_PROGRAM, &qemu_args(kernel))
+}
+
+fn render_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn qemu_args(kernel: &Path) -> Vec<String> {
     vec![
         "-machine".to_owned(),
@@ -455,18 +551,21 @@ fn contains_pair(args: &[String], flag: &str, value: &str) -> bool {
 }
 
 fn verify_test_result(
+    command: &str,
     kind: TestKind,
     status: Option<i32>,
     output: &str,
 ) -> Result<String, QemuError> {
     if status != Some(0) {
         return Err(QemuError::Failed {
+            command: command.to_owned(),
             status,
             output: output.to_owned(),
         });
     }
     if !output.contains(kind.marker()) {
         return Err(QemuError::MissingMarker {
+            command: command.to_owned(),
             expected: kind.marker(),
             output: output.to_owned(),
         });
@@ -474,9 +573,14 @@ fn verify_test_result(
     Ok(output.to_owned())
 }
 
-fn verify_shell_result(status: Option<i32>, output: &str) -> Result<String, QemuError> {
+fn verify_shell_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
     if status != Some(0) {
         return Err(QemuError::Failed {
+            command: command.to_owned(),
             status,
             output: output.to_owned(),
         });
@@ -484,6 +588,7 @@ fn verify_shell_result(status: Option<i32>, output: &str) -> Result<String, Qemu
     for expected in SHELL_PROMPTED_COMMANDS {
         if !output.contains(expected) {
             return Err(QemuError::MissingShellOutput {
+                command: command.to_owned(),
                 expected,
                 output: output.to_owned(),
             });
@@ -492,6 +597,7 @@ fn verify_shell_result(status: Option<i32>, output: &str) -> Result<String, Qemu
     for expected in SHELL_EXPECTED_OUTPUT {
         if !output.contains(expected) {
             return Err(QemuError::MissingShellOutput {
+                command: command.to_owned(),
                 expected,
                 output: output.to_owned(),
             });
@@ -499,12 +605,14 @@ fn verify_shell_result(status: Option<i32>, output: &str) -> Result<String, Qemu
     }
     if !output.lines().any(line_has_uptime) {
         return Err(QemuError::MissingShellOutput {
+            command: command.to_owned(),
             expected: SHELL_UPTIME_FORMAT,
             output: output.to_owned(),
         });
     }
     if !output.lines().any(line_has_memory_stats) {
         return Err(QemuError::MissingShellOutput {
+            command: command.to_owned(),
             expected: SHELL_MEMORY_FORMAT,
             output: output.to_owned(),
         });
@@ -553,6 +661,8 @@ mod tests {
 
     use super::*;
 
+    const TEST_COMMAND: &str = "'qemu-system-riscv64' '-kernel' 'kernel.elf'";
+
     #[test]
     fn test_qemu_args_are_headless_and_single_hart() {
         let args = qemu_args(Path::new("kernel.elf"));
@@ -567,12 +677,21 @@ mod tests {
     }
 
     #[test]
+    fn qemu_command_line_shell_quotes_the_program_kernel_and_every_flag() {
+        assert_eq!(
+            qemu_command_line(Path::new("/tmp/kernel image's.elf")),
+            "'qemu-system-riscv64' '-machine' 'virt' '-m' '128M' '-smp' '1' '-bios' 'default' '-kernel' '/tmp/kernel image'\\''s.elf' '-serial' 'stdio' '-monitor' 'none' '-display' 'none'"
+        );
+    }
+
+    #[test]
     fn successful_boot_requires_the_exact_marker() {
         let output = "MiniOS booting...\n";
 
         assert_eq!(
-            verify_test_result(TestKind::Boot, Some(0), output),
+            verify_test_result(TEST_COMMAND, TestKind::Boot, Some(0), output),
             Err(QemuError::MissingMarker {
+                command: TEST_COMMAND.to_owned(),
                 expected: BOOT_MARKER,
                 output: output.to_owned(),
             })
@@ -584,8 +703,9 @@ mod tests {
         let output = "[MINIOS_TEST] boot: ok\n";
 
         assert_eq!(
-            verify_test_result(TestKind::Trap, Some(0), output),
+            verify_test_result(TEST_COMMAND, TestKind::Trap, Some(0), output),
             Err(QemuError::MissingMarker {
+                command: TEST_COMMAND.to_owned(),
                 expected: TRAP_MARKER,
                 output: output.to_owned(),
             })
@@ -597,8 +717,9 @@ mod tests {
         let output = "[MINIOS_TEST] boot: ok\n";
 
         assert_eq!(
-            verify_test_result(TestKind::Timer, Some(0), output),
+            verify_test_result(TEST_COMMAND, TestKind::Timer, Some(0), output),
             Err(QemuError::MissingMarker {
+                command: TEST_COMMAND.to_owned(),
                 expected: TIMER_MARKER,
                 output: output.to_owned(),
             })
@@ -610,8 +731,9 @@ mod tests {
         let output = "[MINIOS_TEST] timer: ok\n";
 
         assert_eq!(
-            verify_test_result(TestKind::Memory, Some(0), output),
+            verify_test_result(TEST_COMMAND, TestKind::Memory, Some(0), output),
             Err(QemuError::MissingMarker {
+                command: TEST_COMMAND.to_owned(),
                 expected: MEMORY_MARKER,
                 output: output.to_owned(),
             })
@@ -625,8 +747,9 @@ mod tests {
         for missing in SHELL_EXPECTED_OUTPUT {
             let output = complete.replace(missing, "");
             assert_eq!(
-                verify_shell_result(Some(0), &output),
+                verify_shell_result(TEST_COMMAND, Some(0), &output),
                 Err(QemuError::MissingShellOutput {
+                    command: TEST_COMMAND.to_owned(),
                     expected: missing,
                     output,
                 })
@@ -639,8 +762,9 @@ mod tests {
         let output = complete_shell_output().replace("uptime: 10 ms", "uptime: nope ms");
 
         assert_eq!(
-            verify_shell_result(Some(0), &output),
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
             Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
                 expected: "uptime: <number> ms",
                 output,
             })
@@ -655,8 +779,9 @@ mod tests {
         );
 
         assert_eq!(
-            verify_shell_result(Some(0), &output),
+            verify_shell_result(TEST_COMMAND, Some(0), &output),
             Err(QemuError::MissingShellOutput {
+                command: TEST_COMMAND.to_owned(),
                 expected: "memory: total=<number> allocated=<number> free=<number> pages",
                 output,
             })
@@ -665,27 +790,37 @@ mod tests {
 
     #[test]
     fn shell_result_requires_each_prompt_and_command_echo() {
-        let output = complete_shell_output().replace("minios> memory", "memory");
-
-        assert_eq!(
-            verify_shell_result(Some(0), &output),
-            Err(QemuError::MissingShellOutput {
-                expected: "minios> memory",
-                output,
-            })
-        );
+        for expected in [
+            "minios> help",
+            "minios> info",
+            "minios> uptime",
+            "minios> memory",
+            "minios> not-a-command",
+            "minios> shutdown",
+        ] {
+            let output = complete_shell_output().replace(expected, "missing prompt and echo");
+            assert_eq!(
+                verify_shell_result(TEST_COMMAND, Some(0), &output),
+                Err(QemuError::MissingShellOutput {
+                    command: TEST_COMMAND.to_owned(),
+                    expected,
+                    output,
+                })
+            );
+        }
     }
 
     #[test]
     fn timeout_error_reports_the_configured_deadline() {
         let error = QemuError::TimedOut {
+            command: TEST_COMMAND.to_owned(),
             deadline: Duration::from_millis(1250),
             output: "partial UART transcript".to_owned(),
         };
 
         assert_eq!(
             error.to_string(),
-            "QEMU test timed out after 1.250 seconds:\npartial UART transcript"
+            "QEMU test timed out after 1.250 seconds:\ncommand: 'qemu-system-riscv64' '-kernel' 'kernel.elf'\npartial UART transcript"
         );
     }
 
@@ -715,8 +850,12 @@ mod tests {
             "yes stdout | head -c 131072; yes stderr | head -c 131072 >&2; printf '[MINIOS_TEST] boot: ok'",
         ]);
 
-        let completed = run_command_with_capture(command, Duration::from_secs(2))
-            .expect("concurrently drained process must complete");
+        let completed = run_command_with_capture(
+            command,
+            "'sh' '-c' 'large-output fixture'".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("concurrently drained process must complete");
 
         assert_eq!(completed.status.code(), Some(0));
         assert!(completed.output.len() >= 262_144);
@@ -742,15 +881,26 @@ mod tests {
             ),
         ]);
 
-        let error = run_command_with_capture(command, Duration::from_millis(50))
-            .expect_err("sleeping process must time out");
+        let command_line = "'sh' '-c' 'timeout fixture'".to_owned();
+        let error =
+            run_command_with_capture(command, command_line.clone(), Duration::from_millis(50))
+                .expect_err("sleeping process must time out");
+        let display = error.to_string();
         let output = match error {
-            QemuError::TimedOut { output, .. } => output,
+            QemuError::TimedOut {
+                command, output, ..
+            } => {
+                assert_eq!(command, command_line);
+                output
+            }
             other => panic!("expected timeout, got {other:?}"),
         };
 
         assert!(output.contains("stdout-before-timeout"));
         assert!(output.contains("stderr-before-timeout"));
+        assert!(display.contains("command: 'sh' '-c' 'timeout fixture'"));
+        assert!(display.contains("stdout-before-timeout"));
+        assert!(display.contains("stderr-before-timeout"));
         let pid = fs::read_to_string(&pid_file).expect("timed-out process must record its PID");
         let status = Command::new("kill")
             .args(["-0", pid.trim()])

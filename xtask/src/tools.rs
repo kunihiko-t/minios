@@ -85,7 +85,7 @@ impl fmt::Display for ToolError {
             }
             Self::UnsupportedQemuVersion(version) => write!(
                 formatter,
-                "QEMU {}.{}.{} is too old; QEMU 9.0.0 or newer is required",
+                "QEMU {}.{}.{} is too old; QEMU 8.2.0 or newer is required",
                 version.major, version.minor, version.patch
             ),
         }
@@ -159,8 +159,8 @@ pub fn check_setup() -> Result<(), ToolError> {
 
 fn minimum_qemu_version() -> Version {
     Version {
-        major: 9,
-        minor: 0,
+        major: 8,
+        minor: 2,
         patch: 0,
     }
 }
@@ -244,14 +244,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_qemu_versions_older_than_nine() {
+    fn accepts_qemu_8_2_0_as_the_compatibility_floor() {
         assert_eq!(
             parse_qemu_version("QEMU emulator version 8.2.0\n"),
-            Err(ToolError::UnsupportedQemuVersion(Version {
+            Ok(Version {
                 major: 8,
                 minor: 2,
                 patch: 0,
-            }))
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_qemu_8_1_x_with_the_compatibility_floor() {
+        let error = parse_qemu_version("QEMU emulator version 8.1.9\n")
+            .expect_err("QEMU before 8.2.0 must be rejected");
+
+        assert_eq!(
+            error,
+            ToolError::UnsupportedQemuVersion(Version {
+                major: 8,
+                minor: 1,
+                patch: 9,
+            })
+        );
+        assert_eq!(
+            error.to_string(),
+            "QEMU 8.1.9 is too old; QEMU 8.2.0 or newer is required"
         );
     }
 }

@@ -81,6 +81,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_explicit_all_and_every_individual_test_filter() {
+        for (args, expected) in [
+            (vec!["test", "all"], TestFilter::All),
+            (vec!["test", "boot"], TestFilter::Boot),
+            (vec!["test", "trap"], TestFilter::Trap),
+            (vec!["test", "timer"], TestFilter::Timer),
+            (vec!["test", "memory"], TestFilter::Memory),
+            (vec!["test", "shell"], TestFilter::Shell),
+        ] {
+            assert_eq!(parse(&owned(&args)), Ok(Command::Test(expected)));
+        }
+    }
+
+    #[test]
     fn parses_setup_command() {
         let args = vec!["setup".to_owned()];
         assert_eq!(parse(&args), Ok(Command::Setup));

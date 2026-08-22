@@ -148,6 +148,20 @@ mod tests {
     }
 
     #[test]
+    fn failed_operation_preserves_stdout_and_stderr() {
+        let output = combine_output(b"stdout diagnostic\n", b"stderr diagnostic\n");
+        let error = CargoError::Failed {
+            command: "cargo fixture".to_owned(),
+            status: Some(1),
+            output,
+        };
+
+        let display = error.to_string();
+        assert!(display.contains("stdout diagnostic"));
+        assert!(display.contains("stderr diagnostic"));
+    }
+
+    #[test]
     fn linker_places_small_data_and_bss_probes_inside_boundaries() {
         let fixture = std::env::temp_dir().join(format!(
             "minios-linker-test-{}-{}",

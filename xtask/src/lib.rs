@@ -217,22 +217,30 @@ fn run_phase_plan(phases: &[Phase]) -> Result<(), XtaskError> {
     run_phases(phases, &mut output, execute_phase)
 }
 
+fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
+    match command {
+        Command::Test(TestFilter::All) => Some(test_phases()),
+        Command::Test(TestFilter::Boot) => Some(vec![Phase::Qemu(qemu::TestKind::Boot)]),
+        Command::Test(TestFilter::Trap) => Some(vec![Phase::Qemu(qemu::TestKind::Trap)]),
+        Command::Test(TestFilter::Timer) => Some(vec![Phase::Qemu(qemu::TestKind::Timer)]),
+        Command::Test(TestFilter::Memory) => Some(vec![Phase::Qemu(qemu::TestKind::Memory)]),
+        Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
+        Command::Check => Some(check_phases()),
+        Command::Setup | Command::Build | Command::Run => None,
+    }
+}
+
 pub fn run(command: Command) -> Result<(), XtaskError> {
+    if let Some(phases) = phase_plan_for(&command) {
+        return run_phase_plan(&phases);
+    }
     match command {
         Command::Setup => tools::check_setup()?,
         Command::Build => {
             cargo::build_kernel(false)?;
         }
         Command::Run => qemu::run_kernel()?,
-        Command::Test(TestFilter::All) => run_phase_plan(&test_phases())?,
-        Command::Test(TestFilter::Boot) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Boot)])?,
-        Command::Test(TestFilter::Trap) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Trap)])?,
-        Command::Test(TestFilter::Timer) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Timer)])?,
-        Command::Test(TestFilter::Memory) => {
-            run_phase_plan(&[Phase::Qemu(qemu::TestKind::Memory)])?
-        }
-        Command::Test(TestFilter::Shell) => run_phase_plan(&[Phase::Qemu(qemu::TestKind::Shell)])?,
-        Command::Check => run_phase_plan(&check_phases())?,
+        Command::Test(_) | Command::Check => unreachable!("phase commands returned above"),
     }
     Ok(())
 }
@@ -255,6 +263,26 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
+    }
+
+    #[test]
+    fn public_test_all_command_connects_to_the_complete_test_plan() {
+        assert_eq!(
+            phase_plan_for(&Command::Test(TestFilter::All)),
+            Some(test_phases())
+        );
+    }
+
+    #[test]
+    fn phase_runner_prints_a_success_summary() {
+        let phases = [Phase::Format, Phase::BuildKernel];
+        let mut output = Vec::new();
+
+        run_phases(&phases, &mut output, |_| Ok::<_, ()>(String::new()))
+            .expect("all successful actions must pass");
+
+        let output = String::from_utf8(output).expect("phase output must be UTF-8");
+        assert!(output.contains("summary: PASSED all 2 phases (elapsed:"));
     }
 
     #[test]

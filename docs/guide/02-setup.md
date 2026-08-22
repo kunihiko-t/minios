@@ -16,7 +16,7 @@ cargo xtask setup
 
 - `rustc --version`: カーネルとホスト側ハーネスをビルドするRust stableです。MiniOSはRust 1.98.0に固定します。
 - `rustup target list --installed`: 裸のRISC-Vカーネルをクロスビルドするための`riscv64gc-unknown-none-elf`ターゲットです。
-- `qemu-system-riscv64 --version`: RISC-V 64の`virt`マシンを実行するQEMUです。MiniOSには9.0.0以上が必要です。
+- `qemu-system-riscv64 --version`: RISC-V 64の`virt`マシンを実行するQEMUです。MiniOSには8.2.0以上が必要です。
 
 ## 検証済みのmacOS環境
 
@@ -52,7 +52,7 @@ macOSで`qemu-system-riscv64 is not installed`と表示された場合は、Home
 brew install qemu
 ```
 
-導入後に、もう一度次を実行してQEMU 9.0.0以上が検出されることを確認してください。
+導入後に、もう一度次を実行してQEMU 8.2.0以上が検出されることを確認してください。
 
 ```sh
 cargo xtask setup
