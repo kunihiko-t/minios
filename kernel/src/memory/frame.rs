@@ -33,7 +33,17 @@ pub struct FrameStats {
     pub free: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 物理 frame の所有権は一つの bitmap にだけ対応付ける。
+///
+/// ```compile_fail
+/// use minios_kernel::memory::frame::FrameAllocator;
+///
+/// let allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+/// // 複製すると同じ物理ページを二つの allocator が返せるため、所有者は複製できない。
+/// let duplicate = allocator.clone();
+/// let _ = duplicate;
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct FrameAllocator<const WORDS: usize> {
     base: usize,
     frame_count: usize,
