@@ -1,9 +1,11 @@
 use core::arch::asm;
 
 // Task 2 で分離したターゲット非依存型をこの ecall 境界から引き続き公開する。
-#[allow(unused_imports)]
 pub use minios_kernel::sbi::{SbiError, SbiRet};
 
+// SBI 仕様で TIME 拡張に固定された extension ID と set_timer の function ID である。
+const SBI_EXT_TIME: usize = 0x5449_4d45;
+const SBI_TIME_SET_TIMER: usize = 0;
 // SBI 仕様で SRST 拡張に固定された extension ID であり、OpenSBI と一致させる。
 const SBI_EXT_SYSTEM_RESET: usize = 0x5352_5354;
 const SBI_SYSTEM_RESET: usize = 0;
@@ -20,6 +22,11 @@ pub enum ResetReason {
     NoReason = 0,
     // SBI SRST 仕様で system failure の reason ID は 1 に固定され、panic と予期外トラップを正常終了と区別する。
     SystemFailure = 1,
+}
+
+pub fn set_timer(deadline: u64) -> Result<usize, SbiError> {
+    // RV64 の a0 は 64 bit なので、絶対時刻を分割せず SBI TIME へ渡せる。
+    sbi_call(deadline as usize, 0, 0, SBI_TIME_SET_TIMER, SBI_EXT_TIME).into_result()
 }
 
 pub fn system_reset(reset_type: ResetType, reason: ResetReason) -> ! {

@@ -7,6 +7,8 @@ mod arch;
 mod console;
 #[cfg(target_arch = "riscv64")]
 mod drivers;
+#[cfg(target_arch = "riscv64")]
+mod time;
 
 #[cfg(target_arch = "riscv64")]
 use core::panic::PanicInfo;
@@ -28,6 +30,9 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     // DTB は後のハードウェア検出で使うまで保持する OpenSBI の ABI 引数である。
     let _ = dtb;
     arch::riscv64::trap::init();
+    if let Err(error) = time::init() {
+        fatal_timer_error("initial schedule", error);
+    }
     crate::println!("MiniOS booting...");
     crate::println!("hart id: {hart_id}");
 
@@ -47,7 +52,33 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         unsafe { core::arch::asm!("ebreak", options(nomem, nostack)) };
     }
 
+    #[cfg(feature = "qemu-test-timer")]
+    {
+        while time::ticks() < 3 {
+            core::hint::spin_loop();
+        }
+        crate::println!("[MINIOS_TEST] timer: ok");
+        arch::riscv64::sbi::system_reset(
+            arch::riscv64::sbi::ResetType::Shutdown,
+            arch::riscv64::sbi::ResetReason::NoReason,
+        );
+    }
+
     arch::riscv64::sbi::wait_for_interrupt()
+}
+
+#[cfg(target_arch = "riscv64")]
+fn fatal_timer_error(operation: &str, error: minios_kernel::sbi::SbiError) -> ! {
+    // タイマを再設定できなければ次の割り込み時刻を保証できず回復規約もないため、
+    // ロック不要の診断経路で SBI エラーを残し、失敗理由で停止する。
+    crate::console::emergency_print(format_args!(
+        "MiniOS timer: {operation} failed with SBI error {}\r\n",
+        error.0
+    ));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
 }
 
 #[cfg(target_arch = "riscv64")]

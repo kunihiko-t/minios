@@ -4,6 +4,7 @@ pub enum Command {
     Build,
     Run,
     TestBoot,
+    TestTimer,
     TestTrap,
 }
 
@@ -19,6 +20,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         [command] if command == "build" => Ok(Command::Build),
         [command] if command == "run" => Ok(Command::Run),
         [command, test] if command == "test" && test == "boot" => Ok(Command::TestBoot),
+        [command, test] if command == "test" && test == "timer" => Ok(Command::TestTimer),
         [command, test] if command == "test" && test == "trap" => Ok(Command::TestTrap),
         [] => Err(CliError::MissingCommand),
         [command, ..] => Err(CliError::UnknownCommand(command.clone())),
@@ -42,6 +44,10 @@ mod tests {
         assert_eq!(
             parse(&["test".to_owned(), "boot".to_owned()]),
             Ok(Command::TestBoot)
+        );
+        assert_eq!(
+            parse(&["test".to_owned(), "timer".to_owned()]),
+            Ok(Command::TestTimer)
         );
         assert_eq!(
             parse(&["test".to_owned(), "trap".to_owned()]),

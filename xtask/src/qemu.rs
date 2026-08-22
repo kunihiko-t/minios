@@ -9,11 +9,13 @@ use std::{
 use crate::cargo;
 
 const BOOT_MARKER: &str = "[MINIOS_TEST] boot: ok";
+const TIMER_MARKER: &str = "[MINIOS_TEST] timer: ok";
 const TRAP_MARKER: &str = "[MINIOS_TEST] trap: ok";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestKind {
     Boot,
+    Timer,
     Trap,
 }
 
@@ -21,6 +23,7 @@ impl TestKind {
     fn feature(self) -> &'static str {
         match self {
             Self::Boot => "qemu-test-boot",
+            Self::Timer => "qemu-test-timer",
             Self::Trap => "qemu-test-trap",
         }
     }
@@ -28,6 +31,7 @@ impl TestKind {
     fn marker(self) -> &'static str {
         match self {
             Self::Boot => BOOT_MARKER,
+            Self::Timer => TIMER_MARKER,
             Self::Trap => TRAP_MARKER,
         }
     }
@@ -313,6 +317,19 @@ mod tests {
             verify_test_result(TestKind::Trap, Some(0), output),
             Err(QemuError::MissingMarker {
                 expected: TRAP_MARKER,
+                output: output.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn successful_timer_requires_the_exact_timer_marker() {
+        let output = "[MINIOS_TEST] boot: ok\n";
+
+        assert_eq!(
+            verify_test_result(TestKind::Timer, Some(0), output),
+            Err(QemuError::MissingMarker {
+                expected: TIMER_MARKER,
                 output: output.to_owned(),
             })
         );

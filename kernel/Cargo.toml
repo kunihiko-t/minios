@@ -7,6 +7,7 @@ build = "build.rs"
 
 [features]
 qemu-test-boot = []
+qemu-test-timer = []
 qemu-test-trap = []
 
 [lib]

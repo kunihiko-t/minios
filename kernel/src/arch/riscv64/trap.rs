@@ -36,6 +36,15 @@ pub extern "C" fn rust_trap_handler() {
     let stval = super::csr::read_stval();
     let cause = decode_scause(scause);
 
+    // supervisor timer interrupt の code 5 だけを通常復帰可能な割り込みとして扱う。
+    // SBI が再設定を拒否した場合は次回 deadline を保証できないため、診断して失敗停止する。
+    if cause == TrapCause::Interrupt(5) {
+        if let Err(error) = crate::time::handle_interrupt() {
+            crate::fatal_timer_error("interrupt rearm", error);
+        }
+        return;
+    }
+
     #[cfg(feature = "qemu-test-trap")]
     // RISC-V 特権仕様で breakpoint 同期例外の cause code は 3 に固定されるため、テスト成功分岐はこの値だけを受ける。
     if cause == TrapCause::Exception(3) {

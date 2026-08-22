@@ -10,6 +10,8 @@
 #[cfg(not(target_arch = "riscv64"))]
 pub mod arch;
 pub mod sbi;
+#[cfg(not(target_arch = "riscv64"))]
+pub mod time;
 
 #[cfg(test)]
 mod tests {
