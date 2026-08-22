@@ -1,26 +1,51 @@
-# パニックと緊急診断
+# 6. panicと緊急診断
 
-`no_std` カーネルにも、回復できない矛盾を検出したときの出力経路が必要です。
-MiniOS の panic handler はメッセージに加え、`PanicInfo` に含まれる場合はファイル名と
-行番号を出力します。OpenSBI から受け取った hart ID は初期化の最初に記録し、その
-記録が完了している場合は一緒に出力します。これにより「何が、どのソース位置で、
-どの hart で」起きたかを UART ログだけから追跡できます。
+## 学習目標
 
-## panic 中はロックを待たない
+`no_std` kernelのpanic handlerが残す情報と、通常console lockを避けるemergency UART経路、
+診断後にfailure resetする理由を説明できるようになります。
 
-panic はコンソールの整形処理中にも発生し得ます。panic handler が通常の
-コンソールロックを再び取得しようとすると、保有者自身を永遠に待つデッドロックに
-なります。そのため `emergency_print` は局所的な `Uart` を作り、16550 の MMIO 送信
-レジスタへ直接書きます。共有フォーマッタ状態やロックを参照しないことが、
-通常出力の状態が壊れた後でも診断を残すための安全条件です。
+## 背景
 
-## 診断後の終了
+panicはformat処理中や割り込み中にも起こります。通常consoleの内部状態やlockがすでに壊れている
+可能性があるため、同じ経路を再利用するとdeadlockし、最も必要な診断が消えます。回復不能な
+状態で処理を続ければ、元の原因とは別の二次障害も生じます。
 
-回復不能なカーネルがそのまま実行を続けると、破損した状態が別の障害を生みます。
-出力後は SBI System Reset 拡張に `Shutdown` と `SystemFailure` を渡し、QEMU を
-失敗理由で終了させます。SBI 呼び出し自体が失敗した場合も緊急 UART でエラーを
-出力し、S-mode 割り込みを無効にして `wfi` で待機します。
+## 実装
 
-panic 出力を追加するときは、ヒープ割り当て、通常コンソールロック、割り込みの
-完了を必要とする機能を呼ばないでください。緊急経路は「システムの残りが信用できない」
-ことを前提に小さく保ちます。
+[`panic`](../../kernel/src/main.rs)はmessage、取得できる場合のsource fileとline、初期化済みなら
+boot hart IDを出します。hart IDは他の初期化より前にatomicへ記録します。
+
+[`emergency_print`](../../kernel/src/console.rs)は局所的な`Uart`を作り、共有formatterやconsole lockを
+取りません。出力後はSBI System Resetへ`Shutdown`と`SystemFailure`を渡します。SBI call自体が
+失敗した場合も数値errorを直接UARTへ残し、S-mode割り込みを止めた`wfi` loopへ入ります。
+
+## 実行と確認
+
+通常の回帰確認は次です。
+
+```sh
+cargo xtask test trap
+```
+
+panicを一時的に観察するときは`kernel_main`のtrap初期化後へ`panic!("exercise")`を置き、
+`cargo xtask run`で`MiniOS panic`、file、line、hart IDが揃うことを確認します。終了statusはfailureに
+なるのが正しいため、観察後は変更を戻します。
+
+## よくある失敗
+
+- panic後に無出力で停止: panic handlerが通常`println!`を通していないか確認します。
+- file/lineが出ない: `PanicInfo::location()`は常に存在するとは限りません。`None`分岐も必要です。
+- panic後も実行が続く: recovery規約がないのでSBI failure resetへ必ず到達させます。
+- 診断中にallocationする: heapもallocatorの整合性も信用できません。固定bufferすら不要な経路を
+  小さく保ちます。
+
+## 演習
+
+通常consoleがlock保持中にpanicした場合のwait graphを書いてください。次にemergency pathが
+参照する状態を列挙し、UART baseとformat arguments以外の共有mutable stateがないことを確認します。
+
+## 次の章
+
+[第5章](05-uart.md)へ戻れます。次は[第7章: 例外・割り込み](07-traps-and-interrupts.md)で、
+CPUが通常control flowを離れる入口を作ります。

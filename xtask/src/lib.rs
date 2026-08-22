@@ -1,15 +1,17 @@
 pub mod cargo;
 pub mod cli;
+pub mod docs;
 pub mod qemu;
 pub mod tools;
 
-use std::{fmt, io::Write, time::Instant};
+use std::{fmt, io::Write, path::Path, time::Instant};
 
 use cli::{Command, TestFilter};
 
 #[derive(Debug)]
 pub enum XtaskError {
     Cargo(cargo::CargoError),
+    Docs(docs::DocsError),
     Qemu(qemu::QemuError),
     Tool(tools::ToolError),
 }
@@ -18,6 +20,7 @@ impl fmt::Display for XtaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cargo(error) => error.fmt(formatter),
+            Self::Docs(error) => error.fmt(formatter),
             Self::Qemu(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
         }
@@ -38,6 +41,12 @@ impl From<cargo::CargoError> for XtaskError {
     }
 }
 
+impl From<docs::DocsError> for XtaskError {
+    fn from(error: docs::DocsError) -> Self {
+        Self::Docs(error)
+    }
+}
+
 impl From<qemu::QemuError> for XtaskError {
     fn from(error: qemu::QemuError) -> Self {
         Self::Qemu(error)
@@ -47,6 +56,8 @@ impl From<qemu::QemuError> for XtaskError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Format,
+    DocsLinks,
+    DocsGuideStructure,
     ClippyXtask,
     ClippyKernelLib,
     ClippyKernelBin,
@@ -60,6 +71,7 @@ impl Phase {
     fn cargo_args(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Format => Some(&["fmt", "--all", "--", "--check"]),
+            Self::DocsLinks | Self::DocsGuideStructure => None,
             Self::ClippyXtask => Some(&[
                 "clippy",
                 "-p",
@@ -110,6 +122,8 @@ impl Phase {
             return format!("cargo {}", args.join(" "));
         }
         match self {
+            Self::DocsLinks => "check local Markdown links".to_owned(),
+            Self::DocsGuideStructure => "check guide chapter structure".to_owned(),
             Self::Qemu(qemu::TestKind::Boot) => "QEMU boot test".to_owned(),
             Self::Qemu(qemu::TestKind::Trap) => "QEMU trap test".to_owned(),
             Self::Qemu(qemu::TestKind::Timer) => "QEMU timer test".to_owned(),
@@ -135,6 +149,8 @@ fn test_phases() -> Vec<Phase> {
 fn check_phases() -> Vec<Phase> {
     vec![
         Phase::Format,
+        Phase::DocsLinks,
+        Phase::DocsGuideStructure,
         Phase::ClippyXtask,
         Phase::ClippyKernelLib,
         Phase::ClippyKernelBin,
@@ -204,8 +220,22 @@ fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
     if let Some(args) = phase.cargo_args() {
         return cargo::run(args).map_err(XtaskError::Cargo);
     }
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask must be in the workspace root");
+    match phase {
+        Phase::DocsLinks => {
+            docs::check_local_links(workspace)?;
+            return Ok(String::new());
+        }
+        Phase::DocsGuideStructure => {
+            docs::check_guide_structure(workspace)?;
+            return Ok(String::new());
+        }
+        _ => {}
+    }
     let Phase::Qemu(kind) = phase else {
-        unreachable!("Cargo phases returned above")
+        unreachable!("non-QEMU phases returned above")
     };
     // 起動遅延は許容しつつ、停止したゲストを早期に診断できる統一期限を使う。
     qemu::run_test(kind, std::time::Duration::from_secs(5)).map_err(XtaskError::Qemu)
@@ -291,6 +321,8 @@ mod tests {
             check_phases(),
             vec![
                 Phase::Format,
+                Phase::DocsLinks,
+                Phase::DocsGuideStructure,
                 Phase::ClippyXtask,
                 Phase::ClippyKernelLib,
                 Phase::ClippyKernelBin,

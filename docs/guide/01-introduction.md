@@ -1,33 +1,67 @@
 # 1. MiniOSで学ぶこと
 
-## この章の目標
+## 学習目標
 
-MiniOSは、RustとRISC-V 64を使ってOSの基本要素を段階的に学ぶための小さなカーネルです。最初のマイルストーンでは、QEMU上でカーネルを起動し、UARTの対話シェル、例外とタイマー割り込み、物理ページ管理までを作ります。完成したコードを動かすだけでなく、各部がハードウェア上でなぜ必要なのかを追えることを目標にします。
+この章では、MiniOSの完成地点と学習範囲を把握します。読み終えると、QEMU上で動く小さな
+カーネルを題材に、起動、UART、トラップ、タイマー、物理ページ管理、シェルをどの順に
+組み立てるのかを説明できます。
 
-## 前提知識と開発環境
+## 背景
 
-Rustの基本的な構文、Gitの基本操作、CPUが命令を実行する流れを知っていると読み進めやすくなります。開発にはRust stable、`riscv64gc-unknown-none-elf`ターゲット、そしてRISC-VをエミュレートするQEMUが必要です。次章で`cargo xtask setup`を使い、必要な環境がそろっていることを確認します。
+通常のRustプログラムはOSからプロセス、仮想メモリ、標準入出力を提供してもらいます。
+カーネルを作るときは、その「提供される側」を自分で用意します。そこでMiniOSは対象を
+RISC-V 64、QEMU `virt`、OpenSBI、1 hart、128 MiB RAMに固定し、一つずつ観察できる規模に
+保ちます。Rustの基本構文、Gitの基本操作、CPUが命令を順に実行することを知っていれば
+読み始められます。
 
-## このマイルストーンに含める概念
+## 実装
 
-- OpenSBIからSupervisor Modeのカーネルへ制御を渡す起動処理
-- `no_std` Rust、リンカスクリプト、RISC-V向けクロスビルド
-- QEMU `virt` の16550互換UARTを使う入出力と診断
-- 例外・割り込み、SBIタイマー、稼働時間の計測
-- ビットマップによる物理ページ管理
-- 固定長入力バッファを使う小さな対話シェル
-- `cargo xtask`によるセットアップ、ビルド、実行、テストの統一
+最初のマイルストーンに含めるのは次の機能です。
 
-## 今回は扱わないもの
+- OpenSBIからSupervisor modeへ入る起動コードと`no_std` Rust
+- 16550互換UARTによる出力、入力、panic診断
+- 例外・割り込み入口、SBIタイマー、100 Hzのtick
+- bitmap方式の4 KiB物理ページallocator
+- heapを使わない固定長入力と6 commandの対話shell
+- host test、RISC-V cross build、QEMU testを統合する`cargo xtask`
 
-学習対象を絞るため、動的ヒープ、仮想メモリ、ユーザーモード、プロセスとスケジューラ、ファイルシステム、ネットワーク、Docker、実機対応、マルチハート対応はこのマイルストーンに含めません。まず1ハートのQEMU `virt` 上で、カーネルの土台を確実に理解します。
+dynamic heap、Sv39仮想memory、user mode、process、filesystem、network、multi-hart、実機対応は
+現在の実装に先行して抽象化せず、[第12章](12-next-steps.md)の発展課題にします。
 
-## 章の進め方
+## 実行と確認
 
-このガイドは順番に積み上がります。次章で環境を確認した後、`no_std`とリンカスクリプト、OpenSBIからの起動、UART、panic診断、例外と割り込み、タイマー、物理メモリ、対話シェル、テストハーネスの順に進みます。前の章で作った小さな部品が次の章の前提になるため、途中の章を飛ばさずに進めると設計上のつながりを確認できます。
+まずrepository rootで開発command一覧を表示します。
 
-## 確認演習
+```console
+$ cargo xtask
+missing xtask command
 
-次章を読む前に、ホストOSがmacOSまたはLinuxであり、RustとQEMUをインストールできることを確認してください。Goはこのプロジェクトのビルドには使いません。
+MiniOS development commands:
+  cargo xtask setup
+  cargo xtask build
+  cargo xtask run
+  cargo xtask test [all|boot|trap|timer|memory|shell]
+  cargo xtask check
+```
 
-次は[開発環境とQEMU](02-setup.md)です。
+この時点では終了status 1で構いません。commandを省略したという診断と、以後使う五つの入口が
+表示されれば、host側の教材入口を確認できています。
+
+## よくある失敗
+
+- 最初からprocessやfilesystemまで設計すると、起動失敗の原因と上位機能のbugを分離できません。
+  章順に検証markerを増やしてください。
+- hostとguestを混同すると、macOS向けbinaryをQEMUへ渡したり、RISC-V binaryをhost testで
+  実行したりします。target tripleと実行場所を常に確認します。
+- GoやDockerを必須だと思うことがありますが、MiniOSのbuild graphはRust、Cargo、QEMUだけです。
+
+## 演習
+
+上の機能一覧を「hostで単体testできる処理」と「QEMUでなければ確認できない処理」に分類して
+ください。command parserは前者、UART MMIOとSBI resetは後者です。分類できない項目は、どこに
+hardware境界があるかをメモしておきます。
+
+## 次の章
+
+[ガイド索引](README.md)へ戻ることもできます。次は[第2章: 開発環境とQEMU](02-setup.md)で、
+Rust targetとQEMUを同じcommandから診断します。

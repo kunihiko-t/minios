@@ -29,8 +29,9 @@ static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(UNKNOWN_HART_ID);
 const PHYSICAL_MEMORY_END: usize = 0x8800_0000;
 
 #[cfg(target_arch = "riscv64")]
+// Safety: linker.ldがRISC-V kernel image末尾に必ず定義するC ABI symbolであり、Rust側は
+// addr_of!でaddressを形成するだけで、extern staticの内容をread/writeしない。
 unsafe extern "C" {
-    // linker.ld が kernel image の直後へ置く境界であり、OpenSBI とカーネル自身を割り当て対象から除外する。
     static __kernel_end: u8;
 }
 

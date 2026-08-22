@@ -1,25 +1,54 @@
-# UART コンソール
+# 5. UARTで文字を出す・受け取る
 
-QEMU `virt` の 16550 互換 UART は MMIO ベース `0x1000_0000` にあります。通常の
-メモリではないため、MiniOS は `read_volatile` と `write_volatile` を使います。
-volatile によりコンパイラはデバイスレジスタへのアクセスを削除・統合・キャッシュ
-できません。
+## 学習目標
 
-Line Status Register はベースから offset 5 です。bit 5 は送信保持レジスタが空で
-送信可能であること、bit 0 は受信バイトが存在することを表します。`write_byte` は
-bit 5 を待って offset 0 へ書き込み、`has_byte` は bit 0 を確認し、`read_byte` は
-bit 0 を待って offset 0 から読みます。
+QEMU `virt`の16550互換UARTについて、MMIO、volatile access、Line Status Registerのbit、
+format出力とbyte入出力の責務分離を説明できるようになります。
 
-`Uart` は `core::fmt::Write` を実装しているので、`console::_print` と
-`print!`/`println!` は割り当てなしで整形済み文字列を UART へ送れます。
+## 背景
 
-```text
-cargo xtask test boot
+kernel起動直後にはfileやterminal driverがありません。UART MMIOはCPUからaddressとして見えても
+通常RAMではなく、read/write自体がdeviceへの作用です。compilerに値の再利用やaccessの削除を
+許すとhardwareへ届かないため、volatile境界が必要です。
+
+## 実装
+
+[`Uart`](../../kernel/src/drivers/uart.rs)はQEMU `virt`固有のbase `0x1000_0000`を持ちます。
+base + 5のLine Status Registerでbit 5が送信可能、bit 0が受信可能です。`write_byte`はbit 5を
+待ってoffset 0へ`write_volatile`し、`has_byte`と`read_byte`はbit 0を見てoffset 0から
+`read_volatile`します。
+
+[`console`](../../kernel/src/console.rs)はdevice registerを隠し、`core::fmt::Write`経由の
+`print!`/`println!`、byte入力、緊急出力を提供します。formatとdevice accessを分けることで、
+shellはUART register配置を知りません。
+
+## 実行と確認
+
+```console
+$ cargo xtask test boot
+...
+MiniOS booting...
+hart id: 0
+[MINIOS_TEST] boot: ok
 ```
 
-このテストは feature `qemu-test-boot` を付けてカーネルをビルドし、UART と OpenSBI
-の出力を捕捉します。5 秒以内に QEMU が終了し、終了 status が 0 で、かつ正確な
-`[MINIOS_TEST] boot: ok` が含まれる場合だけ成功です。非ゼロ終了はクラッシュまたは
-QEMU 起動失敗として出力を添えて失敗し、marker がない正常終了も失敗です。期限切れ
-では QEMU を kill して wait した後、捕捉済み stdout と stderr を返すため、無限待機と
-起動直後のクラッシュを区別できます。
+5秒以内のstatus 0だけでなくmarkerが必要です。timeout時はxtaskがQEMUをkillしてwaitし、捕捉した
+stdout/stderrと実際のcommand lineを省略せず返します。
+
+## よくある失敗
+
+- 文字化け・欠落: transmit-ready bit 5を待たず書いていないか確認します。
+- 入力が永遠に待つ: receive-ready bit 0とtransmit bitを取り違えていないか確認します。
+- release buildだけ出力が消える: MMIOに通常のpointer read/writeを使っていないか監査します。
+- timeoutとcrashを混同する: xtaskのstatus、timeout文、最後のUART行を別々に読みます。
+
+## 演習
+
+Line Status Registerの値が`0b0010_0001`のとき、送信と受信のどちらが可能か答えてください。
+次に`Uart`、`console`、`shell`の各層が知るべき情報を一行ずつ書き、register offsetがshellへ
+漏れていないことを確認します。
+
+## 次の章
+
+[第4章](04-boot-with-opensbi.md)へ戻れます。次は
+[第6章: panicと診断](06-panic-and-diagnostics.md)で、通常経路が壊れた後にも使える出力を作ります。

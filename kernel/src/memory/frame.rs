@@ -130,7 +130,72 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameAllocator, FrameError, PhysFrame};
+    use super::{FrameAllocator, FrameError, FrameStats, PhysFrame};
+
+    #[test]
+    fn stats_report_all_frames_free_before_allocation() {
+        let allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+
+        assert_eq!(
+            allocator.stats(),
+            FrameStats {
+                total: 4,
+                allocated: 0,
+                free: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn stats_report_one_used_frame_after_allocation() {
+        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        allocator.allocate().unwrap();
+
+        assert_eq!(
+            allocator.stats(),
+            FrameStats {
+                total: 4,
+                allocated: 1,
+                free: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn rejected_deallocation_does_not_change_stats() {
+        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        allocator.allocate().unwrap();
+
+        assert_eq!(
+            allocator.deallocate(PhysFrame::from_start(0x9000).unwrap()),
+            Err(FrameError::OutOfRange)
+        );
+        assert_eq!(
+            allocator.stats(),
+            FrameStats {
+                total: 4,
+                allocated: 1,
+                free: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn stats_restore_free_count_after_deallocation() {
+        let mut allocator = FrameAllocator::<1>::new(0x4000, 0x8000).unwrap();
+        let frame = allocator.allocate().unwrap();
+
+        allocator.deallocate(frame).unwrap();
+
+        assert_eq!(
+            allocator.stats(),
+            FrameStats {
+                total: 4,
+                allocated: 0,
+                free: 4,
+            }
+        );
+    }
 
     #[test]
     fn allocates_and_reuses_a_frame() {

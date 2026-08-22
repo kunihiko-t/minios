@@ -110,4 +110,15 @@ mod tests {
 
         assert_eq!(line.finish(), Ok(""));
     }
+
+    #[test]
+    fn backspace_after_overflow_keeps_the_submitted_line_invalid() {
+        let mut line = LineBuffer::<1>::new();
+        assert_eq!(line.push(b'a'), Ok(()));
+        assert_eq!(line.push(b'b'), Err(LineError::Full));
+
+        assert_eq!(line.backspace(), Some(b'a'));
+
+        assert_eq!(line.finish(), Err(LineError::Full));
+    }
 }

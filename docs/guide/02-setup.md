@@ -1,63 +1,63 @@
 # 2. 開発環境とQEMU
 
-## この章の目標
+## 学習目標
 
-MiniOSをビルドする前に、Rust、RISC-Vターゲット、QEMUが使えることを確認します。環境確認の入口はすべて次のコマンドです。
+MiniOSのbuildに必要なRust 1.98.0、`riscv64gc-unknown-none-elf` target、QEMU 8.2.0以上を
+`cargo xtask setup`で検査し、不足時の直し方を説明できるようになります。
 
-```sh
-cargo xtask setup
-```
+## 背景
 
-成功時には、Rustのバージョン、`riscv64gc-unknown-none-elf`ターゲット、QEMUのバージョンが表示されます。`cargo xtask`は、この後のビルド、実行、テストにも使う共通の入口です。
+cross buildでは、host compilerが使えることとguest用standard library componentが入っている
+ことは別問題です。またQEMUのcommand名と導入package名はmacOSとLinuxで異なります。手順を
+人間の記憶に任せず、host toolの`xtask`が実行fileとversionを同じ基準で診断します。
 
-## 検出するツール
+## 実装
 
-`cargo xtask setup`は次の3つを確認します。
+`cargo xtask setup`は次を調べます。
 
-- `rustc --version`: カーネルとホスト側ハーネスをビルドするRust stableです。MiniOSはRust 1.98.0に固定します。
-- `rustup target list --installed`: 裸のRISC-Vカーネルをクロスビルドするための`riscv64gc-unknown-none-elf`ターゲットです。
-- `qemu-system-riscv64 --version`: RISC-V 64の`virt`マシンを実行するQEMUです。MiniOSには8.2.0以上が必要です。
+- `rustc --version`: projectが固定するRust stable 1.98.0
+- `rustup target list --installed`: bare-metal guest target
+- `qemu-system-riscv64 --version`: QEMU 8.2.0以上
 
-## 検証済みのmacOS環境
+Apple Silicon macOSではQEMU 11.1.0で検証しました。Ubuntu 24.04のQEMU 8.2 seriesをCI互換の
+下限にし、suffix付きpackage versionも解析します。関係するhost実装は
+[`xtask/src/tools.rs`](../../xtask/src/tools.rs)です。
 
-Apple Silicon搭載macOSで次のQEMU出力を確認しました。
+## 実行と確認
 
-```text
-QEMU emulator version 11.1.0
-```
-
-この環境では、セットアップハーネスは次のように表示されます。
-
-```text
+```console
+$ cargo xtask setup
 Rust: rustc 1.98.0 (88d9e12ae 2026-08-18)
 Rust target: riscv64gc-unknown-none-elf
 QEMU: 11.1.0
 ```
 
-## よくある失敗と修正方法
+commit hashやQEMUのminor versionは環境により変わります。三項目が表示され、終了status 0なら
+準備完了です。
 
-### RISC-Vターゲットがない
+## よくある失敗
 
-`Rust target riscv64gc-unknown-none-elf is not installed`と表示された場合は、次を実行してからもう一度`cargo xtask setup`を実行します。
+### RISC-V targetがない
+
+症状に`Rust target riscv64gc-unknown-none-elf is not installed`が含まれる場合は次を実行します。
 
 ```sh
-rustup target add riscv64gc-unknown-none-elf
+rustup target add riscv64gc-unknown-none-elf --toolchain 1.98.0
 ```
 
 ### QEMUがない
 
-macOSで`qemu-system-riscv64 is not installed`と表示された場合は、HomebrewでQEMUを導入します。
+macOSは`brew install qemu`、Ubuntu/Debianは`sudo apt-get install qemu-system-misc`を使います。
+導入後、直接`qemu-system-riscv64 --version`を確認してからsetupを再実行します。詳細は
+[troubleshooting](../reference/troubleshooting.md)にもまとめています。
 
-```sh
-brew install qemu
-```
+## 演習
 
-導入後に、もう一度次を実行してQEMU 8.2.0以上が検出されることを確認してください。
+`rustup target list --installed`と`qemu-system-riscv64 --version`を個別に実行し、setup出力の
+どの行へ対応するか確認してください。次に`cargo xtask setup`の終了statusをshellで確認し、
+文章ではなくprocess境界で成功が判定されていることを確かめます。
 
-```sh
-cargo xtask setup
-```
+## 次の章
 
-## 確認演習
-
-この章の終わりに`cargo xtask setup`が終了コード0で完了することを確認してください。次章では、この環境を使って`no_std`カーネルとリンカスクリプトを準備します。
+[第1章](01-introduction.md)へ戻れます。次は
+[第3章: `no_std`とlink配置](03-no-std-and-linking.md)で、OSなしで実行できるELFを作ります。

@@ -1,55 +1,54 @@
-# supervisor timer 割り込み
+# 8. supervisor timer割り込み
 
-MiniOS は一定間隔の supervisor timer 割り込みを、将来のスケジューラやタイムアウトの
-基準となる tick に変換します。QEMU `virt` の timebase は 10 MHz なので、`time` CSR は
-1 秒に 10,000,000 増えます。100 Hz、つまり 1 tick を 10 ms とすると、次の割り込みまでの
-間隔は `10,000,000 / 100 = 100,000` cycle です。
+## 学習目標
 
-## `time` CSR と OpenSBI TIME
+QEMU `virt`の10 MHz timebaseを100 Hz tickへ変換する方法、SBI TIMEの絶対deadline、STIE/SIEの
+許可順、atomic tickの読み方とtestが保証する範囲を説明できるようになります。
 
-S-mode は読み取り専用の `time` CSR から現在の 64-bit 時刻を取得できます。一方、次の
-timer 割り込み時刻を設定する機械モードのレジスタへ直接は書きません。MiniOS は SBI
-TIME 拡張 (`0x54494D45`) の `set_timer` function 0 を呼び、OpenSBI に絶対時刻を渡します。
+## 背景
 
-初期化時と各割り込みの処理時に `time` を読み直し、`now + 100,000` を次の絶対 deadline
-として設定します。相対時間だけを SBI に渡すのではありません。割り込みを処理しただけでは
-次回のイベントは予約されないため、handler は tick を増やすたびに `set_timer` で rearm
-します。この方式では handler の実行が遅れた場合も、すでに過去となった deadline を連続して
-消化せず、処理時点から次の 10 ms を予約します。
+S-modeはread-onlyの`time` CSRから現在時刻を読めますが、M-modeのtimer registerへ直接書きません。
+OpenSBIへ次の発火時刻を依頼し、supervisor timer interrupt code 5をtrap handlerで受けます。
+10,000,000 Hz / 100 Hzなので1 tickは100,000 cycle、10 msです。
 
-SBI の timer 設定が失敗すると、MiniOS には tick を継続する別経路も回復規約もありません。
-初回設定と handler 内の再設定のどちらでも、数値の SBI error を緊急 UART 経路へ出し、
-`SystemFailure` で停止します。失敗を無視して不規則な時刻を公開することはありません。
+## 実装
 
-## STIE と SIE の順序
+[`time`](../../kernel/src/time.rs)は初期化時とhandlerごとに`time`を読み、`now + 100_000`をSBI TIME
+extension `0x54494D45` function 0へ渡します。過去のdeadlineへ追いつく方式ではなく、処理時点から
+次の10 msを予約します。先にtrap entry、次に初回deadline、`sie.STIE` bit 5、最後に
+`sstatus.SIE` bit 1を有効にし、準備前の割り込みを避けます。
 
-割り込み許可は局所から大域の順に行います。
+handlerは`AtomicU64`を`Relaxed`でincrementし、次のdeadlineを再予約します。現在はsingle hartで
+tickは他stateの公開flagではないため、このorderingで十分です。SBI errorには回復規約がないので、
+初回予約も再予約も数値errorをemergency UARTへ出してfailure resetします。
 
-1. `stvec` に初期化済み trap entry を登録する。
-2. SBI で最初の絶対 deadline を予約する。
-3. `sie.STIE` (bit 5) を設定し、supervisor timer を許可する。
-4. 最後に `sstatus.SIE` (bit 1) を設定し、S-mode の割り込みを大域的に許可する。
+## 実行と確認
 
-先に `sstatus.SIE` を立てると、対応 handler や deadline の準備が終わる前に trap へ入る
-可能性があります。MiniOS は既存の CSR bit を read-modify-write で保存し、この順序を崩しません。
-trap dispatcher が通常復帰させるのは `Interrupt(5)` だけです。ほかの割り込みと例外は従来どおり
-`scause`、`sepc`、`stval` を診断して失敗停止します。
+```console
+$ cargo xtask test timer
+...
+[MINIOS_TEST] timer: ok
+```
 
-## tick の観測とミリ秒変換
+kernelは3 tick以上を観測してmarkerを出します。これはtimer割り込みがhandlerへ複数回入りtickが
+進むことを確認しますが、3回という短い観測だけで「毎回、新しい将来deadlineへ正しく再予約した」
+ことを独立に証明するものではありません。pending状態の再trapでもcounterだけは進み得るためです。
+再予約の根拠はhandlerの`read_time + CYCLES_PER_TICK`実装、SBI error経路、手動受入で時間を空けた
+2回の`uptime`増加を合わせて判断します。
 
-処理済み tick 数は `AtomicU64` に置き、handler が `fetch_add`、通常コードが `load` します。
-現在は単一 hart かつ writer は handler 一つで、この値はほかのメモリ状態を公開する同期旗では
-ありません。そのため両操作は `Relaxed` ordering で十分です。multi-hart 化や tick と別状態の
-公開を結び付ける場合は、この前提と ordering を再検討する必要があります。
+## よくある失敗
 
-`ticks_to_millis` は `ticks * 1,000 / 100` で変換し、乗算は飽和させて wraparound を避けます。
-したがって 1 tick は 10 ms、250 tick は 2,500 ms です。`uptime_millis` は atomic counter の
-現在値に同じ変換を適用します。
+- timer test timeout: `time` CSR、SBI extension ID、STIE/SIE、cause 5 dispatchの順に調べます。
+- 即座にtrapを繰り返す: absolute deadlineではなく相対値を渡していないか確認します。
+- tickは増えるが時間換算が違う: `TIMEBASE_HZ`と`TICKS_PER_SECOND`から100,000 cycleを再計算します。
+- 3 tick markerだけでrearmを断言する: testの観測範囲とimplementation inspectionを区別します。
 
-## QEMU での確認
+## 演習
 
-`cargo xtask test timer` は `qemu-test-timer` feature を付け、5 秒の期限で QEMU を起動します。
-kernel は少なくとも 3 回の supervisor timer 割り込みが処理されるまで待ち、
-`[MINIOS_TEST] timer: ok` を出して成功理由でリセットします。xtask は終了 status 0 とこの
-完全一致 marker の両方を要求するため、単なる起動、誤った cause の分配、rearm 忘れは成功に
-なりません。
+`ticks_to_millis(250)`を手計算し、host testの期待値2,500 msと照合してください。次にQEMU shellで
+`uptime`を2回、1秒以上空けて実行し、差が概ね1,000 ms以上になることを確認します。
+
+## 次の章
+
+[第7章](07-traps-and-interrupts.md)へ戻れます。次は
+[第9章: 物理memory](09-physical-memory.md)で、kernel imageより後ろのRAMをpage単位に管理します。

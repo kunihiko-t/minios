@@ -16,7 +16,8 @@ pub fn decode_scause(value: usize) -> TrapCause {
 
 #[cfg(target_arch = "riscv64")]
 pub fn init() {
-    // `trap.S` が 4-byte 整列で公開する Direct-mode トラップ入口だけを参照する。
+    // Safety: trap.SがC ABI symbolを4-byte整列で必ず公開するRISC-V buildだけで有効であり、
+    // addressを形成するだけでentry codeのmemoryを読み書きしない。
     unsafe extern "C" {
         fn __trap_entry();
     }

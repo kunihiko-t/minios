@@ -7,7 +7,7 @@
 mode、timeout 時のプロセス回収と transcript の読み方、`cargo xtask check` の正確な実行順を
 説明できるようになります。
 
-## 前提となる CPU・OS 概念
+## 背景
 
 カーネル本体は `riscv64gc-unknown-none-elf` 向けの `no_std` バイナリです。一方、xtask は
 開発機の OS 上で動く通常の Rust プログラムで、Cargo と QEMU を子プロセスとして起動します。
@@ -15,7 +15,9 @@ mode、timeout 時のプロセス回収と transcript の読み方、`cargo xtas
 動く MiniOS を指します。プロセスの終了 status、標準入力、標準出力、標準エラー、deadline
 （制限時間）がこの章で使う主な OS 概念です。
 
-## なぜ xtask パターンを使うのか
+## 実装
+
+### なぜ xtask パターンを使うのか
 
 Cargo は `cargo xtask ...` を workspace 内の `xtask` binary へ渡せます。この小さな host tool に
 環境診断、cross build、QEMU 起動、検証順序を集約すると、追加の task runner や OS ごとの shell
@@ -34,7 +36,7 @@ test のように Cargo が所有する操作だけを Cargo subprocess にし�
 Rust 関数を直接呼びます。この境界により順序と失敗処理が一つの runner に集まり、再帰による
 終わらない検証を防げます。
 
-## host test と guest test を分ける理由
+### host test と guest test を分ける理由
 
 hardware に依存しない処理は host 上で速く、細かく検査します。対象は shell parser と固定長
 line buffer、tick から時間への変換、物理 frame allocator、xtask 自身の parser や process
@@ -55,7 +57,7 @@ reset の結線を実際の RISC-V machine 上で検査します。`cargo xtask 
 host test を先に置くことで速い失敗を先に返し、その後は boot から対話 shell へ依存関係の順に
 guest 全5経路を確認します。
 
-## QEMU の2つの検証 mode
+### QEMU の2つの検証 mode
 
 boot、trap、timer、memory は marker mode です。それぞれ専用 Cargo feature で kernel を build
 し、UART transcript と status 0 に加えて次の完全一致 marker を要求します。
@@ -76,7 +78,7 @@ shell は interactive mode です。通常 kernel の最初の `minios> ` を待
 status 0 をすべて要求します。この一連の transcript で UART 送受信、parser、timer、allocator、
 SBI reset を同じ session 内で検査できます。
 
-## timeout、cleanup、失敗 transcript
+### timeout、cleanup、失敗 transcript
 
 各 QEMU test の deadline は5秒です。xtask は stdout と stderr を起動直後から別 thread で読み、
 pipe buffer が満杯になって guest が停止することを防ぎます。deadline を越えた場合は QEMU を
@@ -90,41 +92,45 @@ marker 不足、shell 出力不足、非0 status の場合も transcript を省�
 hang を区別できます。Cargo subprocess の失敗も、実行 command、終了 status、stdout/stderr を
 表示します。
 
-## `check` の正確な phase 順序
+### `check` の正確な phase 順序
 
-`cargo xtask check` は次の12 phase をこの順で実行し、最初の失敗で停止します。順序を変えると、
+`cargo xtask check` は次の14 phase をこの順で実行し、最初の失敗で停止します。formatの直後に
+教材navigationと章構造を検査してからcompilerへ進みます。順序を変えると、
 速い静的検査より先に QEMU を起動したり、検査していない binary を guest test に渡したりするため、
 この並び自体が harness の契約です。
 
 ```text
 1. cargo fmt --all -- --check
-2. cargo clippy -p xtask --all-targets -- -D warnings
-3. cargo clippy -p minios-kernel --lib -- -D warnings
-4. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf -- -D warnings
-5. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf
-6. cargo test -p minios-kernel --lib
-7. cargo test -p xtask
-8. QEMU boot test
-9. QEMU trap test
-10. QEMU timer test
-11. QEMU memory test
-12. QEMU shell test
+2. check local Markdown links
+3. check guide chapter structure
+4. cargo clippy -p xtask --all-targets -- -D warnings
+5. cargo clippy -p minios-kernel --lib -- -D warnings
+6. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf -- -D warnings
+7. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf
+8. cargo test -p minios-kernel --lib
+9. cargo test -p xtask
+10. QEMU boot test
+11. QEMU trap test
+12. QEMU timer test
+13. QEMU memory test
+14. QEMU shell test
 ```
 
 各 header は `[現在/総数]`、各 phase 結果は elapsed time を表示します。最後は全成功なら
-`summary: PASSED all 12 phases`、失敗なら停止した phase 番号、成功数、失敗数、全 elapsed time
+`summary: PASSED all 14 phases`、失敗なら停止した phase 番号、成功数、失敗数、全 elapsed time
 を表示します。
 
-## 関係するソースファイル
+### 関係するソースファイル
 
 - `xtask/src/cli.rs`: public command と test filter の構文
 - `xtask/src/lib.rs`: phase 順序、first-failure runner、summary
 - `xtask/src/cargo.rs`: Cargo subprocess と command/status/transcript 診断
 - `xtask/src/qemu.rs`: QEMU 引数、marker/interactive verifier、timeout cleanup
+- `xtask/src/docs.rs`: local Markdown linkとChapter 1–12の必須構造
 - `kernel/src/main.rs`: test feature ごとの marker と shell 起動
 - `.github/workflows/ci.yml`: Linux 上で同じ setup/check を呼ぶ CI
 
-## 実行コマンドと期待出力
+## 実行と確認
 
 まず toolchain、RISC-V target、QEMU を診断します。
 
@@ -143,18 +149,18 @@ UART、OpenSBI、process-control interface を CI の互換境界にします。
 
 ```console
 $ cargo xtask check
-[1/12] cargo fmt --all -- --check
-phase 1/12 passed (elapsed: ...s)
+[1/14] cargo fmt --all -- --check
+phase 1/14 passed (elapsed: ...s)
 ...
-[12/12] QEMU shell test
-phase 12/12 passed (elapsed: ...s)
-summary: PASSED all 12 phases (elapsed: ...s)
+[14/14] QEMU shell test
+phase 14/14 passed (elapsed: ...s)
+summary: PASSED all 14 phases (elapsed: ...s)
 ```
 
 一経路だけ反復するときは、たとえば `cargo xtask test trap` を使います。最終確認では必ず
 `cargo xtask check` へ戻り、host と guest 全経路を省略しないでください。
 
-## Linux CI とローカル検証の同一性
+### Linux CI とローカル検証の同一性
 
 GitHub Actions は `ubuntu-latest` に `qemu-system-misc` を導入し、Rust 1.98.0、
 `riscv64gc-unknown-none-elf` target、rustfmt、Clippy を固定して用意します。cache 対象は Cargo の
@@ -162,7 +168,7 @@ registry/git data と workspace の `target` だけです。その後に実行�
 ローカルと同じ `cargo xtask setup` と `cargo xtask check` の2つだけです。CI 専用の検証 script
 を持たないため、開発者が手元で通した入口と CI の判定がずれません。
 
-## よくある失敗と調査方法
+## よくある失敗
 
 - `missing Rust target`: `rustup target add riscv64gc-unknown-none-elf --toolchain 1.98.0` を実行し、
   `cargo xtask setup` を再実行します。
@@ -177,14 +183,14 @@ registry/git data と workspace の `target` だけです。その後に実行�
 - shell 出力不足: `minios> <command>` の echo と各 response の順を transcript で追い、prompt
   が毎回戻っているか確認します。
 
-## 小さな確認演習
+## 演習
 
 `cargo xtask test memory` を実行し、phase header、memory marker、elapsed time、成功 summary の
 4点を探してください。次に `xtask/src/qemu.rs` の memory marker 文字列を一時的に1文字だけ変え、
 status 0 でも verifier が transcript 付きで失敗することを確認します。確認後は変更を戻し、
 `cargo xtask check` で全経路を再検証してください。
 
-## 次章とのつながり
+## 次の章
 
 ここまでで、現在の kernel の振る舞いを host と QEMU の両側から守る単一入口ができました。
 次章ではこの安全網を維持したまま、Device Tree、heap、仮想 memory、user mode へ学習範囲を

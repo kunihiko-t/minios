@@ -1,36 +1,50 @@
-# 物理ページ管理
+# 9. 物理memoryとpage管理
 
-MiniOS がここで扱うのは、MMU を有効にする前の物理アドレスです。仮想アドレスは将来 Sv39
-ページテーブルで物理アドレスへ変換されますが、物理 page allocator はその変換先となる RAM
-のページを渡します。
+## 学習目標
 
-## 範囲と整列
+4 KiB物理page、`__kernel_end`、bitmap allocator、first-fit、解放error、統計の不変条件を説明できる
+ようになります。
 
-1 ページは 4 KiB (`4096` byte) です。allocator は開始・終了・`PhysFrame` の開始アドレスが
-4 KiB 整列している場合だけ受け入れます。QEMU virt の RAM は `0x8000_0000..0x8800_0000`
-ですが、OpenSBI が置かれる低位側と、`__kernel_end` までのカーネル image は使用済みです。
-従って初期化範囲は `align_up(__kernel_end, 4096)..0x8800_0000` です。
+## 背景
 
-128 MiB は 32,768 ページなので、1 ページを 1 bit で表す bitmap は 32,768 bit、すなわち
-4 KiB です。`FrameAllocator<512>` は `u64` 512 word = 32,768 bit を持ち、この QEMU RAM 全体を
-表現できます。bitmap 自体はカーネル image 内にあるため、割り当て対象には入りません。
+Sv39を有効にする前でも、将来page tableやheapへ渡す物理RAMの所有権を重複なく管理する必要が
+あります。QEMU `virt`のRAM全体`0x8000_0000..0x8800_0000`にはOpenSBIとkernel imageが含まれる
+ため、そのままfreeにしてはいけません。
 
-## 割り当てと解放
+## 実装
 
-`allocate` は bitmap の先頭から最初の 0 bit を探す first-fit です。bit を 1 にして対応する
-物理 frame を返すので、解放した低い番号のページは次の割り当てで再利用されます。空き bit が
-なければ `None` を返します。
+[`FrameAllocator`](../../kernel/src/memory/frame.rs)は
+`align_up(__kernel_end, 4096)..0x8800_0000`だけを管理します。128 MiBは最大32,768 pagesなので、
+512個の`u64`、合計4 KiBのbitmapで表せます。bitmap自体はkernel image内です。
 
-`deallocate` は allocator 範囲外を `OutOfRange`、すでに 0 bit のページを `DoubleFree` として
-拒否します。この検査は二重解放によって同一物理ページを二つの利用者へ渡す事故を防ぎます。
-`stats` は bitmap を走査せず、割り当て成功・解放成功ごとに保つ個数から total / allocated /
-free を返します。
+`allocate`は先頭の0 bitを1にするfirst-fit、`deallocate`は範囲外を`OutOfRange`、未使用bitを
+`DoubleFree`として拒否します。allocatorは`Clone`/`Copy`にせず、同じpage集合の所有者を二重に
+作れません。`stats`は常に`total = allocated + free`を満たし、拒否操作では値を変えません。
 
-allocator は `kernel_main` が所有するローカル値です。global mutable state を置かないため、
-初期化順序と可変借用の責任が呼び出し側に見え、将来 shell へ `&mut FrameAllocator<512>` を渡す
-境界も明確になります。
+## 実行と確認
+
+```console
+$ cargo xtask test memory
+...
+[MINIOS_TEST] memory: ok
+```
+
+guest testは異なる整列pageを2枚確保し、1枚を解放、同じpageが再利用されることを検査します。
+hostのfocused testsは確保前、確保後、拒否操作後、解放後の`FrameStats`も具体値で確認します。
+
+## よくある失敗
+
+- linker overlap/firmware破壊: startを固定値にせず`__kernel_end`から上へalignします。
+- 同じaddressが二度返る: bitmap bit更新とallocatorのunique ownershipを調べます。
+- `free`が減らない: `allocated`更新と`total = allocated + free`を状態遷移ごとに確認します。
+- 128 MiB上端を超える: QEMUの`-m 128M`と`PHYSICAL_MEMORY_END`を同時に更新しない限り変更しません。
 
 ## 演習
 
-1. 小さな bitmap を使い、全ページを確保した後に `None` になることを観察してください。
-2. 交互にページを解放してから再確保し、first-fit が低い穴を先に埋める断片化の様子を調べてください。
+128 MiBを4 KiBで割って32,768 pages、さらに8で割って4,096 bytesのbitmapになることを計算して
+ください。次に3 pagesだけのallocatorでallocate/deallocate列を書き、bit patternとstatsを追います。
+
+## 次の章
+
+[第8章](08-timer-interrupts.md)へ戻れます。次は[第10章: shell](10-shell.md)で、timerとallocatorの
+read APIをUART commandへ接続します。
