@@ -5,6 +5,8 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kunihiko-t/minios"
 
 [profile.dev]
 panic = "abort"

@@ -44,10 +44,10 @@ manifest     = "version=1" LF "name=" name LF { "arg=" argument LF }
 name         = 1*128(name-char)
 name-char    = ALPHA / DIGIT / "." / "_" / "-"
 argument     = 0*256(argument-char)
-argument-char = UTF-8文字列中のNULとLF以外のバイト
+argument-char = UTF-8文字列中のNUL、CR、LF以外のバイト
 ```
 
-`argument`のCRは値として保持します。
+`argument`はNUL、CR、LFを含められません。
 `name`はCRを含められません。
 `arg=`は0個から16個まで置けます。
 未知のkey、順序違反、重複する`version`または`name`、空の`name`、末尾LFの欠落は受理しません。
@@ -84,6 +84,16 @@ MiniOSが同期magicを送った後、UARTは長さ付きbinary frameとしてde
 | 6 | `DIAGNOSTIC` | UTF-8診断 |
 
 `READY`と`EXIT`の`payload_len`は必ず4です。
+
+`READY` payloadの4バイトは、次の順序で符号なし整数を格納します。
+
+| offset | size | field | encoding |
+| ---: | ---: | --- | --- |
+| 0 | 2 | `abi_major` | `u16` little-endian |
+| 2 | 2 | `abi_minor` | `u16` little-endian |
+
+したがって、ABI 1.0の`READY` payloadは`01 00 00 00`です。
+
 未定義の`kind`、非ゼロの`flags`または`reserved`、上限を超える長さ、固定長payloadの不一致は受理しません。
 同期後にheaderまたはpayload長の規約が壊れたとき、ホストはbyte streamを推測で再同期せず、protocol failureとしてinstanceを停止します。
 

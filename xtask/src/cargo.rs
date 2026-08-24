@@ -55,6 +55,13 @@ pub fn build_kernel_for_test(feature: &str) -> Result<PathBuf, CargoError> {
 
 fn build_kernel_with_feature(feature: Option<&str>) -> Result<PathBuf, CargoError> {
     let workspace = workspace_root();
+    let args = kernel_build_args(feature);
+
+    run(&args)?;
+    Ok(kernel_binary_path(&workspace))
+}
+
+fn kernel_build_args(feature: Option<&str>) -> Vec<&str> {
     let mut args = vec![
         "build",
         "-p",
@@ -63,13 +70,12 @@ fn build_kernel_with_feature(feature: Option<&str>) -> Result<PathBuf, CargoErro
         KERNEL_BINARY,
         "--target",
         RISCV_TARGET,
+        "--locked",
     ];
     if let Some(feature) = feature {
         args.extend(["--features", feature]);
     }
-
-    run(&args)?;
-    Ok(kernel_binary_path(&workspace))
+    args
 }
 
 pub fn run(args: &[&str]) -> Result<String, CargoError> {
@@ -159,6 +165,38 @@ mod tests {
         let display = error.to_string();
         assert!(display.contains("stdout diagnostic"));
         assert!(display.contains("stderr diagnostic"));
+    }
+
+    #[test]
+    fn every_kernel_build_is_locked_before_optional_test_features() {
+        assert_eq!(
+            kernel_build_args(None),
+            vec![
+                "build",
+                "-p",
+                "minios-kernel",
+                "--bin",
+                "minios-kernel",
+                "--target",
+                "riscv64gc-unknown-none-elf",
+                "--locked",
+            ]
+        );
+        assert_eq!(
+            kernel_build_args(Some("qemu-test-boot")),
+            vec![
+                "build",
+                "-p",
+                "minios-kernel",
+                "--bin",
+                "minios-kernel",
+                "--target",
+                "riscv64gc-unknown-none-elf",
+                "--locked",
+                "--features",
+                "qemu-test-boot",
+            ]
+        );
     }
 
     #[test]

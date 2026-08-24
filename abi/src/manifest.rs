@@ -25,6 +25,7 @@ pub enum ManifestError {
     TooManyArgs,
     ArgumentTooLong,
     ArgumentContainsNul,
+    ArgumentContainsCarriageReturn,
 }
 
 impl<'a> Manifest<'a> {
@@ -92,6 +93,9 @@ impl<'a> Manifest<'a> {
             }
             if argument.as_bytes().contains(&0) {
                 return Err(ManifestError::ArgumentContainsNul);
+            }
+            if argument.as_bytes().contains(&b'\r') {
+                return Err(ManifestError::ArgumentContainsCarriageReturn);
             }
         }
 
@@ -222,14 +226,12 @@ mod tests {
     }
 
     #[test]
-    fn preserves_carriage_return_in_crlf_argument() {
+    fn rejects_carriage_return_in_argument() {
         let bytes = b"version=1\nname=hello\narg=first\r\narg=second\n";
 
-        let manifest = Manifest::parse(bytes).unwrap();
-
         assert_eq!(
-            manifest.args().collect::<Vec<_>>(),
-            vec!["first\r", "second"]
+            Manifest::parse(bytes),
+            Err(ManifestError::ArgumentContainsCarriageReturn)
         );
     }
 

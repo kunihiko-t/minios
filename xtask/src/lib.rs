@@ -80,6 +80,7 @@ impl Phase {
                 "-p",
                 "xtask",
                 "--all-targets",
+                "--locked",
                 "--",
                 "-D",
                 "warnings",
@@ -89,6 +90,7 @@ impl Phase {
                 "-p",
                 "minios-abi",
                 "--all-targets",
+                "--locked",
                 "--",
                 "-D",
                 "warnings",
@@ -98,6 +100,7 @@ impl Phase {
                 "-p",
                 "minios-kernel",
                 "--lib",
+                "--locked",
                 "--",
                 "-D",
                 "warnings",
@@ -110,6 +113,7 @@ impl Phase {
                 "minios-kernel",
                 "--target",
                 "riscv64gc-unknown-none-elf",
+                "--locked",
                 "--",
                 "-D",
                 "warnings",
@@ -122,10 +126,11 @@ impl Phase {
                 "minios-kernel",
                 "--target",
                 "riscv64gc-unknown-none-elf",
+                "--locked",
             ]),
-            Self::AbiUnitTests => Some(&["test", "-p", "minios-abi"]),
-            Self::KernelUnitTests => Some(&["test", "-p", "minios-kernel", "--lib"]),
-            Self::XtaskUnitTests => Some(&["test", "-p", "xtask"]),
+            Self::AbiUnitTests => Some(&["test", "-p", "minios-abi", "--locked"]),
+            Self::KernelUnitTests => Some(&["test", "-p", "minios-kernel", "--lib", "--locked"]),
+            Self::XtaskUnitTests => Some(&["test", "-p", "xtask", "--locked"]),
             Self::Qemu(_) => None,
         }
     }
@@ -390,8 +395,101 @@ mod tests {
         assert_eq!(invoked, vec![Phase::Format, Phase::ClippyXtask]);
         let output = String::from_utf8(output).expect("phase output must be UTF-8");
         assert!(output.contains("[1/3] cargo fmt --all -- --check"));
-        assert!(output.contains("[2/3] cargo clippy -p xtask --all-targets -- -D warnings"));
+        assert!(
+            output.contains("[2/3] cargo clippy -p xtask --all-targets --locked -- -D warnings")
+        );
         assert!(output.contains("elapsed:"));
         assert!(output.contains("summary: FAILED at phase 2/3; 1 passed, 1 failed"));
+    }
+
+    #[test]
+    fn every_dependency_resolving_check_phase_is_locked() {
+        let expected = [
+            (Phase::Format, vec!["fmt", "--all", "--", "--check"]),
+            (
+                Phase::ClippyXtask,
+                vec![
+                    "clippy",
+                    "-p",
+                    "xtask",
+                    "--all-targets",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            (
+                Phase::ClippyAbi,
+                vec![
+                    "clippy",
+                    "-p",
+                    "minios-abi",
+                    "--all-targets",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            (
+                Phase::ClippyKernelLib,
+                vec![
+                    "clippy",
+                    "-p",
+                    "minios-kernel",
+                    "--lib",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            (
+                Phase::ClippyKernelBin,
+                vec![
+                    "clippy",
+                    "-p",
+                    "minios-kernel",
+                    "--bin",
+                    "minios-kernel",
+                    "--target",
+                    "riscv64gc-unknown-none-elf",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            (
+                Phase::BuildKernel,
+                vec![
+                    "build",
+                    "-p",
+                    "minios-kernel",
+                    "--bin",
+                    "minios-kernel",
+                    "--target",
+                    "riscv64gc-unknown-none-elf",
+                    "--locked",
+                ],
+            ),
+            (
+                Phase::AbiUnitTests,
+                vec!["test", "-p", "minios-abi", "--locked"],
+            ),
+            (
+                Phase::KernelUnitTests,
+                vec!["test", "-p", "minios-kernel", "--lib", "--locked"],
+            ),
+            (
+                Phase::XtaskUnitTests,
+                vec!["test", "-p", "xtask", "--locked"],
+            ),
+        ];
+
+        for (phase, arguments) in expected {
+            assert_eq!(phase.cargo_args(), Some(arguments.as_slice()));
+        }
     }
 }

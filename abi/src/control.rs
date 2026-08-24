@@ -1,3 +1,7 @@
+mod ready;
+
+pub use ready::{READY_PAYLOAD_LEN, ReadyPayload, ReadyPayloadError};
+
 pub const FRAME_MAGIC: [u8; 4] = *b"MCF1";
 pub const FRAME_HEADER_LEN: usize = 12;
 pub const FRAME_MAX_PAYLOAD_LEN: u32 = 64 * 1024;
@@ -49,7 +53,9 @@ impl FrameHeader {
         if payload_len > FRAME_MAX_PAYLOAD_LEN {
             return Err(ControlError::PayloadTooLarge);
         }
-        if matches!(kind, FrameKind::Ready | FrameKind::Exit) && payload_len != 4 {
+        if matches!(kind, FrameKind::Ready | FrameKind::Exit)
+            && payload_len != READY_PAYLOAD_LEN as u32
+        {
             return Err(ControlError::WrongFixedPayloadLength);
         }
 
@@ -177,5 +183,57 @@ mod tests {
                 Err(ControlError::WrongFixedPayloadLength)
             );
         }
+    }
+
+    #[test]
+    fn ready_payload_uses_two_little_endian_u16_fields() {
+        let payload = ReadyPayload {
+            abi_major: 0x1234,
+            abi_minor: 0xabcd,
+        };
+
+        let encoded = payload.encode();
+
+        assert_eq!(encoded, [0x34, 0x12, 0xcd, 0xab]);
+        assert_eq!(ReadyPayload::decode(&encoded), Ok(payload));
+    }
+
+    #[test]
+    fn ready_payload_rejects_non_four_byte_slices() {
+        let short = [0; READY_PAYLOAD_LEN - 1];
+        let long = [0; READY_PAYLOAD_LEN + 1];
+
+        for bytes in [&short[..], &long[..]] {
+            assert_eq!(
+                ReadyPayload::decode(bytes),
+                Err(ReadyPayloadError::WrongLength)
+            );
+        }
+    }
+
+    #[test]
+    fn valid_ready_and_exit_headers_match_their_four_byte_payloads() {
+        let ready_payload = ReadyPayload {
+            abi_major: crate::boot::BOOT_ABI_MAJOR,
+            abi_minor: crate::boot::BOOT_ABI_MINOR,
+        }
+        .encode();
+        let ready_header = FrameHeader {
+            kind: FrameKind::Ready,
+            payload_len: READY_PAYLOAD_LEN as u32,
+        };
+        assert_eq!(ready_payload, [1, 0, 0, 0]);
+        assert_eq!(
+            FrameHeader::decode(&ready_header.encode()),
+            Ok(ready_header)
+        );
+
+        let exit_payload = 42_u32.to_le_bytes();
+        let exit_header = FrameHeader {
+            kind: FrameKind::Exit,
+            payload_len: exit_payload.len() as u32,
+        };
+        assert_eq!(exit_payload, [42, 0, 0, 0]);
+        assert_eq!(FrameHeader::decode(&exit_header.encode()), Ok(exit_header));
     }
 }

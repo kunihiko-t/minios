@@ -91,9 +91,9 @@ QEMU起動前にビルドが失敗した場合も、Cargoコマンドにはテ�
 失敗した段階の見出しと、最後に見えた初期化行やマーカーを照合すると、ビルド失敗、ゲスト内の明示的な失敗、停止を区別できます。
 Cargoの子プロセスが失敗した場合も、実行コマンド、終了ステータス、標準出力、標準エラーを表示します。
 
-### `check`が実行する14段階
+### `check`が実行する17段階
 
-`cargo xtask check`は、次の14段階をこの順に実行し、最初の失敗で停止します。
+`cargo xtask check`は、次の17段階をこの順に実行し、最初の失敗で停止します。
 書式検査の直後に教材のリンクと章構造を調べ、その後でコンパイラーを動かします。
 静的検査より前にQEMUを起動しないことと、検査していないバイナリーをゲストテストへ渡さないことが、この順序を固定する理由です。
 
@@ -101,21 +101,24 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 1. cargo fmt --all -- --check
 2. check local Markdown links
 3. check guide chapter structure
-4. cargo clippy -p xtask --all-targets -- -D warnings
-5. cargo clippy -p minios-kernel --lib -- -D warnings
-6. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf -- -D warnings
-7. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf
-8. cargo test -p minios-kernel --lib
-9. cargo test -p xtask
-10. QEMU boot test
-11. QEMU trap test
-12. QEMU timer test
-13. QEMU memory test
-14. QEMU shell test
+4. check public publication files
+5. cargo clippy -p xtask --all-targets --locked -- -D warnings
+6. cargo clippy -p minios-abi --all-targets --locked -- -D warnings
+7. cargo clippy -p minios-kernel --lib --locked -- -D warnings
+8. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked -- -D warnings
+9. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked
+10. cargo test -p minios-abi --locked
+11. cargo test -p minios-kernel --lib --locked
+12. cargo test -p xtask --locked
+13. QEMU boot test
+14. QEMU trap test
+15. QEMU timer test
+16. QEMU memory test
+17. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 14 phases`を表示します。
+全段階に成功すると`summary: PASSED all 17 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
