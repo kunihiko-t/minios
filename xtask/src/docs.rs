@@ -37,6 +37,20 @@ const REQUIRED_PUBLICATION_FILES: [&str; 6] = [
     "README.md",
 ];
 
+const REQUIRED_CI_TEXT: [&str; 4] = [
+    "runs-on: ubuntu-24.04",
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",
+    "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+];
+
+const REQUIRED_DEPENDABOT_TEXT: [&str; 4] = [
+    "version: 2",
+    "package-ecosystem: cargo",
+    "package-ecosystem: github-actions",
+    "interval: monthly",
+];
+
 #[derive(Clone, Copy)]
 struct Fence {
     marker: u8,
@@ -76,6 +90,10 @@ pub enum DocsError {
         path: PathBuf,
         required: &'static str,
     },
+    InvalidPublicationPolicy {
+        path: PathBuf,
+        required: &'static str,
+    },
 }
 
 impl DocsError {
@@ -89,7 +107,8 @@ impl DocsError {
             Self::MissingChapter { chapter } => chapter,
             Self::MissingPublicationFile { path }
             | Self::ForbiddenPublicationPath { path }
-            | Self::MissingPublicationText { path, .. } => path,
+            | Self::MissingPublicationText { path, .. }
+            | Self::InvalidPublicationPolicy { path, .. } => path,
         }
     }
 
@@ -152,6 +171,11 @@ impl fmt::Display for DocsError {
             Self::MissingPublicationText { path, required } => write!(
                 formatter,
                 "{}: missing required publication text {required}",
+                path.display()
+            ),
+            Self::InvalidPublicationPolicy { path, required } => write!(
+                formatter,
+                "{}: missing required publication policy {required}",
                 path.display()
             ),
         }
@@ -283,6 +307,26 @@ pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
                 path: PathBuf::from("README.md"),
                 required,
             });
+        }
+    }
+    for (path, required_text) in [
+        (
+            Path::new(".github/workflows/ci.yml"),
+            REQUIRED_CI_TEXT.as_slice(),
+        ),
+        (
+            Path::new(".github/dependabot.yml"),
+            REQUIRED_DEPENDABOT_TEXT.as_slice(),
+        ),
+    ] {
+        let contents = read_text(root, path)?;
+        for required in required_text {
+            if !contents.contains(required) {
+                return Err(DocsError::InvalidPublicationPolicy {
+                    path: path.to_owned(),
+                    required,
+                });
+            }
         }
     }
     Ok(())
@@ -668,6 +712,14 @@ mod tests {
             "README.md",
             "# MiniOS\n\nMIT OR Apache-2.0\n\n本番用のセキュリティー境界ではありません。\n",
         );
+        temp.write(
+            ".github/workflows/ci.yml",
+            "runs-on: ubuntu-24.04\nuses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\nuses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\nuses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
+        );
+        temp.write(
+            ".github/dependabot.yml",
+            "version: 2\npackage-ecosystem: cargo\npackage-ecosystem: github-actions\ninterval: monthly\n",
+        );
         temp
     }
 
@@ -686,6 +738,20 @@ mod tests {
         let temp = complete_publication_tree();
 
         assert_eq!(check_publication_files(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn publication_policy_requires_pinned_ci_and_dependabot() {
+        let temp = complete_publication_tree();
+        fs::write(
+            temp.path().join(".github/workflows/ci.yml"),
+            "runs-on: ubuntu-latest\nuses: actions/checkout@v7\n",
+        )
+        .unwrap();
+
+        let error = check_publication_files(temp.path()).unwrap_err();
+
+        assert_eq!(error.path(), Path::new(".github/workflows/ci.yml"));
     }
 
     #[test]
