@@ -264,7 +264,7 @@ pub fn check_guide_structure(root: &Path) -> Result<(), DocsError> {
 
 pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
     let forbidden = PathBuf::from("docs/superpowers");
-    if root.join(&forbidden).exists() {
+    if fs::symlink_metadata(root.join(&forbidden)).is_ok() {
         return Err(DocsError::ForbiddenPublicationPath { path: forbidden });
     }
     for relative in REQUIRED_PUBLICATION_FILES {
@@ -704,6 +704,28 @@ mod tests {
         let path = temp.path().join("docs/superpowers/plans/internal.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "internal").unwrap();
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::ForbiddenPublicationPath {
+                path: PathBuf::from("docs/superpowers"),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_files_reject_dangling_internal_agent_documents_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = complete_publication_tree();
+        let docs = temp.path().join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        symlink(
+            temp.path().join("missing-superpowers"),
+            docs.join("superpowers"),
+        )
+        .unwrap();
 
         assert_eq!(
             check_publication_files(temp.path()),
