@@ -28,7 +28,8 @@ const REQUIRED_CHAPTERS: [&str; 12] = [
     "12-next-steps.md",
 ];
 
-const REQUIRED_PUBLICATION_FILES: [&str; 5] = [
+const REQUIRED_PUBLICATION_FILES: [&str; 6] = [
+    "LICENSE",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "SECURITY.md",
@@ -68,6 +69,9 @@ pub enum DocsError {
     MissingPublicationFile {
         path: PathBuf,
     },
+    ForbiddenPublicationPath {
+        path: PathBuf,
+    },
     MissingPublicationText {
         path: PathBuf,
         required: &'static str,
@@ -83,9 +87,9 @@ impl DocsError {
             }
             Self::MissingSection { chapter, .. } => chapter,
             Self::MissingChapter { chapter } => chapter,
-            Self::MissingPublicationFile { path } | Self::MissingPublicationText { path, .. } => {
-                path
-            }
+            Self::MissingPublicationFile { path }
+            | Self::ForbiddenPublicationPath { path }
+            | Self::MissingPublicationText { path, .. } => path,
         }
     }
 
@@ -141,6 +145,9 @@ impl fmt::Display for DocsError {
                     "{}: missing required publication file",
                     path.display()
                 )
+            }
+            Self::ForbiddenPublicationPath { path } => {
+                write!(formatter, "{}: forbidden publication path", path.display())
             }
             Self::MissingPublicationText { path, required } => write!(
                 formatter,
@@ -256,6 +263,10 @@ pub fn check_guide_structure(root: &Path) -> Result<(), DocsError> {
 }
 
 pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
+    let forbidden = PathBuf::from("docs/superpowers");
+    if root.join(&forbidden).exists() {
+        return Err(DocsError::ForbiddenPublicationPath { path: forbidden });
+    }
     for relative in REQUIRED_PUBLICATION_FILES {
         let path = PathBuf::from(relative);
         if !root.join(&path).is_file() {
@@ -639,19 +650,12 @@ mod tests {
         chapter
     }
 
-    #[test]
-    fn publication_files_require_both_licenses_and_policy_documents() {
+    fn complete_publication_tree() -> TestTree {
         let temp = TestTree::new();
-        temp.write("README.md", "# MiniOS\n");
-
-        let error = check_publication_files(temp.path()).unwrap_err();
-
-        assert_eq!(error.path(), Path::new("LICENSE-MIT"));
-    }
-
-    #[test]
-    fn publication_files_accept_complete_public_metadata() {
-        let temp = TestTree::new();
+        temp.write(
+            "LICENSE",
+            "Licensed under either of Apache License, Version 2.0 or MIT license at your option.\nSee LICENSE-APACHE and LICENSE-MIT.\n",
+        );
         for file in [
             "LICENSE-MIT",
             "LICENSE-APACHE",
@@ -664,26 +668,62 @@ mod tests {
             "README.md",
             "# MiniOS\n\nMIT OR Apache-2.0\n\n本番用のセキュリティー境界ではありません。\n",
         );
+        temp
+    }
+
+    #[test]
+    fn publication_files_require_both_licenses_and_policy_documents() {
+        let temp = complete_publication_tree();
+        temp.remove("LICENSE-MIT");
+
+        let error = check_publication_files(temp.path()).unwrap_err();
+
+        assert_eq!(error.path(), Path::new("LICENSE-MIT"));
+    }
+
+    #[test]
+    fn publication_files_accept_complete_public_metadata() {
+        let temp = complete_publication_tree();
 
         assert_eq!(check_publication_files(temp.path()), Ok(()));
     }
 
     #[test]
     fn publication_files_reject_readme_without_security_boundary_text() {
-        let temp = TestTree::new();
-        for file in [
-            "LICENSE-MIT",
-            "LICENSE-APACHE",
-            "SECURITY.md",
-            "CONTRIBUTING.md",
-        ] {
-            temp.write(file, file);
-        }
+        let temp = complete_publication_tree();
         temp.write("README.md", "# MiniOS\n\nMIT OR Apache-2.0\n");
 
         let error = check_publication_files(temp.path()).unwrap_err();
 
         assert_eq!(error.path(), Path::new("README.md"));
+    }
+
+    #[test]
+    fn publication_files_reject_internal_agent_documents() {
+        let temp = complete_publication_tree();
+        let path = temp.path().join("docs/superpowers/plans/internal.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "internal").unwrap();
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::ForbiddenPublicationPath {
+                path: PathBuf::from("docs/superpowers"),
+            })
+        );
+    }
+
+    #[test]
+    fn publication_files_require_dual_license_entrypoint() {
+        let temp = complete_publication_tree();
+        std::fs::remove_file(temp.path().join("LICENSE")).unwrap();
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::MissingPublicationFile {
+                path: PathBuf::from("LICENSE"),
+            })
+        );
     }
 
     #[test]
