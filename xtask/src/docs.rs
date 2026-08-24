@@ -28,12 +28,27 @@ const REQUIRED_CHAPTERS: [&str; 12] = [
     "12-next-steps.md",
 ];
 
-const REQUIRED_PUBLICATION_FILES: [&str; 5] = [
+const REQUIRED_PUBLICATION_FILES: [&str; 6] = [
+    "LICENSE",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "SECURITY.md",
     "CONTRIBUTING.md",
     "README.md",
+];
+
+const REQUIRED_CI_TEXT: [&str; 4] = [
+    "runs-on: ubuntu-24.04",
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",
+    "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+];
+
+const REQUIRED_DEPENDABOT_TEXT: [&str; 4] = [
+    "version: 2",
+    "package-ecosystem: cargo",
+    "package-ecosystem: github-actions",
+    "interval: monthly",
 ];
 
 #[derive(Clone, Copy)]
@@ -68,7 +83,14 @@ pub enum DocsError {
     MissingPublicationFile {
         path: PathBuf,
     },
+    ForbiddenPublicationPath {
+        path: PathBuf,
+    },
     MissingPublicationText {
+        path: PathBuf,
+        required: &'static str,
+    },
+    InvalidPublicationPolicy {
         path: PathBuf,
         required: &'static str,
     },
@@ -83,9 +105,10 @@ impl DocsError {
             }
             Self::MissingSection { chapter, .. } => chapter,
             Self::MissingChapter { chapter } => chapter,
-            Self::MissingPublicationFile { path } | Self::MissingPublicationText { path, .. } => {
-                path
-            }
+            Self::MissingPublicationFile { path }
+            | Self::ForbiddenPublicationPath { path }
+            | Self::MissingPublicationText { path, .. }
+            | Self::InvalidPublicationPolicy { path, .. } => path,
         }
     }
 
@@ -142,9 +165,17 @@ impl fmt::Display for DocsError {
                     path.display()
                 )
             }
+            Self::ForbiddenPublicationPath { path } => {
+                write!(formatter, "{}: forbidden publication path", path.display())
+            }
             Self::MissingPublicationText { path, required } => write!(
                 formatter,
                 "{}: missing required publication text {required}",
+                path.display()
+            ),
+            Self::InvalidPublicationPolicy { path, required } => write!(
+                formatter,
+                "{}: missing required publication policy {required}",
                 path.display()
             ),
         }
@@ -256,6 +287,10 @@ pub fn check_guide_structure(root: &Path) -> Result<(), DocsError> {
 }
 
 pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
+    let forbidden = PathBuf::from("docs/superpowers");
+    if fs::symlink_metadata(root.join(&forbidden)).is_ok() {
+        return Err(DocsError::ForbiddenPublicationPath { path: forbidden });
+    }
     for relative in REQUIRED_PUBLICATION_FILES {
         let path = PathBuf::from(relative);
         if !root.join(&path).is_file() {
@@ -272,6 +307,26 @@ pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
                 path: PathBuf::from("README.md"),
                 required,
             });
+        }
+    }
+    for (path, required_text) in [
+        (
+            Path::new(".github/workflows/ci.yml"),
+            REQUIRED_CI_TEXT.as_slice(),
+        ),
+        (
+            Path::new(".github/dependabot.yml"),
+            REQUIRED_DEPENDABOT_TEXT.as_slice(),
+        ),
+    ] {
+        let contents = read_text(root, path)?;
+        for required in required_text {
+            if !contents.contains(required) {
+                return Err(DocsError::InvalidPublicationPolicy {
+                    path: path.to_owned(),
+                    required,
+                });
+            }
         }
     }
     Ok(())
@@ -639,19 +694,12 @@ mod tests {
         chapter
     }
 
-    #[test]
-    fn publication_files_require_both_licenses_and_policy_documents() {
+    fn complete_publication_tree() -> TestTree {
         let temp = TestTree::new();
-        temp.write("README.md", "# MiniOS\n");
-
-        let error = check_publication_files(temp.path()).unwrap_err();
-
-        assert_eq!(error.path(), Path::new("LICENSE-MIT"));
-    }
-
-    #[test]
-    fn publication_files_accept_complete_public_metadata() {
-        let temp = TestTree::new();
+        temp.write(
+            "LICENSE",
+            "Licensed under either of Apache License, Version 2.0 or MIT license at your option.\nSee LICENSE-APACHE and LICENSE-MIT.\n",
+        );
         for file in [
             "LICENSE-MIT",
             "LICENSE-APACHE",
@@ -664,26 +712,106 @@ mod tests {
             "README.md",
             "# MiniOS\n\nMIT OR Apache-2.0\n\n本番用のセキュリティー境界ではありません。\n",
         );
+        temp.write(
+            ".github/workflows/ci.yml",
+            "runs-on: ubuntu-24.04\nuses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\nuses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\nuses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
+        );
+        temp.write(
+            ".github/dependabot.yml",
+            "version: 2\npackage-ecosystem: cargo\npackage-ecosystem: github-actions\ninterval: monthly\n",
+        );
+        temp
+    }
+
+    #[test]
+    fn publication_files_require_both_licenses_and_policy_documents() {
+        let temp = complete_publication_tree();
+        temp.remove("LICENSE-MIT");
+
+        let error = check_publication_files(temp.path()).unwrap_err();
+
+        assert_eq!(error.path(), Path::new("LICENSE-MIT"));
+    }
+
+    #[test]
+    fn publication_files_accept_complete_public_metadata() {
+        let temp = complete_publication_tree();
 
         assert_eq!(check_publication_files(temp.path()), Ok(()));
     }
 
     #[test]
+    fn publication_policy_requires_pinned_ci_and_dependabot() {
+        let temp = complete_publication_tree();
+        fs::write(
+            temp.path().join(".github/workflows/ci.yml"),
+            "runs-on: ubuntu-latest\nuses: actions/checkout@v7\n",
+        )
+        .unwrap();
+
+        let error = check_publication_files(temp.path()).unwrap_err();
+
+        assert_eq!(error.path(), Path::new(".github/workflows/ci.yml"));
+    }
+
+    #[test]
     fn publication_files_reject_readme_without_security_boundary_text() {
-        let temp = TestTree::new();
-        for file in [
-            "LICENSE-MIT",
-            "LICENSE-APACHE",
-            "SECURITY.md",
-            "CONTRIBUTING.md",
-        ] {
-            temp.write(file, file);
-        }
+        let temp = complete_publication_tree();
         temp.write("README.md", "# MiniOS\n\nMIT OR Apache-2.0\n");
 
         let error = check_publication_files(temp.path()).unwrap_err();
 
         assert_eq!(error.path(), Path::new("README.md"));
+    }
+
+    #[test]
+    fn publication_files_reject_internal_agent_documents() {
+        let temp = complete_publication_tree();
+        let path = temp.path().join("docs/superpowers/plans/internal.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "internal").unwrap();
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::ForbiddenPublicationPath {
+                path: PathBuf::from("docs/superpowers"),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_files_reject_dangling_internal_agent_documents_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = complete_publication_tree();
+        let docs = temp.path().join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        symlink(
+            temp.path().join("missing-superpowers"),
+            docs.join("superpowers"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::ForbiddenPublicationPath {
+                path: PathBuf::from("docs/superpowers"),
+            })
+        );
+    }
+
+    #[test]
+    fn publication_files_require_dual_license_entrypoint() {
+        let temp = complete_publication_tree();
+        std::fs::remove_file(temp.path().join("LICENSE")).unwrap();
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::MissingPublicationFile {
+                path: PathBuf::from("LICENSE"),
+            })
+        );
     }
 
     #[test]

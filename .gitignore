@@ -1,4 +1,15 @@
 .worktrees/
 .superpowers/
+/docs/superpowers
 /target/
 .DS_Store
+/.env
+/.env.*
+!/.env.example
+/*.log
+/*.core
+/*.dmp
+/*.img
+/*.qcow2
+/*.pem
+/*.key
