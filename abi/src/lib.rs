@@ -2,4 +2,6 @@
 #![forbid(unsafe_code)]
 
 pub mod boot;
+pub mod control;
 pub mod manifest;
+pub mod syscall;
