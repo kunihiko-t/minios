@@ -88,7 +88,7 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、Clippy、クロスビルド、ホストテスト、QEMUの5経路を14段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの5経路を15段階で検査します。
 
 ## 現在の制約
 
@@ -97,8 +97,13 @@ cargo xtask check
 シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
 永続ストレージとセキュリティー境界は提供しません。
 
+## セキュリティー上の位置づけ
+
+MiniOSはOSの仕組みを学ぶための実装であり、本番用のセキュリティー境界ではありません。
+未信頼コードの隔離には使用せず、脆弱性の報告方法は[Security Policy](SECURITY.md)を参照してください。
+
 ## ライセンス
 
-このリポジトリには、現時点で`LICENSE`ファイルがありません。
-そのため、再利用と再配布の条件はまだ明示されていません。
-公開利用へ移す前に、所有者がライセンスを選び、`LICENSE`とこの節を更新してください。
+MiniOSはMIT LicenseまたはApache License 2.0の条件で利用できます。
+詳細は[LICENSE-MIT](LICENSE-MIT)と[LICENSE-APACHE](LICENSE-APACHE)を参照してください。
+SPDX表記は`MIT OR Apache-2.0`です。

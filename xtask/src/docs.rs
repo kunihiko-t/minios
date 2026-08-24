@@ -28,6 +28,14 @@ const REQUIRED_CHAPTERS: [&str; 12] = [
     "12-next-steps.md",
 ];
 
+const REQUIRED_PUBLICATION_FILES: [&str; 5] = [
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "README.md",
+];
+
 #[derive(Clone, Copy)]
 struct Fence {
     marker: u8,
@@ -57,6 +65,13 @@ pub enum DocsError {
     MissingChapter {
         chapter: PathBuf,
     },
+    MissingPublicationFile {
+        path: PathBuf,
+    },
+    MissingPublicationText {
+        path: PathBuf,
+        required: &'static str,
+    },
 }
 
 impl DocsError {
@@ -68,6 +83,9 @@ impl DocsError {
             }
             Self::MissingSection { chapter, .. } => chapter,
             Self::MissingChapter { chapter } => chapter,
+            Self::MissingPublicationFile { path } | Self::MissingPublicationText { path, .. } => {
+                path
+            }
         }
     }
 
@@ -117,6 +135,18 @@ impl fmt::Display for DocsError {
                     chapter.display()
                 )
             }
+            Self::MissingPublicationFile { path } => {
+                write!(
+                    formatter,
+                    "{}: missing required publication file",
+                    path.display()
+                )
+            }
+            Self::MissingPublicationText { path, required } => write!(
+                formatter,
+                "{}: missing required publication text {required}",
+                path.display()
+            ),
         }
     }
 }
@@ -220,6 +250,28 @@ pub fn check_guide_structure(root: &Path) -> Result<(), DocsError> {
                     section,
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
+    for relative in REQUIRED_PUBLICATION_FILES {
+        let path = PathBuf::from(relative);
+        if !root.join(&path).is_file() {
+            return Err(DocsError::MissingPublicationFile { path });
+        }
+    }
+    let readme = read_text(root, Path::new("README.md"))?;
+    for required in [
+        "MIT OR Apache-2.0",
+        "本番用のセキュリティー境界ではありません",
+    ] {
+        if !readme.contains(required) {
+            return Err(DocsError::MissingPublicationText {
+                path: PathBuf::from("README.md"),
+                required,
+            });
         }
     }
     Ok(())
@@ -585,6 +637,53 @@ mod tests {
             chapter.push_str(&format!("## {section}\ncontent\n"));
         }
         chapter
+    }
+
+    #[test]
+    fn publication_files_require_both_licenses_and_policy_documents() {
+        let temp = TestTree::new();
+        temp.write("README.md", "# MiniOS\n");
+
+        let error = check_publication_files(temp.path()).unwrap_err();
+
+        assert_eq!(error.path(), Path::new("LICENSE-MIT"));
+    }
+
+    #[test]
+    fn publication_files_accept_complete_public_metadata() {
+        let temp = TestTree::new();
+        for file in [
+            "LICENSE-MIT",
+            "LICENSE-APACHE",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+        ] {
+            temp.write(file, file);
+        }
+        temp.write(
+            "README.md",
+            "# MiniOS\n\nMIT OR Apache-2.0\n\n本番用のセキュリティー境界ではありません。\n",
+        );
+
+        assert_eq!(check_publication_files(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn publication_files_reject_readme_without_security_boundary_text() {
+        let temp = TestTree::new();
+        for file in [
+            "LICENSE-MIT",
+            "LICENSE-APACHE",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+        ] {
+            temp.write(file, file);
+        }
+        temp.write("README.md", "# MiniOS\n\nMIT OR Apache-2.0\n");
+
+        let error = check_publication_files(temp.path()).unwrap_err();
+
+        assert_eq!(error.path(), Path::new("README.md"));
     }
 
     #[test]

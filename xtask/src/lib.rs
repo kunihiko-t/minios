@@ -58,6 +58,7 @@ enum Phase {
     Format,
     DocsLinks,
     DocsGuideStructure,
+    DocsPublicationFiles,
     ClippyXtask,
     ClippyKernelLib,
     ClippyKernelBin,
@@ -71,7 +72,7 @@ impl Phase {
     fn cargo_args(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Format => Some(&["fmt", "--all", "--", "--check"]),
-            Self::DocsLinks | Self::DocsGuideStructure => None,
+            Self::DocsLinks | Self::DocsGuideStructure | Self::DocsPublicationFiles => None,
             Self::ClippyXtask => Some(&[
                 "clippy",
                 "-p",
@@ -124,6 +125,7 @@ impl Phase {
         match self {
             Self::DocsLinks => "check local Markdown links".to_owned(),
             Self::DocsGuideStructure => "check guide chapter structure".to_owned(),
+            Self::DocsPublicationFiles => "check public publication files".to_owned(),
             Self::Qemu(qemu::TestKind::Boot) => "QEMU boot test".to_owned(),
             Self::Qemu(qemu::TestKind::Trap) => "QEMU trap test".to_owned(),
             Self::Qemu(qemu::TestKind::Timer) => "QEMU timer test".to_owned(),
@@ -151,6 +153,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Format,
         Phase::DocsLinks,
         Phase::DocsGuideStructure,
+        Phase::DocsPublicationFiles,
         Phase::ClippyXtask,
         Phase::ClippyKernelLib,
         Phase::ClippyKernelBin,
@@ -230,6 +233,10 @@ fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
         }
         Phase::DocsGuideStructure => {
             docs::check_guide_structure(workspace)?;
+            return Ok(String::new());
+        }
+        Phase::DocsPublicationFiles => {
+            docs::check_publication_files(workspace)?;
             return Ok(String::new());
         }
         _ => {}
@@ -323,6 +330,7 @@ mod tests {
                 Phase::Format,
                 Phase::DocsLinks,
                 Phase::DocsGuideStructure,
+                Phase::DocsPublicationFiles,
                 Phase::ClippyXtask,
                 Phase::ClippyKernelLib,
                 Phase::ClippyKernelBin,
