@@ -40,7 +40,7 @@ impl<'a> Manifest<'a> {
         if source.strip_suffix('\n').is_some() {
             return Err(ManifestError::UnknownKey);
         }
-        let mut lines = source.lines();
+        let mut lines = source.split('\n');
 
         match lines.next() {
             Some("version=1") => {}
@@ -103,7 +103,7 @@ impl<'a> Manifest<'a> {
     }
 
     pub fn args(&self) -> ManifestArgs<'a> {
-        let mut lines = self.source.lines();
+        let mut lines = self.source.split('\n');
         let _ = lines.next();
         let _ = lines.next();
         ManifestArgs { lines }
@@ -112,7 +112,7 @@ impl<'a> Manifest<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ManifestArgs<'a> {
-    lines: core::str::Lines<'a>,
+    lines: core::str::Split<'a, char>,
 }
 
 impl<'a> Iterator for ManifestArgs<'a> {
@@ -171,6 +171,66 @@ mod tests {
         let bytes = b"version=1\nname=hello.world_1-test\n";
 
         assert_eq!(Manifest::parse(bytes).unwrap().name(), "hello.world_1-test");
+    }
+
+    #[test]
+    fn rejects_crlf_version_line() {
+        let bytes = b"version=1\r\nname=hello\n";
+
+        assert_eq!(Manifest::parse(bytes), Err(ManifestError::MissingVersion));
+    }
+
+    #[test]
+    fn rejects_crlf_name_line() {
+        let bytes = b"version=1\nname=hello\r\narg=first\n";
+
+        assert_eq!(Manifest::parse(bytes), Err(ManifestError::InvalidName));
+    }
+
+    #[test]
+    fn rejects_crlf_name_length_bypass() {
+        let bytes = concat!(
+            "version=1\nname=",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "\r\narg=first\n",
+        )
+        .as_bytes();
+
+        assert_eq!(Manifest::parse(bytes), Err(ManifestError::NameTooLong));
+    }
+
+    #[test]
+    fn rejects_crlf_argument_length_bypass() {
+        let bytes = concat!(
+            "version=1\nname=hello\narg=",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "\r\narg=tail\n",
+        )
+        .as_bytes();
+
+        assert_eq!(Manifest::parse(bytes), Err(ManifestError::ArgumentTooLong));
+    }
+
+    #[test]
+    fn preserves_carriage_return_in_crlf_argument() {
+        let bytes = b"version=1\nname=hello\narg=first\r\narg=second\n";
+
+        let manifest = Manifest::parse(bytes).unwrap();
+
+        assert_eq!(
+            manifest.args().collect::<Vec<_>>(),
+            vec!["first\r", "second"]
+        );
     }
 
     #[test]
