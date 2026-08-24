@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "minios-abi"
+version = "0.1.0"
+
+[[package]]
 name = "minios-kernel"
 version = "0.1.0"
 
