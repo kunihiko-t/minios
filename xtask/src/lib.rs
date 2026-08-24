@@ -60,9 +60,11 @@ enum Phase {
     DocsGuideStructure,
     DocsPublicationFiles,
     ClippyXtask,
+    ClippyAbi,
     ClippyKernelLib,
     ClippyKernelBin,
     BuildKernel,
+    AbiUnitTests,
     KernelUnitTests,
     XtaskUnitTests,
     Qemu(qemu::TestKind),
@@ -77,6 +79,15 @@ impl Phase {
                 "clippy",
                 "-p",
                 "xtask",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+            Self::ClippyAbi => Some(&[
+                "clippy",
+                "-p",
+                "minios-abi",
                 "--all-targets",
                 "--",
                 "-D",
@@ -112,6 +123,7 @@ impl Phase {
                 "--target",
                 "riscv64gc-unknown-none-elf",
             ]),
+            Self::AbiUnitTests => Some(&["test", "-p", "minios-abi"]),
             Self::KernelUnitTests => Some(&["test", "-p", "minios-kernel", "--lib"]),
             Self::XtaskUnitTests => Some(&["test", "-p", "xtask"]),
             Self::Qemu(_) => None,
@@ -155,9 +167,11 @@ fn check_phases() -> Vec<Phase> {
         Phase::DocsGuideStructure,
         Phase::DocsPublicationFiles,
         Phase::ClippyXtask,
+        Phase::ClippyAbi,
         Phase::ClippyKernelLib,
         Phase::ClippyKernelBin,
         Phase::BuildKernel,
+        Phase::AbiUnitTests,
         Phase::KernelUnitTests,
         Phase::XtaskUnitTests,
         Phase::Qemu(qemu::TestKind::Boot),
@@ -323,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn check_orders_compiler_operations_then_host_and_qemu_tests() {
+    fn check_plan_orders_compiler_operations_then_host_and_qemu_tests() {
         assert_eq!(
             check_phases(),
             vec![
@@ -332,9 +346,11 @@ mod tests {
                 Phase::DocsGuideStructure,
                 Phase::DocsPublicationFiles,
                 Phase::ClippyXtask,
+                Phase::ClippyAbi,
                 Phase::ClippyKernelLib,
                 Phase::ClippyKernelBin,
                 Phase::BuildKernel,
+                Phase::AbiUnitTests,
                 Phase::KernelUnitTests,
                 Phase::XtaskUnitTests,
                 Phase::Qemu(qemu::TestKind::Boot),
@@ -344,6 +360,15 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
+
+        let plan = check_phases();
+        let position = |phase| {
+            plan.iter()
+                .position(|candidate| *candidate == phase)
+                .expect("check plan must contain every expected phase")
+        };
+        assert!(position(Phase::ClippyAbi) < position(Phase::ClippyKernelLib));
+        assert!(position(Phase::AbiUnitTests) < position(Phase::KernelUnitTests));
     }
 
     #[test]

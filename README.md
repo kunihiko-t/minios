@@ -75,6 +75,7 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在
 
 - [全体構成と八つの起動段階](docs/reference/architecture.md)
 - [QEMU `virt`のメモリーマップ](docs/reference/memory-map.md)
+- [MiniContainer Guest ABI](docs/reference/minicontainer-abi.md)
 - [用語集](docs/reference/glossary.md)
 - [問題の切り分け方](docs/reference/troubleshooting.md)
 - [発展ロードマップ](docs/reference/roadmap.md)
@@ -88,7 +89,7 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの5経路を15段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの5経路を17段階で検査します。
 
 ## 現在の制約
 
