@@ -53,9 +53,7 @@ impl KernelSections {
         {
             return Err(LayoutError::Empty);
         }
-        if text.end > rodata.start
-            || rodata.end > writable.start
-            || writable.end > boot_stack.start
+        if text.end > rodata.start || rodata.end > writable.start || writable.end > boot_stack.start
         {
             return Err(LayoutError::Overlap);
         }

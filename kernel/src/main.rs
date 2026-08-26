@@ -18,8 +18,8 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::memory::{
-    frame::{FrameAllocator, FrameError, PAGE_SIZE},
     PHYSICAL_MEMORY_END,
+    frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
 
 #[cfg(target_arch = "riscv64")]
