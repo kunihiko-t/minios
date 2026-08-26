@@ -106,6 +106,9 @@ impl PageTableEntry {
     }
 
     pub fn leaf(ppn: PhysPageNum, flags: PageFlags) -> Result<Self, PteError> {
+        if !flags.read() && !flags.execute() {
+            return Err(PteError::InvalidBranch);
+        }
         Ok(Self(
             (ppn.as_u64() << PPN_SHIFT) | flags.pte_bits() | VALID | ACCESSED | DIRTY,
         ))
@@ -179,6 +182,21 @@ mod tests {
             PageFlags::new(true, true, true, true),
             Err(PteError::WritableExecutable)
         );
+    }
+
+    // Catches leaf construction accepting R/W/X=0: that bit shape denotes a
+    // branch, and adding U or A/D must not turn it into a non-round-trippable
+    // leaf entry.
+    #[test]
+    fn leaf_rejects_zero_permissions_for_supervisor_and_user_mappings() {
+        let ppn = PhysPageNum::try_new(0x12345).unwrap();
+        for user in [false, true] {
+            let flags = PageFlags::new(false, false, false, user).unwrap();
+            assert_eq!(
+                PageTableEntry::leaf(ppn, flags),
+                Err(PteError::InvalidBranch)
+            );
+        }
     }
 
     // Catches a leaf encoder or decoder that shifts PPN/permission fields
