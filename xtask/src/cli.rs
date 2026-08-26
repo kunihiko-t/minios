@@ -14,6 +14,8 @@ pub enum TestFilter {
     Trap,
     Timer,
     Memory,
+    Vm,
+    Elf,
     Shell,
 }
 
@@ -28,7 +30,7 @@ pub fn help() -> &'static str {
   cargo xtask setup\n\
   cargo xtask build\n\
   cargo xtask run\n\
-  cargo xtask test [all|boot|trap|timer|memory|shell]\n\
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|shell]\n\
   cargo xtask check"
 }
 
@@ -51,6 +53,8 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         [command, test] if command == "test" && test == "memory" => {
             Ok(Command::Test(TestFilter::Memory))
         }
+        [command, test] if command == "test" && test == "vm" => Ok(Command::Test(TestFilter::Vm)),
+        [command, test] if command == "test" && test == "elf" => Ok(Command::Test(TestFilter::Elf)),
         [command, test] if command == "test" && test == "shell" => {
             Ok(Command::Test(TestFilter::Shell))
         }
@@ -88,6 +92,8 @@ mod tests {
             (vec!["test", "trap"], TestFilter::Trap),
             (vec!["test", "timer"], TestFilter::Timer),
             (vec!["test", "memory"], TestFilter::Memory),
+            (vec!["test", "vm"], TestFilter::Vm),
+            (vec!["test", "elf"], TestFilter::Elf),
             (vec!["test", "shell"], TestFilter::Shell),
         ] {
             assert_eq!(parse(&owned(&args)), Ok(Command::Test(expected)));
@@ -139,7 +145,7 @@ mod tests {
             "cargo xtask setup",
             "cargo xtask build",
             "cargo xtask run",
-            "cargo xtask test [all|boot|trap|timer|memory|shell]",
+            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|shell]",
             "cargo xtask check",
         ] {
             assert!(help.contains(command), "missing help entry: {command}");

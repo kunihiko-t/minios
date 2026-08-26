@@ -147,6 +147,8 @@ impl Phase {
             Self::Qemu(qemu::TestKind::Trap) => "QEMU trap test".to_owned(),
             Self::Qemu(qemu::TestKind::Timer) => "QEMU timer test".to_owned(),
             Self::Qemu(qemu::TestKind::Memory) => "QEMU memory test".to_owned(),
+            Self::Qemu(qemu::TestKind::Vm) => "QEMU VM test".to_owned(),
+            Self::Qemu(qemu::TestKind::Elf) => "QEMU ELF test".to_owned(),
             Self::Qemu(qemu::TestKind::Shell) => "QEMU shell test".to_owned(),
             _ => unreachable!("Cargo phases returned above"),
         }
@@ -161,6 +163,8 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Trap),
         Phase::Qemu(qemu::TestKind::Timer),
         Phase::Qemu(qemu::TestKind::Memory),
+        Phase::Qemu(qemu::TestKind::Vm),
+        Phase::Qemu(qemu::TestKind::Elf),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -183,6 +187,8 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Trap),
         Phase::Qemu(qemu::TestKind::Timer),
         Phase::Qemu(qemu::TestKind::Memory),
+        Phase::Qemu(qemu::TestKind::Vm),
+        Phase::Qemu(qemu::TestKind::Elf),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -280,6 +286,8 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::Trap) => Some(vec![Phase::Qemu(qemu::TestKind::Trap)]),
         Command::Test(TestFilter::Timer) => Some(vec![Phase::Qemu(qemu::TestKind::Timer)]),
         Command::Test(TestFilter::Memory) => Some(vec![Phase::Qemu(qemu::TestKind::Memory)]),
+        Command::Test(TestFilter::Vm) => Some(vec![Phase::Qemu(qemu::TestKind::Vm)]),
+        Command::Test(TestFilter::Elf) => Some(vec![Phase::Qemu(qemu::TestKind::Elf)]),
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
         Command::Check => Some(check_phases()),
         Command::Setup | Command::Build | Command::Run => None,
@@ -316,6 +324,8 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Trap),
                 Phase::Qemu(qemu::TestKind::Timer),
                 Phase::Qemu(qemu::TestKind::Memory),
+                Phase::Qemu(qemu::TestKind::Vm),
+                Phase::Qemu(qemu::TestKind::Elf),
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
@@ -362,9 +372,12 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Trap),
                 Phase::Qemu(qemu::TestKind::Timer),
                 Phase::Qemu(qemu::TestKind::Memory),
+                Phase::Qemu(qemu::TestKind::Vm),
+                Phase::Qemu(qemu::TestKind::Elf),
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
+        assert_eq!(check_phases().len(), 19);
 
         let plan = check_phases();
         let position = |phase| {
@@ -374,6 +387,20 @@ mod tests {
         };
         assert!(position(Phase::ClippyAbi) < position(Phase::ClippyKernelLib));
         assert!(position(Phase::AbiUnitTests) < position(Phase::KernelUnitTests));
+    }
+
+    #[test]
+    fn public_vm_and_elf_filters_connect_to_named_qemu_phases() {
+        assert_eq!(
+            phase_plan_for(&Command::Test(TestFilter::Vm)),
+            Some(vec![Phase::Qemu(qemu::TestKind::Vm)])
+        );
+        assert_eq!(
+            phase_plan_for(&Command::Test(TestFilter::Elf)),
+            Some(vec![Phase::Qemu(qemu::TestKind::Elf)])
+        );
+        assert_eq!(Phase::Qemu(qemu::TestKind::Vm).command(), "QEMU VM test");
+        assert_eq!(Phase::Qemu(qemu::TestKind::Elf).command(), "QEMU ELF test");
     }
 
     #[test]
