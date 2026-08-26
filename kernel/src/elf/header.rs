@@ -313,8 +313,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_magic() {
+    fn rejects_bad_magic_byte_zero() {
         assert_header_byte_error(0, 0, ElfError::BadMagic);
+    }
+
+    #[test]
+    fn rejects_bad_magic_byte_one() {
+        assert_header_byte_error(1, 0, ElfError::BadMagic);
+    }
+
+    #[test]
+    fn rejects_bad_magic_byte_two() {
+        assert_header_byte_error(2, 0, ElfError::BadMagic);
+    }
+
+    #[test]
+    fn rejects_bad_magic_byte_three() {
+        assert_header_byte_error(3, 0, ElfError::BadMagic);
+    }
+
+    #[test]
+    fn rejects_an_elf_header_shorter_than_sixty_four_bytes() {
+        let bytes = [0u8; 63];
+        assert_eq!(ElfImage::parse(&bytes), Err(ElfError::HeaderSize));
     }
 
     #[test]
@@ -389,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_more_than_eight_load_segments() {
+    fn rejects_more_than_eight_empty_load_segments() {
         let mut bytes = fixture::valid_riscv64_elf();
         put_u16(&mut bytes, 56, 9);
         for index in 2..9 {
@@ -397,7 +418,42 @@ mod tests {
             let source = bytes[64..120].to_vec();
             bytes[destination..destination + 56].copy_from_slice(&source);
         }
+        for index in 0..9 {
+            put_u64(&mut bytes, 64 + index * 56 + 32, 0);
+            put_u64(&mut bytes, 64 + index * 56 + 40, 0);
+        }
         assert_eq!(ElfImage::parse(&bytes), Err(ElfError::TooManyLoadSegments));
+    }
+
+    #[test]
+    fn accepts_exactly_eight_load_segments() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        put_u16(&mut bytes, 56, 8);
+        for index in 2..8 {
+            copy_first_program_header(&mut bytes, index);
+        }
+        assert_eq!(ElfImage::parse(&bytes).unwrap().program_header_count(), 8);
+    }
+
+    #[test]
+    fn does_not_count_non_load_program_headers_toward_the_load_limit() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        put_u16(&mut bytes, 56, 9);
+        for index in 2..9 {
+            copy_first_program_header(&mut bytes, index);
+        }
+        for index in 0..9 {
+            put_u32(&mut bytes, 64 + index * 56, 0);
+        }
+        assert_eq!(ElfImage::parse(&bytes).unwrap().program_header_count(), 9);
+    }
+
+    #[test]
+    fn accepts_a_program_header_table_ending_at_the_input_boundary() {
+        let fixture = fixture::valid_riscv64_elf();
+        let mut bytes = [0u8; 176];
+        bytes[..176].copy_from_slice(&fixture[..176]);
+        assert_eq!(ElfImage::parse(&bytes).unwrap().program_header_count(), 2);
     }
 
     #[test]
@@ -426,6 +482,12 @@ mod tests {
         let mut bytes = fixture::valid_riscv64_elf();
         bytes[offset] = value;
         assert_eq!(ElfImage::parse(&bytes), Err(expected));
+    }
+
+    fn copy_first_program_header(bytes: &mut [u8], index: usize) {
+        let source: [u8; 56] = bytes[64..120].try_into().unwrap();
+        let destination = 64 + index * 56;
+        bytes[destination..destination + 56].copy_from_slice(&source);
     }
 
     fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {

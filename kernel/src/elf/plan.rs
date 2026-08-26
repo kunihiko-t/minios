@@ -16,7 +16,7 @@ pub const USER_GUARD_BOTTOM: u64 = 0x3ffe_f000;
 /// Maximum page-rounded size of all loadable user segments.
 pub const MAX_USER_IMAGE_PAGES: usize = 2048;
 
-/// A fully validated loadable ELF segment.
+/// A fully validated, nonempty loadable ELF segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadSegment {
     file_offset: usize,
@@ -103,7 +103,7 @@ pub struct LoadPlan {
 }
 
 impl LoadPlan {
-    /// Validates every load segment before returning a materialization plan.
+    /// Validates every load segment and omits structurally valid empty segments.
     pub fn new(image: &ElfImage<'_>) -> Result<Self, ElfError> {
         let mut plan = Self {
             segments: [None; MAX_LOAD_SEGMENTS],
@@ -120,7 +120,9 @@ impl LoadPlan {
             if plan.len == MAX_LOAD_SEGMENTS {
                 return Err(ElfError::TooManyLoadSegments);
             }
-            let segment = validate_segment(image.bytes(), header)?;
+            let Some(segment) = validate_segment(image.bytes(), header)? else {
+                continue;
+            };
             for existing in plan.segments() {
                 if ranges_overlap(
                     segment.first_page.start().as_u64(),
@@ -152,7 +154,7 @@ impl LoadPlan {
         Ok(plan)
     }
 
-    /// Returns the number of loadable segments in the plan.
+    /// Returns the number of nonempty segments that require materialization.
     pub const fn len(&self) -> usize {
         self.len
     }
@@ -167,18 +169,18 @@ impl LoadPlan {
         self.entry
     }
 
-    /// Returns the total number of distinct page-rounded segment pages.
+    /// Returns the total number of distinct pages from nonempty segments.
     pub const fn total_user_pages(&self) -> usize {
         self.total_user_pages
     }
 
-    /// Iterates over validated loadable segments in program-header order.
+    /// Iterates over nonempty loadable segments in program-header order.
     pub fn segments(&self) -> impl Iterator<Item = &LoadSegment> {
         self.segments[..self.len].iter().flatten()
     }
 }
 
-fn validate_segment(bytes: &[u8], header: ProgramHeader) -> Result<LoadSegment, ElfError> {
+fn validate_segment(bytes: &[u8], header: ProgramHeader) -> Result<Option<LoadSegment>, ElfError> {
     if header.file_size() > header.memory_size() {
         return Err(ElfError::FilesLargerThanMemory);
     }
@@ -208,26 +210,6 @@ fn validate_segment(bytes: &[u8], header: ProgramHeader) -> Result<LoadSegment, 
     let virtual_start =
         VirtAddr::try_new(header.virtual_address()).map_err(|_| ElfError::RangeOverflow)?;
     let memory_len = usize::try_from(header.memory_size()).map_err(|_| ElfError::RangeOverflow)?;
-    if header.virtual_address() < USER_START
-        || header.virtual_address() >= USER_END
-        || memory_end > USER_END
-    {
-        return Err(ElfError::OutsideUserRange);
-    }
-
-    let first_page = VirtPage::containing(virtual_start);
-    let page_start = first_page.start().as_u64();
-    let page_end = if header.memory_size() == 0 {
-        page_start
-    } else {
-        memory_end
-            .checked_add(PAGE_SIZE - 1)
-            .ok_or(ElfError::RangeOverflow)?
-            & !(PAGE_SIZE - 1)
-    };
-    if ranges_overlap(page_start, page_end, USER_GUARD_BOTTOM, USER_STACK_TOP) {
-        return Err(ElfError::StackCollision);
-    }
 
     if header.writable() && header.executable() {
         return Err(ElfError::WritableExecutable);
@@ -243,11 +225,32 @@ fn validate_segment(bytes: &[u8], header: ProgramHeader) -> Result<LoadSegment, 
     )
     .map_err(|_| ElfError::InvalidPermissions)?;
 
+    if header.memory_size() == 0 {
+        return Ok(None);
+    }
+
+    if header.virtual_address() < USER_START
+        || header.virtual_address() >= USER_END
+        || memory_end > USER_END
+    {
+        return Err(ElfError::OutsideUserRange);
+    }
+
+    let first_page = VirtPage::containing(virtual_start);
+    let page_start = first_page.start().as_u64();
+    let page_end = memory_end
+        .checked_add(PAGE_SIZE - 1)
+        .ok_or(ElfError::RangeOverflow)?
+        & !(PAGE_SIZE - 1);
+    if ranges_overlap(page_start, page_end, USER_GUARD_BOTTOM, USER_STACK_TOP) {
+        return Err(ElfError::StackCollision);
+    }
+
     let page_count = usize::try_from((page_end - page_start) / PAGE_SIZE)
         .map_err(|_| ElfError::RangeOverflow)?;
     let page_offset = usize::try_from(header.virtual_address() - page_start)
         .map_err(|_| ElfError::RangeOverflow)?;
-    Ok(LoadSegment {
+    Ok(Some(LoadSegment {
         file_offset,
         file_len,
         virtual_start,
@@ -256,7 +259,7 @@ fn validate_segment(bytes: &[u8], header: ProgramHeader) -> Result<LoadSegment, 
         page_count,
         page_offset,
         flags,
-    })
+    }))
 }
 
 const fn ranges_overlap(
@@ -377,6 +380,15 @@ mod tests {
     }
 
     #[test]
+    fn accepts_page_rounded_segments_that_are_exactly_adjacent() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        set_ph_u64(&mut bytes, SECOND_HEADER, 16, 0x0010_1000);
+        let plan = plan(&bytes).unwrap();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan.total_user_pages(), 2);
+    }
+
+    #[test]
     fn rejects_writable_executable_segments() {
         let mut bytes = fixture::valid_riscv64_elf();
         set_ph_u32(&mut bytes, SECOND_HEADER, 4, 7);
@@ -409,6 +421,107 @@ mod tests {
         let mut bytes = fixture::valid_riscv64_elf();
         set_ph_u64(&mut bytes, SECOND_HEADER, 16, USER_STACK_BOTTOM);
         assert_plan_error(&bytes, ElfError::StackCollision);
+    }
+
+    #[test]
+    fn accepts_a_positive_segment_ending_exactly_at_the_guard_page() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        set_ph_u64(&mut bytes, SECOND_HEADER, 16, USER_GUARD_BOTTOM - 0x1000);
+        set_ph_u64(&mut bytes, SECOND_HEADER, 40, 0x1000);
+        let plan = plan(&bytes).unwrap();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan.total_user_pages(), 2);
+    }
+
+    #[test]
+    fn excludes_an_empty_load_inside_a_nonempty_two_page_segment() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        set_ph_u64(&mut bytes, FIRST_HEADER, 40, 0x2000);
+        append_empty_load(&mut bytes, 0x0010_1800, 4, 0, 1);
+
+        let plan = plan(&bytes).unwrap();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan.total_user_pages(), 3);
+        assert!(plan.segments().all(|segment| segment.memory_len() > 0));
+    }
+
+    #[test]
+    fn excludes_an_empty_load_inside_the_reserved_stack_range() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, USER_STACK_BOTTOM);
+
+        let plan = plan(&bytes).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.total_user_pages(), 1);
+    }
+
+    #[test]
+    fn empty_loads_contribute_no_materialized_segment_or_page() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, 0x0020_0000);
+
+        let plan = plan(&bytes).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.total_user_pages(), 1);
+        assert_eq!(
+            plan.segments().next().unwrap().virtual_start().as_u64(),
+            0x0010_0000
+        );
+    }
+
+    #[test]
+    fn empty_executable_load_cannot_fulfill_the_entry_point() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, FIRST_HEADER, 0x0010_0000);
+        set_ph_u32(&mut bytes, FIRST_HEADER, 4, 5);
+        assert_plan_error(&bytes, ElfError::EntryNotExecutable);
+    }
+
+    #[test]
+    fn empty_loads_still_reject_files_larger_than_memory() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, 0x0020_0000);
+        set_ph_u64(&mut bytes, SECOND_HEADER, 32, 1);
+        assert_plan_error(&bytes, ElfError::FilesLargerThanMemory);
+    }
+
+    #[test]
+    fn empty_loads_still_reject_invalid_alignment() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, 0x0020_0000);
+        set_ph_u64(&mut bytes, SECOND_HEADER, 48, 3);
+        assert_plan_error(&bytes, ElfError::InvalidAlignment);
+    }
+
+    #[test]
+    fn empty_loads_still_reject_incongruent_address_and_offset() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, 0x0020_0004);
+        assert_plan_error(&bytes, ElfError::IncongruentAddressAndOffset);
+    }
+
+    #[test]
+    fn empty_loads_still_reject_writable_executable_permissions() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, 0x0020_0000);
+        set_ph_u32(&mut bytes, SECOND_HEADER, 4, 7);
+        assert_plan_error(&bytes, ElfError::WritableExecutable);
+    }
+
+    #[test]
+    fn empty_loads_still_reject_write_only_permissions() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, 0x0020_0000);
+        set_ph_u32(&mut bytes, SECOND_HEADER, 4, 2);
+        assert_plan_error(&bytes, ElfError::InvalidPermissions);
+    }
+
+    #[test]
+    fn empty_loads_still_reject_zero_leaf_permissions() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        make_load_empty(&mut bytes, SECOND_HEADER, 0x0020_0000);
+        set_ph_u32(&mut bytes, SECOND_HEADER, 4, 0);
+        assert_plan_error(&bytes, ElfError::InvalidPermissions);
     }
 
     #[test]
@@ -475,6 +588,33 @@ mod tests {
 
     fn set_ph_u64(bytes: &mut [u8], header: usize, field: usize, value: u64) {
         put_u64(bytes, header + field, value);
+    }
+
+    fn make_load_empty(bytes: &mut [u8], header: usize, virtual_address: u64) {
+        set_ph_u64(bytes, header, 16, virtual_address);
+        set_ph_u64(bytes, header, 32, 0);
+        set_ph_u64(bytes, header, 40, 0);
+    }
+
+    fn append_empty_load(
+        bytes: &mut [u8],
+        virtual_address: u64,
+        flags: u32,
+        offset: u64,
+        alignment: u64,
+    ) {
+        put_u16(bytes, 56, 3);
+        set_ph_u32(bytes, 176, 0, 1);
+        set_ph_u32(bytes, 176, 4, flags);
+        set_ph_u64(bytes, 176, 8, offset);
+        set_ph_u64(bytes, 176, 16, virtual_address);
+        set_ph_u64(bytes, 176, 32, 0);
+        set_ph_u64(bytes, 176, 40, 0);
+        set_ph_u64(bytes, 176, 48, alignment);
+    }
+
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
 
     fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
