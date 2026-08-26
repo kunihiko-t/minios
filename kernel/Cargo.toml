@@ -13,6 +13,7 @@ qemu-test-boot = []
 qemu-test-timer = []
 qemu-test-trap = []
 qemu-test-memory = []
+qemu-test-elf = []
 
 [lib]
 path = "src/lib.rs"
