@@ -8,7 +8,6 @@ core::arch::global_asm!(include_str!("entry.S"));
 // 保存した全レジスターを復元してから`sret`するため、ホストや異なるアーキテクチャーへは組み込まない。
 core::arch::global_asm!(include_str!("trap.S"));
 
-#[cfg(target_arch = "riscv64")]
 pub mod csr;
 #[cfg(target_arch = "riscv64")]
 pub mod sbi;

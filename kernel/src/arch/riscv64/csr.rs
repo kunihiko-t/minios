@@ -1,5 +1,37 @@
+#[cfg(not(target_arch = "riscv64"))]
+use crate::vm::PhysPageNum;
+#[cfg(target_arch = "riscv64")]
 use core::arch::asm;
+#[cfg(target_arch = "riscv64")]
+use minios_kernel::vm::PhysPageNum;
 
+pub const fn sv39_satp_bits(root: PhysPageNum) -> u64 {
+    (8u64 << 60) | root.as_u64()
+}
+
+/// Installs an Sv39 root page table and invalidates stale address translations.
+///
+/// # Safety
+///
+/// The caller must run in S-mode and ensure that `root` names a valid Sv39 root
+/// whose identity mappings cover the current instruction stream, stack, trap
+/// vector, UART, and every physical page the kernel will access afterward.
+#[cfg(target_arch = "riscv64")]
+pub unsafe fn activate_sv39(root: PhysPageNum) {
+    let bits = sv39_satp_bits(root);
+    // Safety: the caller establishes the documented privilege and page-table
+    // invariants. Keeping both instructions in one asm block guarantees that
+    // `sfence.vma` is the instruction immediately following the satp write.
+    unsafe {
+        asm!(
+            "csrw satp, {bits}",
+            "sfence.vma zero, zero",
+            bits = in(reg) bits
+        )
+    };
+}
+
+#[cfg(target_arch = "riscv64")]
 pub fn read_scause() -> usize {
     let value: usize;
     // Safety: S-modeのトラップハンドラー内で`scause`を読むだけで、メモリーとスタックを変更しない。
@@ -7,6 +39,7 @@ pub fn read_scause() -> usize {
     value
 }
 
+#[cfg(target_arch = "riscv64")]
 pub fn read_sepc() -> usize {
     let value: usize;
     // Safety: S-modeのトラップハンドラーが`sepc`を読むだけで、実行再開位置は変更しない。
@@ -22,11 +55,13 @@ pub fn read_sepc() -> usize {
 /// 現在のアドレス空間で安全に実行できることを保証します。
 // 回復可能な例外を扱う次の段階で必要になるAPIなので、この関数だけ一時的に未使用を許す。
 #[allow(dead_code)]
+#[cfg(target_arch = "riscv64")]
 pub unsafe fn write_sepc(value: usize) {
     // Safety: 上記のS-mode、IALIGN、再開先の不変条件を呼び出し側が満たす場合に限る。
     unsafe { asm!("csrw sepc, {value}", value = in(reg) value, options(nomem, nostack)) };
 }
 
+#[cfg(target_arch = "riscv64")]
 pub fn read_stval() -> usize {
     let value: usize;
     // Safety: S-modeのトラップ情報`stval`を読むだけで、CSRとメモリーを書き換えない。
@@ -34,6 +69,7 @@ pub fn read_stval() -> usize {
     value
 }
 
+#[cfg(target_arch = "riscv64")]
 pub fn read_time() -> u64 {
     let value: u64;
     // Safety: `time`は読み取り専用カウンターである。
@@ -48,11 +84,13 @@ pub fn read_time() -> u64 {
 ///
 /// 呼び出し側はS-modeであり、BASEが規定の境界にそろい、下位2ビットが
 /// Direct（0）または実装済みのモードであり、入口が全トラップを安全に受けることを保証します。
+#[cfg(target_arch = "riscv64")]
 pub unsafe fn write_stvec(value: usize) {
     // Safety: 上記の特権モード、BASEのアラインメント、モードビット、入口ABIを呼び出し側が保証する。
     unsafe { asm!("csrw stvec, {value}", value = in(reg) value, options(nomem, nostack)) };
 }
 
+#[cfg(target_arch = "riscv64")]
 pub fn read_sstatus() -> usize {
     let value: usize;
     // Safety: S-modeで`sstatus`の現在値を読むだけで、特権状態とメモリーを変更しない。
@@ -66,11 +104,13 @@ pub fn read_sstatus() -> usize {
 ///
 /// 呼び出し側はS-modeであり、予約ビットとWARLビットに無効値を入れず、SIE、SPIE、SPP
 /// などの変更が現在のトラップフレームと `sret` の不変条件を壊さないことを保証します。
+#[cfg(target_arch = "riscv64")]
 pub unsafe fn write_sstatus(value: usize) {
     // Safety: 上記のS-mode、WARLビットと予約ビット、トラップ復帰状態の不変条件に従う。
     unsafe { asm!("csrw sstatus, {value}", value = in(reg) value, options(nomem, nostack)) };
 }
 
+#[cfg(target_arch = "riscv64")]
 pub fn read_sie() -> usize {
     let value: usize;
     // Safety: S-modeで`sie`の許可ビットを読むだけで、割り込み状態は変更しない。
@@ -84,7 +124,24 @@ pub fn read_sie() -> usize {
 ///
 /// 呼び出し側はS-modeであり、予約ビットとWARLビットを保ち、許可する全割り込みについて
 /// 初期化済みのハンドラーと共有状態が存在することを保証します。
+#[cfg(target_arch = "riscv64")]
 pub unsafe fn write_sie(value: usize) {
     // Safety: 上記のS-mode、WARLビットと予約ビット、ハンドラー初期化の不変条件に従う。
     unsafe { asm!("csrw sie, {value}", value = in(reg) value, options(nomem, nostack)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sv39_satp_bits;
+    use crate::vm::PhysPageNum;
+
+    // Catches selecting a non-Sv39 MODE or shifting/truncating the root PPN
+    // while constructing the satp value.
+    #[test]
+    fn sv39_satp_uses_mode_eight_and_root_ppn() {
+        assert_eq!(
+            sv39_satp_bits(PhysPageNum::try_new(0x12345).unwrap()),
+            (8u64 << 60) | 0x12345
+        );
+    }
 }

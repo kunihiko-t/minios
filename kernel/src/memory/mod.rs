@@ -73,4 +73,20 @@ impl KernelSections {
     pub const fn kernel_end(&self) -> usize {
         self.kernel_end
     }
+
+    pub(crate) fn text(&self) -> core::ops::Range<usize> {
+        self.text.clone()
+    }
+
+    pub(crate) fn rodata(&self) -> core::ops::Range<usize> {
+        self.rodata.clone()
+    }
+
+    pub(crate) fn writable(&self) -> core::ops::Range<usize> {
+        self.writable.clone()
+    }
+
+    pub(crate) fn boot_stack(&self) -> core::ops::Range<usize> {
+        self.boot_stack.clone()
+    }
 }
