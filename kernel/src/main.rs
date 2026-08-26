@@ -18,8 +18,12 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::memory::{
-    PHYSICAL_MEMORY_END,
+    KernelSections, PHYSICAL_MEMORY_END,
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
+};
+#[cfg(target_arch = "riscv64")]
+use minios_kernel::vm::{
+    AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, PhysPageNum,
 };
 
 #[cfg(target_arch = "riscv64")]
@@ -28,9 +32,20 @@ const UNKNOWN_HART_ID: usize = usize::MAX;
 static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(UNKNOWN_HART_ID);
 
 #[cfg(target_arch = "riscv64")]
+static mut KERNEL_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
+
+#[cfg(target_arch = "riscv64")]
 // Safety: `linker.ld`がRISC-Vカーネルイメージの末尾に必ず定義するC ABIシンボルである。
 // Rust側は`addr_of!`でアドレスを作るだけで、外部staticの内容を読み書きしない。
 unsafe extern "C" {
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_start: u8;
+    static __rodata_end: u8;
+    static __data_start: u8;
+    static __bss_end: u8;
+    static __boot_stack_start: u8;
+    static __boot_stack_end: u8;
     static __kernel_end: u8;
 }
 
@@ -45,10 +60,6 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     let _ = dtb;
     arch::riscv64::trap::init();
     crate::println!("[ok] traps");
-    if let Err(error) = time::init() {
-        fatal_timer_error("initial schedule", error);
-    }
-    crate::println!("[ok] timer");
 
     let managed_memory_start = kernel_memory_start();
     // Safety: OpenSBIが使う`0x8000_0000..0x8020_0000`と、リンカーが配置する
@@ -60,6 +71,44 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
             Ok(frames) => frames,
             Err(error) => fatal_memory_error(error),
         };
+
+    let sections = kernel_sections();
+    let plan = match KernelMapPlan::new(&sections, managed_memory_start, PHYSICAL_MEMORY_END) {
+        Ok(plan) => plan,
+        Err(error) => panic!("invalid kernel mapping plan: {error:?}"),
+    };
+    let mut memory = IdentityFrameStore::new();
+    // Safety: this is the boot hart's sole access to the static ownership
+    // table, and kernel_main never returns or constructs another mutable
+    // reference to it.
+    let storage_pointer = &raw mut KERNEL_ADDRESS_SPACE_STORAGE;
+    let storage = unsafe { storage_pointer.as_mut() }
+        .expect("a static address-space storage pointer is never null");
+    let mut builder = match AddressSpaceBuilder::new(&mut frames, &mut memory, storage) {
+        Ok(builder) => builder,
+        Err(error) => panic!("kernel address-space root allocation failed: {error:?}"),
+    };
+    for mapping in plan.mappings() {
+        if let Err(error) =
+            builder.map_borrowed(mapping.page(), mapping.physical(), mapping.flags())
+        {
+            panic!("kernel identity mapping failed: {error:?}");
+        }
+    }
+    let kernel_space = builder.finish();
+    let root = match PhysPageNum::from_start(kernel_space.root().as_u64()) {
+        Ok(root) => root,
+        Err(error) => panic!("kernel root page number is invalid: {error:?}"),
+    };
+    // Safety: the completed plan identity-maps the executing kernel text, boot
+    // stack, trap vector, UART, and allocator-managed RAM that owns every page
+    // table. `root` belongs to this address space and remains live forever.
+    unsafe { arch::riscv64::csr::activate_sv39(root) };
+
+    if let Err(error) = time::init() {
+        fatal_timer_error("initial schedule", error);
+    }
+    crate::println!("[ok] timer");
     crate::println!("[ok] memory");
 
     #[cfg(feature = "qemu-test-memory")]
@@ -108,6 +157,23 @@ fn kernel_memory_start() -> usize {
     let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
     // `linker.ld`はこのシンボルを4 KiB境界にそろえるが、将来リンカーを変更してもイメージを保護できるよう、ここでも上向きに丸める。
     align_up_to_page(kernel_end)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn kernel_sections() -> KernelSections {
+    let text = core::ptr::addr_of!(__text_start) as usize..core::ptr::addr_of!(__text_end) as usize;
+    let rodata =
+        core::ptr::addr_of!(__rodata_start) as usize..core::ptr::addr_of!(__rodata_end) as usize;
+    let writable =
+        core::ptr::addr_of!(__data_start) as usize..core::ptr::addr_of!(__bss_end) as usize;
+    let boot_stack = core::ptr::addr_of!(__boot_stack_start) as usize
+        ..core::ptr::addr_of!(__boot_stack_end) as usize;
+    let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
+
+    match KernelSections::new(text, rodata, writable, boot_stack, kernel_end) {
+        Ok(sections) => sections,
+        Err(error) => panic!("invalid linker-provided kernel sections: {error:?}"),
+    }
 }
 
 #[cfg(target_arch = "riscv64")]
