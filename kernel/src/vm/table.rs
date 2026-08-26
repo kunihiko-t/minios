@@ -165,6 +165,15 @@ impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStor
         page: VirtPage,
         flags: PageFlags,
     ) -> Result<MappedFrame, VmError<M::Error>> {
+        self.map_new_zeroed_with_kind(page, flags, FrameKind::User)
+    }
+
+    pub(crate) fn map_new_zeroed_with_kind(
+        &mut self,
+        page: VirtPage,
+        flags: PageFlags,
+        kind: FrameKind,
+    ) -> Result<MappedFrame, VmError<M::Error>> {
         let table = self.walk_to_leaf_table(page)?;
         let leaf_index = page.vpn()[0];
         let old = self.read_entry(table, leaf_index)?;
@@ -172,7 +181,7 @@ impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStor
             return Err(VmError::AlreadyMapped);
         }
 
-        let physical = self.allocate_zeroed(FrameKind::User)?;
+        let physical = self.allocate_zeroed(kind)?;
         let ppn = PhysPageNum::from_start(physical.as_u64()).map_err(VmError::Address)?;
         let leaf = PageTableEntry::leaf(ppn, flags).map_err(VmError::Pte)?;
         if let Err(error) = self
@@ -184,6 +193,17 @@ impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStor
         }
 
         Ok(MappedFrame { physical })
+    }
+
+    pub(crate) fn copy_into(
+        &mut self,
+        mapped: MappedFrame,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), M::Error> {
+        let frame_start = usize::try_from(mapped.physical.as_u64())
+            .expect("mapped frames originate from usize allocator addresses");
+        self.memory.copy_into(frame_start, offset, bytes)
     }
 
     pub fn map_borrowed(
