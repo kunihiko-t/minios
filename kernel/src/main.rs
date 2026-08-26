@@ -17,16 +17,15 @@ use core::panic::PanicInfo;
 #[cfg(target_arch = "riscv64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::memory::frame::{FrameAllocator, FrameError, PAGE_SIZE};
+use minios_kernel::memory::{
+    frame::{FrameAllocator, FrameError, PAGE_SIZE},
+    PHYSICAL_MEMORY_END,
+};
 
 #[cfg(target_arch = "riscv64")]
 const UNKNOWN_HART_ID: usize = usize::MAX;
 #[cfg(target_arch = "riscv64")]
 static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(UNKNOWN_HART_ID);
-
-#[cfg(target_arch = "riscv64")]
-// QEMU virtを128 MiBで起動するため、RAMの上端`0x8800_0000`をアロケーターの固定境界とする。
-const PHYSICAL_MEMORY_END: usize = 0x8800_0000;
 
 #[cfg(target_arch = "riscv64")]
 // Safety: `linker.ld`がRISC-Vカーネルイメージの末尾に必ず定義するC ABIシンボルである。
@@ -54,7 +53,7 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     let managed_memory_start = kernel_memory_start();
     // Safety: OpenSBIが使う`0x8000_0000..0x8020_0000`と、リンカーが配置する
     // `0x8020_0000..managed_memory_start`のカーネルイメージを除外している。
-    // QEMU `virt`のRAM上端`0x8800_0000`までを所有するのは、この局所アロケーターだけである。
+    // boot payloadの開始`0x8780_0000`までを所有するのは、この局所アロケーターだけである。
     // このアロケーターが生存している間は、同じ範囲を管理する別の所有者を作らない。
     let mut frames =
         match unsafe { FrameAllocator::<512>::new(managed_memory_start, PHYSICAL_MEMORY_END) } {
