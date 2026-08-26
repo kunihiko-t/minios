@@ -113,8 +113,11 @@ impl KernelMapping {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::KernelMapPlan;
     use crate::{memory::KernelSections, vm::PageFlags};
+    use std::{collections::BTreeSet, vec::Vec};
 
     fn fixture_sections() -> KernelSections {
         KernelSections::new(
@@ -161,5 +164,71 @@ mod tests {
         let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000).unwrap();
 
         assert!(plan.mappings().all(|mapping| !mapping.flags().user()));
+    }
+
+    // Catches skipped, duplicated, reordered, or non-identity pages anywhere
+    // in the complete section/stack/managed-RAM/UART mapping sequence.
+    #[test]
+    fn kernel_plan_enumerates_the_exact_identity_page_sequence_once() {
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000).unwrap();
+        let mappings = plan.mappings().collect::<Vec<_>>();
+        let expected_pages = (0x8020_0000usize..0x8020_2000)
+            .step_by(0x1000)
+            .chain((0x8020_2000..0x8020_3000).step_by(0x1000))
+            .chain((0x8020_3000..0x8020_5000).step_by(0x1000))
+            .chain((0x8020_5000..0x8021_5000).step_by(0x1000))
+            .chain((0x8021_5000..0x8780_0000).step_by(0x1000))
+            .chain((0x1000_0000..0x1000_1000).step_by(0x1000))
+            .map(|address| address as u64)
+            .collect::<Vec<_>>();
+        let actual_pages = mappings
+            .iter()
+            .map(|mapping| mapping.page().start().as_u64())
+            .collect::<Vec<_>>();
+        let unique_pages = actual_pages.iter().copied().collect::<BTreeSet<_>>();
+
+        assert_eq!(mappings.len(), 30_209);
+        assert_eq!(actual_pages, expected_pages);
+        assert_eq!(unique_pages.len(), mappings.len());
+        assert!(
+            mappings
+                .iter()
+                .all(|mapping| { mapping.page().start().as_u64() == mapping.physical().as_u64() })
+        );
+    }
+
+    // Catches inclusive range ends, a missing first/final page, permission
+    // bleed across section boundaries, or any payload page becoming mapped.
+    #[test]
+    fn kernel_plan_honors_every_mapping_and_payload_boundary() {
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000).unwrap();
+
+        for address in [0x8020_0000, 0x8020_1000] {
+            assert_eq!(plan.flags_at(address), Some(PageFlags::supervisor_rx()));
+        }
+        assert_eq!(plan.flags_at(0x8020_2000), Some(PageFlags::supervisor_r()));
+        for address in [
+            0x8020_3000,
+            0x8020_4000,
+            0x8020_5000,
+            0x8021_4000,
+            0x8021_5000,
+            0x877f_f000,
+            0x1000_0000,
+        ] {
+            assert_eq!(plan.flags_at(address), Some(PageFlags::supervisor_rw()));
+        }
+        assert_eq!(plan.flags_at(0x8780_0000), None);
+        assert_eq!(plan.flags_at(0x1000_1000), None);
+
+        for payload_address in [0x8780_0000, 0x87c0_0000, 0x87ff_f000, 0x8800_0000] {
+            assert_eq!(plan.flags_at(payload_address), None);
+        }
+        assert!(plan.mappings().all(|mapping| {
+            let address = mapping.page().start().as_u64();
+            !(0x8780_0000..0x8800_0000).contains(&address)
+        }));
     }
 }

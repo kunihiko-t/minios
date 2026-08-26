@@ -77,7 +77,17 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         Ok(plan) => plan,
         Err(error) => panic!("invalid kernel mapping plan: {error:?}"),
     };
-    let mut memory = IdentityFrameStore::new();
+    // Safety: QEMU virt exposes managed_memory_start..PHYSICAL_MEMORY_END as
+    // valid RAM. Bare translation reaches it by identity before satp changes,
+    // and `plan` identity-maps the complete range afterward. This boot hart
+    // creates the only IdentityFrameStore, and all byte access to allocator-
+    // issued frames goes through it for the rest of kernel_main. The allocator
+    // only tracks/assigns frames and never dereferences their memory itself.
+    let mut memory =
+        match unsafe { IdentityFrameStore::new(managed_memory_start, PHYSICAL_MEMORY_END) } {
+            Ok(memory) => memory,
+            Err(error) => panic!("invalid identity frame-store range: {error:?}"),
+        };
     // Safety: this is the boot hart's sole access to the static ownership
     // table, and kernel_main never returns or constructs another mutable
     // reference to it.
