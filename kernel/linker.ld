@@ -7,40 +7,57 @@ SECTIONS
     /* QEMU virt の OpenSBI が S モードカーネルをロードする物理アドレス。 */
     . = 0x80200000;
 
-    .text : ALIGN(4K)
+    . = ALIGN(4K);
+    __text_start = .;
+    .text :
     {
         *(.text.entry)
         *(.text .text.*)
     }
+    . = ALIGN(4K);
+    __text_end = .;
 
-    .rodata : ALIGN(4K)
+    . = ALIGN(4K);
+    __rodata_start = .;
+    .rodata :
     {
         *(.rodata .rodata.*)
     }
+    . = ALIGN(4K);
+    __rodata_end = .;
 
-    .data : ALIGN(4K)
+    . = ALIGN(4K);
+    __data_start = .;
+    .data :
     {
         *(.data .data.*)
         /* RISC-V の small initialized data も data 境界内へ回収する。 */
         *(.sdata .sdata.*)
     }
+    . = ALIGN(4K);
+    __data_end = .;
 
-    .bss : ALIGN(4K)
+    . = ALIGN(4K);
+    __bss_start = .;
+    .bss :
     {
-        /* entry.S が Rust に入る前にこの範囲をゼロ化する契約。 */
-        __bss_start = .;
         *(.bss .bss.*)
         /* RISC-V の small zero-initialized data も entry.S のゼロ化範囲へ回収する。 */
         *(.sbss .sbss.*)
         *(COMMON)
-
-        . = ALIGN(16);
-        __boot_stack_start = .;
-        /* 初期 Rust コード用の 64 KiB スタックを BSS 内へ確保する。 */
-        . += 64K;
-        __boot_stack_end = .;
-        __bss_end = .;
     }
+    . = ALIGN(4K);
+    __bss_end = .;
+
+    . = ALIGN(4K);
+    __boot_stack_start = .;
+    .boot_stack (NOLOAD) :
+    {
+        /* 初期 Rust コード用の 64 KiB スタックを確保する。 */
+        . += 64K;
+    }
+    . = ALIGN(4K);
+    __boot_stack_end = .;
 
     . = ALIGN(4K);
     /* 以後の物理メモリ管理がカーネル占有末尾として利用する契約。 */

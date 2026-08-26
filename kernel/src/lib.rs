@@ -18,7 +18,85 @@ pub mod time;
 
 #[cfg(test)]
 mod tests {
+    use super::memory;
     use super::sbi::{SbiError, SbiRet};
+
+    #[test]
+    fn managed_memory_stops_before_the_boot_payload_window() {
+        assert_eq!(memory::PHYSICAL_MEMORY_END, 0x8780_0000);
+        assert_eq!(memory::BOOT_PAYLOAD_START, memory::PHYSICAL_MEMORY_END);
+        assert_eq!(memory::BOOT_PAYLOAD_END, 0x8800_0000);
+    }
+
+    #[test]
+    fn kernel_sections_require_page_aligned_non_overlapping_ranges() {
+        let sections = memory::KernelSections::new(
+            0x8020_0000..0x8020_2000,
+            0x8020_2000..0x8020_3000,
+            0x8020_3000..0x8020_5000,
+            0x8020_5000..0x8021_5000,
+            0x8021_5000,
+        )
+        .unwrap();
+
+        assert_eq!(sections.kernel_end(), 0x8021_5000);
+    }
+
+    #[test]
+    fn kernel_sections_reject_unaligned_ranges() {
+        assert!(matches!(
+            memory::KernelSections::new(
+                0x8020_0001..0x8020_2000,
+                0x8020_2000..0x8020_3000,
+                0x8020_3000..0x8020_5000,
+                0x8020_5000..0x8021_5000,
+                0x8021_5000,
+            ),
+            Err(memory::LayoutError::Unaligned)
+        ));
+    }
+
+    #[test]
+    fn kernel_sections_reject_empty_ranges() {
+        assert!(matches!(
+            memory::KernelSections::new(
+                0x8020_0000..0x8020_0000,
+                0x8020_2000..0x8020_3000,
+                0x8020_3000..0x8020_5000,
+                0x8020_5000..0x8021_5000,
+                0x8021_5000,
+            ),
+            Err(memory::LayoutError::Empty)
+        ));
+    }
+
+    #[test]
+    fn kernel_sections_reject_overlapping_ranges() {
+        assert!(matches!(
+            memory::KernelSections::new(
+                0x8020_0000..0x8020_2000,
+                0x8020_1000..0x8020_3000,
+                0x8020_3000..0x8020_5000,
+                0x8020_5000..0x8021_5000,
+                0x8021_5000,
+            ),
+            Err(memory::LayoutError::Overlap)
+        ));
+    }
+
+    #[test]
+    fn kernel_sections_require_boot_stack_to_end_at_kernel_end() {
+        assert!(matches!(
+            memory::KernelSections::new(
+                0x8020_0000..0x8020_2000,
+                0x8020_2000..0x8020_3000,
+                0x8020_3000..0x8020_5000,
+                0x8020_5000..0x8021_5000,
+                0x8021_6000,
+            ),
+            Err(memory::LayoutError::EndMismatch)
+        ));
+    }
 
     #[test]
     fn sbi_return_value_is_available_on_success() {
