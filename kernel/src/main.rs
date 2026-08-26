@@ -21,9 +21,21 @@ use minios_kernel::memory::{
     KernelSections, PHYSICAL_MEMORY_END,
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-vm", feature = "qemu-test-elf")
+))]
+use minios_kernel::vm::{AddressSpace, PageFlags, VirtAddr, VmError};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::{
     AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, PhysPageNum,
+};
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+use minios_kernel::{
+    elf::{
+        LoadedImage, USER_GUARD_BOTTOM, USER_STACK_BOTTOM, fixture::valid_riscv64_elf, load_image,
+    },
+    vm::{FrameStore, IdentityFrameStoreError, PhysAddr},
 };
 
 #[cfg(target_arch = "riscv64")]
@@ -33,6 +45,9 @@ static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(UNKNOWN_HART_ID);
 
 #[cfg(target_arch = "riscv64")]
 static mut KERNEL_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+static mut ELF_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
 
 #[cfg(target_arch = "riscv64")]
 // Safety: `linker.ld`がRISC-Vカーネルイメージの末尾に必ず定義するC ABIシンボルである。
@@ -121,6 +136,16 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     crate::println!("[ok] timer");
     crate::println!("[ok] memory");
 
+    #[cfg(feature = "qemu-test-vm")]
+    {
+        run_vm_test(&kernel_space, &memory);
+    }
+
+    #[cfg(feature = "qemu-test-elf")]
+    {
+        run_elf_test(&kernel_space, &mut frames, &mut memory);
+    }
+
     #[cfg(feature = "qemu-test-memory")]
     {
         run_memory_test(&mut frames);
@@ -190,6 +215,437 @@ fn kernel_sections() -> KernelSections {
 fn align_up_to_page(address: usize) -> usize {
     // カーネルイメージは`0x8800_0000`より十分低い位置にあるため、`PAGE_SIZE - 1`を加えても`usize`を超えない。
     (address + (PAGE_SIZE - 1)) & !(PAGE_SIZE - 1)
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-vm"))]
+fn run_vm_test<const N: usize>(kernel_space: &AddressSpace<'_, N>, memory: &IdentityFrameStore) {
+    expect_kernel_mapping(
+        kernel_space,
+        memory,
+        ".text",
+        core::ptr::addr_of!(__text_start) as usize,
+        PageFlags::supervisor_rx(),
+    );
+    expect_kernel_mapping(
+        kernel_space,
+        memory,
+        ".rodata",
+        core::ptr::addr_of!(__rodata_start) as usize,
+        PageFlags::supervisor_r(),
+    );
+    expect_kernel_mapping(
+        kernel_space,
+        memory,
+        ".data",
+        core::ptr::addr_of!(__data_start) as usize,
+        PageFlags::supervisor_rw(),
+    );
+    expect_kernel_mapping(
+        kernel_space,
+        memory,
+        "boot stack",
+        core::ptr::addr_of!(__boot_stack_start) as usize,
+        PageFlags::supervisor_rw(),
+    );
+    expect_kernel_mapping(
+        kernel_space,
+        memory,
+        "UART",
+        0x1000_0000,
+        PageFlags::supervisor_rw(),
+    );
+
+    let payload = VirtAddr::try_new(0x8780_0000).expect("payload start is an Sv39 address");
+    let actual = kernel_space.translate(memory, payload);
+    if !matches!(actual, Err(VmError::NotMapped)) {
+        fatal_qemu_test(format_args!(
+            "vm mapping payload @ {:#x}: expected NotMapped, actual {actual:?}",
+            payload.as_u64()
+        ));
+    }
+
+    crate::println!("[MINIOS_TEST] vm: ok");
+    successful_qemu_test_shutdown()
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-vm"))]
+fn expect_kernel_mapping<const N: usize>(
+    kernel_space: &AddressSpace<'_, N>,
+    memory: &IdentityFrameStore,
+    region: &str,
+    address: usize,
+    expected_flags: PageFlags,
+) {
+    let virtual_address =
+        VirtAddr::try_new(address as u64).expect("linker and MMIO addresses are valid Sv39 values");
+    let actual = kernel_space.translate(memory, virtual_address);
+    let expected_physical = address as u64;
+    if !matches!(
+        actual,
+        Ok((physical, flags))
+            if physical.as_u64() == expected_physical && flags == expected_flags
+    ) {
+        fatal_qemu_test(format_args!(
+            "vm mapping {region} @ {address:#x}: expected physical={expected_physical:#x} flags={expected_flags:?}, actual {actual:?}"
+        ));
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+fn run_elf_test<const N: usize>(
+    kernel_space: &AddressSpace<'_, N>,
+    frames: &mut FrameAllocator<512>,
+    memory: &mut IdentityFrameStore,
+) {
+    let before = frames.stats();
+    // Safety: this feature path runs only on the single boot hart, obtains the
+    // static once, and destroys the loaded image before inspecting it again.
+    let storage_pointer = &raw mut ELF_ADDRESS_SPACE_STORAGE;
+    let storage = unsafe { storage_pointer.as_mut() }
+        .expect("a static ELF address-space storage pointer is never null");
+    if !storage.is_empty() {
+        fatal_qemu_test(format_args!(
+            "elf precondition: expected empty storage, actual len={}",
+            storage.len()
+        ));
+    }
+
+    // The deterministic fixture is 8,196 bytes. It is intentionally the only
+    // large automatic value here; the much larger 2,688-entry ownership table
+    // above resides in static kernel storage, not on the 64 KiB boot stack.
+    let fixture = valid_riscv64_elf();
+    let image = match load_image(&fixture, frames, memory, storage) {
+        Ok(image) => image,
+        Err(error) => {
+            fatal_qemu_test(format_args!(
+                "elf load: {error:?}; allocator expected={before:?} actual={:?}; storage len={}",
+                frames.stats(),
+                storage.len()
+            ));
+        }
+    };
+
+    let inspection = inspect_loaded_elf(&image, kernel_space, memory);
+    if let Err(error) = image.destroy(frames) {
+        fatal_qemu_test(format_args!(
+            "elf destroy: {:?}; inspection={inspection:?}; allocator expected={before:?} actual={:?}",
+            error.frame_error(),
+            frames.stats()
+        ));
+    }
+
+    let after = frames.stats();
+    let storage_len = storage.len();
+    if let Err(error) = inspection {
+        fatal_qemu_test(format_args!(
+            "elf inspection: {error:?}; recovery allocator expected={before:?} actual={after:?}; storage len={storage_len}"
+        ));
+    }
+    if after != before {
+        fatal_qemu_test(format_args!(
+            "elf recovery allocator: expected={before:?}, actual={after:?}; storage len={storage_len}"
+        ));
+    }
+    if storage_len != 0 {
+        fatal_qemu_test(format_args!(
+            "elf recovery storage: expected len=0, actual len={storage_len}; allocator={after:?}"
+        ));
+    }
+
+    crate::println!("[MINIOS_TEST] elf: ok");
+    successful_qemu_test_shutdown()
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+#[derive(Debug)]
+enum ElfTestFailure {
+    Entry {
+        expected: u64,
+        actual: u64,
+    },
+    Mapping {
+        region: &'static str,
+        address: u64,
+        expected: PageFlags,
+        actual: Result<(PhysAddr, PageFlags), VmError<IdentityFrameStoreError>>,
+    },
+    Read {
+        region: &'static str,
+        address: u64,
+        error: VmError<IdentityFrameStoreError>,
+    },
+    Bytes {
+        region: &'static str,
+        address: u64,
+        expected: [u8; 4],
+        actual: [u8; 4],
+    },
+    NonZero {
+        region: &'static str,
+        address: u64,
+        actual: u8,
+    },
+    Guard {
+        address: u64,
+        actual: Result<(PhysAddr, PageFlags), VmError<IdentityFrameStoreError>>,
+    },
+    UserSeparation {
+        kernel: PageFlags,
+        user: PageFlags,
+    },
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+impl core::fmt::Display for ElfTestFailure {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Entry { expected, actual } => {
+                write!(
+                    formatter,
+                    "entry: expected={expected:#x}, actual={actual:#x}"
+                )
+            }
+            Self::Mapping {
+                region,
+                address,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{region} mapping @ {address:#x}: expected flags={expected:?}, actual={actual:?}"
+            ),
+            Self::Read {
+                region,
+                address,
+                error,
+            } => write!(
+                formatter,
+                "{region} bytes @ {address:#x}: translate/copy_out error={error:?}"
+            ),
+            Self::Bytes {
+                region,
+                address,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{region} bytes @ {address:#x}: expected={expected:02x?}, actual={actual:02x?}"
+            ),
+            Self::NonZero {
+                region,
+                address,
+                actual,
+            } => write!(
+                formatter,
+                "{region} zero fill @ {address:#x}: expected=00, actual={actual:02x}"
+            ),
+            Self::Guard { address, actual } => write!(
+                formatter,
+                "guard @ {address:#x}: expected NotMapped, actual={actual:?}"
+            ),
+            Self::UserSeparation { kernel, user } => write!(
+                formatter,
+                "U-bit separation: expected kernel U=0/user U=1, actual kernel={kernel:?} user={user:?}"
+            ),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+fn inspect_loaded_elf<const IMAGE_N: usize, const KERNEL_N: usize>(
+    image: &LoadedImage<'_, IMAGE_N>,
+    kernel_space: &AddressSpace<'_, KERNEL_N>,
+    memory: &IdentityFrameStore,
+) -> Result<(), ElfTestFailure> {
+    const ENTRY: u64 = 0x0010_0000;
+    const DATA: u64 = 0x0020_0000;
+
+    if image.entry().as_u64() != ENTRY {
+        return Err(ElfTestFailure::Entry {
+            expected: ENTRY,
+            actual: image.entry().as_u64(),
+        });
+    }
+
+    let user_rx =
+        PageFlags::new(true, false, true, true).expect("fixture user text permissions are valid");
+    let user_rw =
+        PageFlags::new(true, true, false, true).expect("fixture user data permissions are valid");
+    let text_flags = expect_elf_mapping(image, memory, "text", ENTRY, user_rx)?;
+    let mut text = [0u8; 4];
+    copy_virtual(image, memory, "text", ENTRY, &mut text)?;
+    if text != [0x13, 0x00, 0x00, 0x00] {
+        return Err(ElfTestFailure::Bytes {
+            region: "text",
+            address: ENTRY,
+            expected: [0x13, 0x00, 0x00, 0x00],
+            actual: text,
+        });
+    }
+
+    expect_elf_mapping(image, memory, "data", DATA, user_rw)?;
+    let mut data = [0u8; 4];
+    copy_virtual(image, memory, "data", DATA, &mut data)?;
+    if data != *b"MCB1" {
+        return Err(ElfTestFailure::Bytes {
+            region: "data",
+            address: DATA,
+            expected: *b"MCB1",
+            actual: data,
+        });
+    }
+    expect_zero_virtual(image, memory, "data/BSS", DATA + 4, PAGE_SIZE - 4)?;
+
+    expect_elf_mapping(image, memory, "stack", USER_STACK_BOTTOM, user_rw)?;
+    expect_zero_virtual(
+        image,
+        memory,
+        "stack first page",
+        USER_STACK_BOTTOM,
+        PAGE_SIZE,
+    )?;
+
+    let guard = VirtAddr::try_new(USER_GUARD_BOTTOM).expect("guard address is valid Sv39");
+    let actual_guard = image.address_space().translate(memory, guard);
+    if !matches!(actual_guard, Err(VmError::NotMapped)) {
+        return Err(ElfTestFailure::Guard {
+            address: USER_GUARD_BOTTOM,
+            actual: actual_guard,
+        });
+    }
+
+    let kernel_text = core::ptr::addr_of!(__text_start) as usize;
+    let kernel_virtual =
+        VirtAddr::try_new(kernel_text as u64).expect("linker text start is a valid Sv39 address");
+    let kernel_actual = kernel_space.translate(memory, kernel_virtual);
+    let kernel_flags = match kernel_actual {
+        Ok((physical, flags))
+            if physical.as_u64() == kernel_text as u64 && flags == PageFlags::supervisor_rx() =>
+        {
+            flags
+        }
+        actual => {
+            return Err(ElfTestFailure::Mapping {
+                region: "kernel text",
+                address: kernel_text as u64,
+                expected: PageFlags::supervisor_rx(),
+                actual,
+            });
+        }
+    };
+    if kernel_flags.user() || !text_flags.user() {
+        return Err(ElfTestFailure::UserSeparation {
+            kernel: kernel_flags,
+            user: text_flags,
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+fn expect_elf_mapping<const N: usize>(
+    image: &LoadedImage<'_, N>,
+    memory: &IdentityFrameStore,
+    region: &'static str,
+    address: u64,
+    expected: PageFlags,
+) -> Result<PageFlags, ElfTestFailure> {
+    let virtual_address = VirtAddr::try_new(address).expect("fixture addresses are valid Sv39");
+    let actual = image.address_space().translate(memory, virtual_address);
+    match actual {
+        Ok((_physical, flags)) if flags == expected => Ok(flags),
+        actual => Err(ElfTestFailure::Mapping {
+            region,
+            address,
+            expected,
+            actual,
+        }),
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+fn copy_virtual<const N: usize>(
+    image: &LoadedImage<'_, N>,
+    memory: &IdentityFrameStore,
+    region: &'static str,
+    address: u64,
+    output: &mut [u8],
+) -> Result<(), ElfTestFailure> {
+    let virtual_address = VirtAddr::try_new(address).expect("fixture addresses are valid Sv39");
+    let (physical, _flags) = image
+        .address_space()
+        .translate(memory, virtual_address)
+        .map_err(|error| ElfTestFailure::Read {
+            region,
+            address,
+            error,
+        })?;
+    let physical = physical.as_u64() as usize;
+    let frame_start = physical & !(PAGE_SIZE - 1);
+    let offset = physical & (PAGE_SIZE - 1);
+    memory
+        .copy_out(frame_start, offset, output)
+        .map_err(|error| ElfTestFailure::Read {
+            region,
+            address,
+            error: VmError::Store(error),
+        })
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+fn expect_zero_virtual<const N: usize>(
+    image: &LoadedImage<'_, N>,
+    memory: &IdentityFrameStore,
+    region: &'static str,
+    start: u64,
+    len: usize,
+) -> Result<(), ElfTestFailure> {
+    let mut checked = 0usize;
+    let mut bytes = [0u8; 64];
+    while checked < len {
+        let address = start + checked as u64;
+        let page_remaining = PAGE_SIZE - address as usize % PAGE_SIZE;
+        let chunk_len = core::cmp::min(core::cmp::min(bytes.len(), len - checked), page_remaining);
+        copy_virtual(image, memory, region, address, &mut bytes[..chunk_len])?;
+        if let Some((index, actual)) = bytes[..chunk_len]
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, byte)| *byte != 0)
+        {
+            return Err(ElfTestFailure::NonZero {
+                region,
+                address: address + index as u64,
+                actual,
+            });
+        }
+        checked += chunk_len;
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-vm", feature = "qemu-test-elf")
+))]
+fn successful_qemu_test_shutdown() -> ! {
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::NoReason,
+    )
+}
+
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-vm", feature = "qemu-test-elf")
+))]
+fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {
+    crate::console::emergency_print(format_args!("[MINIOS_TEST] failed: {arguments}\r\n"));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-memory"))]

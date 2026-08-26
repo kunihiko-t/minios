@@ -15,6 +15,8 @@ const BOOT_MARKER: &str = "[MINIOS_TEST] boot: ok";
 const TIMER_MARKER: &str = "[MINIOS_TEST] timer: ok";
 const TRAP_MARKER: &str = "[MINIOS_TEST] trap: ok";
 const MEMORY_MARKER: &str = "[MINIOS_TEST] memory: ok";
+const VM_MARKER: &str = "[MINIOS_TEST] vm: ok";
+const ELF_MARKER: &str = "[MINIOS_TEST] elf: ok";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] = b"help\ninfo\nuptime\nmemory\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
@@ -27,6 +29,8 @@ pub enum TestKind {
     Timer,
     Trap,
     Memory,
+    Vm,
+    Elf,
     Shell,
 }
 
@@ -37,6 +41,8 @@ impl TestKind {
             Self::Timer => "qemu-test-timer",
             Self::Trap => "qemu-test-trap",
             Self::Memory => "qemu-test-memory",
+            Self::Vm => "qemu-test-vm",
+            Self::Elf => "qemu-test-elf",
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -47,6 +53,8 @@ impl TestKind {
             Self::Timer => TIMER_MARKER,
             Self::Trap => TRAP_MARKER,
             Self::Memory => MEMORY_MARKER,
+            Self::Vm => VM_MARKER,
+            Self::Elf => ELF_MARKER,
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -727,6 +735,14 @@ mod tests {
     use super::*;
 
     const TEST_COMMAND: &str = "'qemu-system-riscv64' '-kernel' 'kernel.elf'";
+
+    #[test]
+    fn vm_and_elf_tests_select_their_features_and_exact_markers() {
+        assert_eq!(TestKind::Vm.feature(), "qemu-test-vm");
+        assert_eq!(TestKind::Vm.marker(), "[MINIOS_TEST] vm: ok");
+        assert_eq!(TestKind::Elf.feature(), "qemu-test-elf");
+        assert_eq!(TestKind::Elf.marker(), "[MINIOS_TEST] elf: ok");
+    }
 
     #[test]
     fn test_qemu_args_are_headless_and_single_hart() {
