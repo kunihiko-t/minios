@@ -1,4 +1,19 @@
+use core::sync::atomic::{AtomicU64, Ordering};
+
 pub const PAGE_SIZE: usize = 4096;
+
+const FIRST_ALLOCATOR_ID: u64 = 1;
+static NEXT_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(FIRST_ALLOCATOR_ID);
+
+const fn advance_allocator_id(current: u64) -> Option<u64> {
+    current.checked_add(1)
+}
+
+fn reserve_allocator_id() -> Result<u64, FrameError> {
+    NEXT_ALLOCATOR_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, advance_allocator_id)
+        .map_err(|_| FrameError::ProvenanceExhausted)
+}
 
 /// アロケーターから払い出された物理ページを一意に表す所有権の値。
 ///
@@ -53,6 +68,8 @@ pub enum FrameError {
     CapacityExceeded,
     OutOfRange,
     DoubleFree,
+    WrongAllocator,
+    ProvenanceExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +92,7 @@ pub struct FrameStats {
 /// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct FrameAllocator<const WORDS: usize> {
+    allocator_id: u64,
     base: usize,
     frame_count: usize,
     allocated: usize,
@@ -120,8 +138,10 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
         if frame_count > capacity {
             return Err(FrameError::CapacityExceeded);
         }
+        let allocator_id = reserve_allocator_id()?;
 
         Ok(Self {
+            allocator_id,
             base,
             frame_count,
             allocated: 0,
@@ -157,30 +177,42 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
     /// let _ = allocator.deallocate(frame);
     /// ```
     pub fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
+        self.deallocate_recoverable(frame)
+            .map_err(|(error, _frame)| error)
+    }
+
+    pub(crate) fn deallocate_recoverable(
+        &mut self,
+        frame: PhysFrame,
+    ) -> Result<(), (FrameError, PhysFrame)> {
         let start = frame.start();
         // `PhysFrame`は通常`from_start`で作るが、型を将来変更しても安全性を保てるよう、解放時にも4 KiB境界を確認する。
         if !start.is_multiple_of(PAGE_SIZE) {
-            return Err(FrameError::Unaligned);
+            return Err((FrameError::Unaligned, frame));
         }
         if start < self.base {
-            return Err(FrameError::OutOfRange);
+            return Err((FrameError::OutOfRange, frame));
         }
 
         // `start >= base`を確認済みなので、この差分は安全にビットマップ用のページ番号へ変換できる。
         let frame_index = (start - self.base) / PAGE_SIZE;
         if frame_index >= self.frame_count {
-            return Err(FrameError::OutOfRange);
+            return Err((FrameError::OutOfRange, frame));
         }
 
         let word_index = frame_index / u64::BITS as usize;
         let bit_index = frame_index % u64::BITS as usize;
         let bit = 1_u64 << bit_index;
         if self.bitmap[word_index] & bit == 0 {
-            return Err(FrameError::DoubleFree);
+            return Err((FrameError::DoubleFree, frame));
         }
         self.bitmap[word_index] &= !bit;
         self.allocated -= 1;
         Ok(())
+    }
+
+    pub(crate) const fn allocator_id(&self) -> u64 {
+        self.allocator_id
     }
 
     pub const fn stats(&self) -> FrameStats {
@@ -194,7 +226,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameAllocator, FrameError, FrameStats, PhysFrame};
+    use super::{FrameAllocator, FrameError, FrameStats, PhysFrame, advance_allocator_id};
 
     fn allocator_fixture<const WORDS: usize>(
         base: usize,
@@ -344,5 +376,11 @@ mod tests {
             allocator_fixture::<1>(0x4000, 0x45000),
             Err(FrameError::CapacityExceeded)
         );
+    }
+
+    #[test]
+    fn allocator_provenance_counter_refuses_to_wrap() {
+        assert_eq!(advance_allocator_id(u64::MAX - 1), Some(u64::MAX));
+        assert_eq!(advance_allocator_id(u64::MAX), None);
     }
 }

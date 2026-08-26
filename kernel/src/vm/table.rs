@@ -1,3 +1,5 @@
+use core::fmt;
+
 use crate::{
     memory::frame::{FrameAllocator, FrameError, PhysFrame},
     vm::{
@@ -62,6 +64,12 @@ impl<const N: usize> AddressSpaceStorage<N> {
         self.len -= 1;
         self.frames[self.len].take()
     }
+
+    fn restore_last(&mut self, owned: OwnedFrame) {
+        debug_assert!(self.len < N);
+        self.frames[self.len] = Some(owned);
+        self.len += 1;
+    }
 }
 
 impl<const N: usize> Default for AddressSpaceStorage<N> {
@@ -105,6 +113,7 @@ pub struct AddressSpaceBuilder<
     memory: &'memory mut M,
     storage: Option<&'storage mut AddressSpaceStorage<N>>,
     root: PhysAddr,
+    allocator_id: u64,
 }
 
 impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStore>
@@ -139,6 +148,7 @@ impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStor
         }
 
         Ok(Self {
+            allocator_id: allocator.allocator_id(),
             allocator,
             memory,
             storage: Some(storage),
@@ -204,6 +214,7 @@ impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStor
         AddressSpace {
             root: self.root,
             storage,
+            allocator_id: self.allocator_id,
         }
     }
 
@@ -303,6 +314,31 @@ impl<const N: usize, const WORDS: usize, M: FrameStore> Drop
 pub struct AddressSpace<'storage, const N: usize> {
     root: PhysAddr,
     storage: &'storage mut AddressSpaceStorage<N>,
+    allocator_id: u64,
+}
+
+pub struct DestroyError<'storage, const N: usize> {
+    frame_error: FrameError,
+    space: AddressSpace<'storage, N>,
+}
+
+impl<'storage, const N: usize> DestroyError<'storage, N> {
+    pub const fn frame_error(&self) -> FrameError {
+        self.frame_error
+    }
+
+    pub fn into_parts(self) -> (FrameError, AddressSpace<'storage, N>) {
+        (self.frame_error, self.space)
+    }
+}
+
+impl<const N: usize> fmt::Debug for DestroyError<'_, N> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DestroyError")
+            .field("frame_error", &self.frame_error)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'storage, const N: usize> AddressSpace<'storage, N> {
@@ -347,10 +383,23 @@ impl<'storage, const N: usize> AddressSpace<'storage, N> {
     pub fn destroy<const WORDS: usize>(
         self,
         allocator: &mut FrameAllocator<WORDS>,
-    ) -> Result<(), FrameError> {
+    ) -> Result<(), DestroyError<'storage, N>> {
+        if allocator.allocator_id() != self.allocator_id {
+            return Err(DestroyError {
+                frame_error: FrameError::WrongAllocator,
+                space: self,
+            });
+        }
+
         while let Some(owned) = self.storage.pop() {
-            let _kind = owned.kind;
-            allocator.deallocate(owned.frame)?;
+            let OwnedFrame { frame, kind } = owned;
+            if let Err((frame_error, frame)) = allocator.deallocate_recoverable(frame) {
+                self.storage.restore_last(OwnedFrame { frame, kind });
+                return Err(DestroyError {
+                    frame_error,
+                    space: self,
+                });
+            }
         }
         Ok(())
     }
@@ -751,15 +800,66 @@ mod tests {
     }
 
     #[test]
-    fn destroy_reports_allocator_errors() {
+    fn wrong_allocator_destroy_returns_the_space_for_retry() {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
+        let before = allocator.stats();
+        let mut store = TestFrameStore::default();
+        let mut storage = AddressSpaceStorage::<8>::new();
+        let mut builder =
+            AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        builder
+            .map_new_zeroed(
+                VirtPage::from_start(0x0010_0000).unwrap(),
+                PageFlags::new(true, true, false, true).unwrap(),
+            )
+            .unwrap();
+        let space = builder.finish();
+        let mut other = test_allocator::<1>(0x41_000, 0x42_000);
+
+        let failure = space.destroy(&mut other).unwrap_err();
+        assert_eq!(failure.frame_error(), FrameError::WrongAllocator);
+        assert_eq!(allocator.stats().allocated, 4);
+        assert_eq!(other.stats().allocated, 0);
+
+        let (error, space) = failure.into_parts();
+        assert_eq!(error, FrameError::WrongAllocator);
+        assert_eq!(
+            space
+                .translate(&store, VirtAddr::try_new(0x0010_0123).unwrap())
+                .unwrap()
+                .0
+                .as_u64(),
+            0x4123
+        );
+        space.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats(), before);
+        assert_eq!(storage.len(), 0);
+
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        assert_eq!(retry.root().as_u64(), 0x1000);
+        drop(retry);
+        assert_eq!(storage.len(), 0);
+    }
+
+    #[test]
+    fn same_range_allocator_instance_cannot_destroy_the_space() {
+        let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
+        let before = allocator.stats();
         let mut store = TestFrameStore::default();
         let mut storage = AddressSpaceStorage::<8>::new();
         let space = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage)
             .unwrap()
             .finish();
-        let mut other = test_allocator::<1>(0x41_000, 0x42_000);
+        let mut same_range = test_allocator::<8>(0x1000, 0x21_000);
 
-        assert_eq!(space.destroy(&mut other), Err(FrameError::OutOfRange));
+        let failure = space.destroy(&mut same_range).unwrap_err();
+        assert_eq!(failure.frame_error(), FrameError::WrongAllocator);
+        assert_eq!(allocator.stats().allocated, 1);
+        assert_eq!(same_range.stats().allocated, 0);
+
+        let (_, space) = failure.into_parts();
+        space.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats(), before);
+        assert_eq!(storage.len(), 0);
     }
 }
