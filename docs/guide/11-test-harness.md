@@ -171,7 +171,7 @@ summary: PASSED all 19 phases (elapsed: ...s)
 
 ### Linux CIとローカル検証の対応
 
-GitHub Actionsは`ubuntu-latest`へ`qemu-system-misc`を導入し、Rust 1.98.0、`riscv64gc-unknown-none-elf`ターゲット、rustfmt、Clippyを固定します。
+GitHub Actionsは`ubuntu-24.04`へ`qemu-system-misc`を導入し、Rust 1.98.0、`riscv64gc-unknown-none-elf`ターゲット、rustfmt、Clippyを固定します。
 キャッシュするのはCargoのレジストリーとGitデータ、ワークスペースの`target`だけです。
 その後に実行するプロジェクト固有のコマンドは、ローカルと同じ`cargo xtask setup`と`cargo xtask check`だけです。
 CI専用の検証スクリプトを持たないため、開発者が手元で通した入口とCIの判定がずれにくくなります。

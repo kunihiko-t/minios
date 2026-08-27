@@ -440,7 +440,7 @@ fn read_entry<M: FrameStore>(
 mod tests {
     extern crate std;
 
-    use std::{boxed::Box, collections::BTreeMap, vec::Vec};
+    use std::{boxed::Box, cell::Cell, collections::BTreeMap, vec::Vec};
 
     use super::{AddressSpaceBuilder, AddressSpaceStorage, VmError};
     use crate::{
@@ -459,7 +459,11 @@ mod tests {
     #[derive(Default)]
     struct TestFrameStore {
         frames: BTreeMap<usize, Box<[u8; 4096]>>,
+        zeroes: usize,
+        reads: Cell<usize>,
         writes: usize,
+        fail_zero_frame: Option<usize>,
+        fail_read_u64: Option<usize>,
         fail_write: Option<usize>,
     }
 
@@ -467,6 +471,20 @@ mod tests {
         fn fail_on_write(write: usize) -> Self {
             Self {
                 fail_write: Some(write),
+                ..Self::default()
+            }
+        }
+
+        fn fail_on_zero_frame(zero: usize) -> Self {
+            Self {
+                fail_zero_frame: Some(zero),
+                ..Self::default()
+            }
+        }
+
+        fn fail_on_read_u64(read: usize) -> Self {
+            Self {
+                fail_read_u64: Some(read),
                 ..Self::default()
             }
         }
@@ -500,11 +518,20 @@ mod tests {
         type Error = TestStoreError;
 
         fn zero_frame(&mut self, frame_start: usize) -> Result<(), Self::Error> {
+            self.zeroes += 1;
+            if self.fail_zero_frame == Some(self.zeroes) {
+                return Err(TestStoreError::InjectedFailure);
+            }
             self.frames.insert(frame_start, Box::new([0; 4096]));
             Ok(())
         }
 
         fn read_u64(&self, frame_start: usize, index: usize) -> Result<u64, Self::Error> {
+            let reads = self.reads.get() + 1;
+            self.reads.set(reads);
+            if self.fail_read_u64 == Some(reads) {
+                return Err(TestStoreError::InjectedFailure);
+            }
             if index >= 512 {
                 return Err(TestStoreError::IndexOutOfBounds);
             }
@@ -683,10 +710,11 @@ mod tests {
     }
 
     #[test]
-    fn store_failure_preserves_typed_error_and_rolls_back_frames() {
+    fn zero_frame_failure_while_allocating_an_intermediate_table_returns_everything_for_reuse() {
+        // Catches a rollback mutation that leaves the root table recorded after child zeroing fails.
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
-        let mut store = TestFrameStore::fail_on_write(2);
+        let mut store = TestFrameStore::fail_on_zero_frame(2);
         let mut storage = AddressSpaceStorage::<8>::new();
 
         let error = {
@@ -702,6 +730,66 @@ mod tests {
 
         assert_eq!(error, VmError::Store(TestStoreError::InjectedFailure));
         assert_eq!(allocator.stats(), before);
+        assert_eq!(storage.len(), 0);
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        assert_eq!(retry.root().as_u64(), 0x1000);
+        drop(retry);
+        assert_eq!(storage.len(), 0);
+    }
+
+    #[test]
+    fn read_u64_failure_before_the_page_walk_returns_the_root_for_reuse() {
+        // Catches a mutation that bypasses builder-drop rollback after the first PTE read fails.
+        let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
+        let before = allocator.stats();
+        let mut store = TestFrameStore::fail_on_read_u64(1);
+        let mut storage = AddressSpaceStorage::<8>::new();
+
+        let error = {
+            let mut builder =
+                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            builder
+                .map_new_zeroed(
+                    VirtPage::from_start(0x0040_0000).unwrap(),
+                    PageFlags::new(true, false, true, true).unwrap(),
+                )
+                .unwrap_err()
+        };
+
+        assert_eq!(error, VmError::Store(TestStoreError::InjectedFailure));
+        assert_eq!(allocator.stats(), before);
+        assert_eq!(storage.len(), 0);
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        assert_eq!(retry.root().as_u64(), 0x1000);
+        drop(retry);
+        assert_eq!(storage.len(), 0);
+    }
+
+    #[test]
+    fn leaf_pte_write_failure_returns_every_owned_frame_for_reuse() {
+        // Catches a mutation that leaks the leaf frame when its final PTE installation fails.
+        let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
+        let before = allocator.stats();
+        let mut store = TestFrameStore::fail_on_write(3);
+        let mut storage = AddressSpaceStorage::<8>::new();
+
+        let error = {
+            let mut builder =
+                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            builder
+                .map_new_zeroed(
+                    VirtPage::from_start(0x0040_0000).unwrap(),
+                    PageFlags::new(true, false, true, true).unwrap(),
+                )
+                .unwrap_err()
+        };
+
+        assert_eq!(error, VmError::Store(TestStoreError::InjectedFailure));
+        assert_eq!(allocator.stats(), before);
+        assert_eq!(storage.len(), 0);
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        assert_eq!(retry.root().as_u64(), 0x1000);
+        drop(retry);
         assert_eq!(storage.len(), 0);
     }
 
