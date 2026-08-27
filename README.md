@@ -1,7 +1,8 @@
 # MiniOS
 
 MiniOSは、RustとRISC-V 64でOSの基礎を段階的に学ぶための小さな`no_std`カーネルです。
-QEMU `virt`上のOpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーターを備えています。
+QEMU `virt`上のOpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーター、Sv39のカーネルアドレス空間を備えています。
+静的なRISC-V 64 ELFを検証し、実行前のユーザーアドレス空間へ配置するloaderも備えています。
 日本語の学習ガイドと、同じ結果を繰り返し確認できるテストハーネスも用意しています。
 
 ## 五つのコマンドで試す
@@ -70,10 +71,12 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在
 10. [UARTシェル](docs/guide/10-shell.md)
 11. [テストハーネス](docs/guide/11-test-harness.md)
 12. [次に作るもの](docs/guide/12-next-steps.md)
+13. [Sv39と単一アドレス空間](docs/guide/13-sv39.md)
+14. [ELFを実行前アドレス空間へ配置する](docs/guide/14-elf-loading.md)
 
 ## 設計資料
 
-- [全体構成と八つの起動段階](docs/reference/architecture.md)
+- [全体構成と起動段階](docs/reference/architecture.md)
 - [QEMU `virt`のメモリーマップ](docs/reference/memory-map.md)
 - [MiniContainer Guest ABI](docs/reference/minicontainer-abi.md)
 - [用語集](docs/reference/glossary.md)
@@ -82,18 +85,19 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在
 
 ## テスト
 
-対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|shell]`を使います。
+対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|vm|elf|shell]`を使います。
 リリース前の全検査は次のコマンドで実行します。
 
 ```sh
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの5経路を17段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの7経路を19段階で検査します。
 
 ## 現在の制約
 
-動的ヒープ、Sv39仮想メモリー、ユーザーモード、システムコール、プロセス、VirtIO、ファイルシステム、ネットワーク、マルチハート、Device Tree解析、実機ドライバーは未実装です。
+動的ヒープ、ユーザーモード、ユーザー用トラップコンテキスト、システムコール、プロセス、VirtIO、ファイルシステム、ネットワーク、マルチハート、Device Tree解析、実機ドライバーは未実装です。
+ELF loaderが作る`LoadedImage`はinactiveであり、現在のカーネルはentry pointへ遷移せず、`write`と`exit`も実行しません。
 ハードウェアアドレス、10 MHzのタイムベース、128 MiBの上端はQEMU `virt`に固定しています。
 シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
 永続ストレージとセキュリティー境界は提供しません。
