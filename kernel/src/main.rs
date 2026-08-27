@@ -1,6 +1,42 @@
 #![no_std]
 #![no_main]
 
+#[cfg(any(
+    all(
+        feature = "qemu-test-boot",
+        any(
+            feature = "qemu-test-timer",
+            feature = "qemu-test-trap",
+            feature = "qemu-test-memory",
+            feature = "qemu-test-vm",
+            feature = "qemu-test-elf"
+        )
+    ),
+    all(
+        feature = "qemu-test-timer",
+        any(
+            feature = "qemu-test-trap",
+            feature = "qemu-test-memory",
+            feature = "qemu-test-vm",
+            feature = "qemu-test-elf"
+        )
+    ),
+    all(
+        feature = "qemu-test-trap",
+        any(
+            feature = "qemu-test-memory",
+            feature = "qemu-test-vm",
+            feature = "qemu-test-elf"
+        )
+    ),
+    all(
+        feature = "qemu-test-memory",
+        any(feature = "qemu-test-vm", feature = "qemu-test-elf")
+    ),
+    all(feature = "qemu-test-vm", feature = "qemu-test-elf")
+))]
+compile_error!("QEMU kernel test features are mutually exclusive; enable at most one");
+
 #[cfg(target_arch = "riscv64")]
 mod arch;
 #[cfg(target_arch = "riscv64")]
@@ -16,6 +52,8 @@ mod time;
 use core::panic::PanicInfo;
 #[cfg(target_arch = "riscv64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+use minios_kernel::memory::frame::{FrameStats, PhysFrame};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::memory::{
     KernelSections, PHYSICAL_MEMORY_END,
@@ -25,7 +63,7 @@ use minios_kernel::memory::{
     target_arch = "riscv64",
     any(feature = "qemu-test-vm", feature = "qemu-test-elf")
 ))]
-use minios_kernel::vm::{AddressSpace, PageFlags, VirtAddr, VmError};
+use minios_kernel::vm::{AddressSpace, VirtAddr, VmError};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::{
     AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, PhysPageNum,
@@ -35,7 +73,7 @@ use minios_kernel::{
     elf::{
         LoadedImage, USER_GUARD_BOTTOM, USER_STACK_BOTTOM, fixture::valid_riscv64_elf, load_image,
     },
-    vm::{FrameStore, IdentityFrameStoreError, PhysAddr},
+    vm::{FrameStore, IdentityFrameStoreError, PageFlags, PhysAddr},
 };
 
 #[cfg(target_arch = "riscv64")]
@@ -48,6 +86,13 @@ static mut KERNEL_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpac
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 static mut ELF_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+const ELF_FIXTURE_OWNED_FRAMES: usize = 23;
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+const ELF_DIRTY_FRAME_COUNT: usize = 64;
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+const _: () = assert!(ELF_DIRTY_FRAME_COUNT >= ELF_FIXTURE_OWNED_FRAMES);
 
 #[cfg(target_arch = "riscv64")]
 // Safety: `linker.ld`がRISC-Vカーネルイメージの末尾に必ず定義するC ABIシンボルである。
@@ -219,40 +264,45 @@ fn align_up_to_page(address: usize) -> usize {
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-vm"))]
 fn run_vm_test<const N: usize>(kernel_space: &AddressSpace<'_, N>, memory: &IdentityFrameStore) {
-    expect_kernel_mapping(
+    expect_kernel_range(
         kernel_space,
         memory,
         ".text",
         core::ptr::addr_of!(__text_start) as usize,
-        PageFlags::supervisor_rx(),
+        core::ptr::addr_of!(__text_end) as usize,
+        (true, false, true, false),
     );
-    expect_kernel_mapping(
+    expect_kernel_range(
         kernel_space,
         memory,
         ".rodata",
         core::ptr::addr_of!(__rodata_start) as usize,
-        PageFlags::supervisor_r(),
+        core::ptr::addr_of!(__rodata_end) as usize,
+        (true, false, false, false),
     );
-    expect_kernel_mapping(
+    expect_kernel_range(
         kernel_space,
         memory,
-        ".data",
+        ".data/.bss",
         core::ptr::addr_of!(__data_start) as usize,
-        PageFlags::supervisor_rw(),
+        core::ptr::addr_of!(__bss_end) as usize,
+        (true, true, false, false),
     );
-    expect_kernel_mapping(
+    expect_kernel_range(
         kernel_space,
         memory,
         "boot stack",
         core::ptr::addr_of!(__boot_stack_start) as usize,
-        PageFlags::supervisor_rw(),
+        core::ptr::addr_of!(__boot_stack_end) as usize,
+        (true, true, false, false),
     );
-    expect_kernel_mapping(
+    expect_kernel_range(
         kernel_space,
         memory,
         "UART",
         0x1000_0000,
-        PageFlags::supervisor_rw(),
+        0x1000_0000 + PAGE_SIZE,
+        (true, true, false, false),
     );
 
     let payload = VirtAddr::try_new(0x8780_0000).expect("payload start is an Sv39 address");
@@ -269,24 +319,43 @@ fn run_vm_test<const N: usize>(kernel_space: &AddressSpace<'_, N>, memory: &Iden
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-vm"))]
-fn expect_kernel_mapping<const N: usize>(
+fn expect_kernel_range<const N: usize>(
     kernel_space: &AddressSpace<'_, N>,
     memory: &IdentityFrameStore,
     region: &str,
-    address: usize,
-    expected_flags: PageFlags,
+    start: usize,
+    end: usize,
+    expected_flags: (bool, bool, bool, bool),
 ) {
-    let virtual_address =
-        VirtAddr::try_new(address as u64).expect("linker and MMIO addresses are valid Sv39 values");
-    let actual = kernel_space.translate(memory, virtual_address);
-    let expected_physical = address as u64;
-    if !matches!(
-        actual,
-        Ok((physical, flags))
-            if physical.as_u64() == expected_physical && flags == expected_flags
-    ) {
+    if start >= end || !start.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) {
         fatal_qemu_test(format_args!(
-            "vm mapping {region} @ {address:#x}: expected physical={expected_physical:#x} flags={expected_flags:?}, actual {actual:?}"
+            "vm range {region}: expected nonempty page-aligned [start,end), actual [{start:#x},{end:#x})"
+        ));
+    }
+    let expected_pages = (end - start) / PAGE_SIZE;
+    let mut checked_pages = 0usize;
+    for address in (start..end).step_by(PAGE_SIZE) {
+        let virtual_address = VirtAddr::try_new(address as u64)
+            .expect("linker and MMIO addresses are valid Sv39 values");
+        let actual = kernel_space.translate(memory, virtual_address);
+        let matches = matches!(
+            actual,
+            Ok((physical, flags))
+                if physical.as_u64() == address as u64
+                    && (flags.read(), flags.write(), flags.execute(), flags.user())
+                        == expected_flags
+        );
+        if !matches {
+            fatal_qemu_test(format_args!(
+                "vm range {region} page {checked_pages}/{expected_pages} @ {address:#x} in [{start:#x},{end:#x}): expected identity physical={address:#x} flags(R,W,X,U)={expected_flags:?}, actual {actual:?}"
+            ));
+        }
+        checked_pages += 1;
+    }
+    let observed_end = start + checked_pages * PAGE_SIZE;
+    if checked_pages != expected_pages || observed_end != end {
+        fatal_qemu_test(format_args!(
+            "vm range {region}: expected {expected_pages} pages ending exclusively at {end:#x}, actual {checked_pages} pages ending at {observed_end:#x}"
         ));
     }
 }
@@ -306,6 +375,15 @@ fn run_elf_test<const N: usize>(
     if !storage.is_empty() {
         fatal_qemu_test(format_args!(
             "elf precondition: expected empty storage, actual len={}",
+            storage.len()
+        ));
+    }
+
+    dirty_reusable_elf_frames(frames, memory, before);
+    if frames.stats() != before || !storage.is_empty() {
+        fatal_qemu_test(format_args!(
+            "elf dirty-frame recovery: allocator expected={before:?} actual={:?}; storage expected len=0 actual len={}",
+            frames.stats(),
             storage.len()
         ));
     }
@@ -354,6 +432,70 @@ fn run_elf_test<const N: usize>(
 
     crate::println!("[MINIOS_TEST] elf: ok");
     successful_qemu_test_shutdown()
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+fn dirty_reusable_elf_frames(
+    frames: &mut FrameAllocator<512>,
+    memory: &mut IdentityFrameStore,
+    baseline: FrameStats,
+) {
+    let mut dirty_frames: [Option<PhysFrame>; ELF_DIRTY_FRAME_COUNT] =
+        [const { None }; ELF_DIRTY_FRAME_COUNT];
+    let pattern = [0xa5; 64];
+
+    // FrameAllocator::allocate scans its bitmap from index zero. Holding the
+    // lowest 64 free frames, dirtying them, and then releasing all of them
+    // makes the next 23 fixture allocations reuse dirty frames before any
+    // untouched frame. The host characterization test fixes that 23-frame
+    // requirement (five page tables, two segments, and sixteen stack pages).
+    for index in 0..ELF_DIRTY_FRAME_COUNT {
+        let frame = match frames.allocate() {
+            Some(frame) => frame,
+            None => {
+                let cleanup_error = release_dirty_elf_frames(frames, &mut dirty_frames);
+                fatal_qemu_test(format_args!(
+                    "elf dirty-frame allocation {index}/{ELF_DIRTY_FRAME_COUNT}: out of frames; cleanup={cleanup_error:?}; allocator expected={baseline:?} actual={:?}",
+                    frames.stats()
+                ));
+            }
+        };
+        let frame_start = frame.start();
+        dirty_frames[index] = Some(frame);
+        for offset in (0..PAGE_SIZE).step_by(pattern.len()) {
+            if let Err(error) = memory.copy_into(frame_start, offset, &pattern) {
+                let cleanup_error = release_dirty_elf_frames(frames, &mut dirty_frames);
+                fatal_qemu_test(format_args!(
+                    "elf dirty-frame write {index}/{ELF_DIRTY_FRAME_COUNT} frame={frame_start:#x} offset={offset:#x}: {error:?}; cleanup={cleanup_error:?}; allocator expected={baseline:?} actual={:?}",
+                    frames.stats()
+                ));
+            }
+        }
+    }
+
+    if let Some(error) = release_dirty_elf_frames(frames, &mut dirty_frames) {
+        fatal_qemu_test(format_args!(
+            "elf dirty-frame release: {error:?}; allocator expected={baseline:?} actual={:?}",
+            frames.stats()
+        ));
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
+fn release_dirty_elf_frames(
+    frames: &mut FrameAllocator<512>,
+    dirty_frames: &mut [Option<PhysFrame>; ELF_DIRTY_FRAME_COUNT],
+) -> Option<FrameError> {
+    let mut first_error = None;
+    for slot in dirty_frames {
+        if let Some(frame) = slot.take()
+            && let Err(error) = frames.deallocate(frame)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
@@ -482,6 +624,7 @@ fn inspect_loaded_elf<const IMAGE_N: usize, const KERNEL_N: usize>(
             actual: text,
         });
     }
+    expect_zero_virtual(image, memory, "text padding", ENTRY + 4, PAGE_SIZE - 4)?;
 
     expect_elf_mapping(image, memory, "data", DATA, user_rw)?;
     let mut data = [0u8; 4];

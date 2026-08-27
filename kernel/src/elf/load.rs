@@ -467,6 +467,25 @@ mod tests {
         );
     }
 
+    // Catches fixture/page-table growth invalidating the QEMU harness's
+    // 64-frame dirty-reuse budget. The current image owns five page-table
+    // frames, two segment frames, and sixteen stack frames.
+    #[test]
+    fn fixture_owns_exactly_twenty_three_frames() {
+        let bytes = fixture::valid_riscv64_elf();
+        let mut allocator = fixture_allocator();
+        let before = allocator.stats();
+        let mut memory = TestFrameStore::default();
+        let mut storage = AddressSpaceStorage::<2688>::new();
+
+        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+
+        assert_eq!(allocator.stats().allocated - before.allocated, 23);
+        image.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats(), before);
+        assert_eq!(storage.len(), 0);
+    }
+
     // Catches page-copy arithmetic that assumes aligned segments or uses the
     // same source/destination offsets when file bytes cross a page boundary.
     #[test]
