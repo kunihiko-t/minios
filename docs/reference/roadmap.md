@@ -1,40 +1,52 @@
 # 発展ロードマップ
 
-現在の受け入れテストを各段階で保ちながら、次の順序で一つずつ設計します。
-各項目の「前提」が、実装を始めるための条件です。
+この文書は、実装済みの範囲、次の受け入れ単位、その後の方向を区別します。
+現在のrelease gateは、既存経路を保ったまま19段階を実行します。
 
-1. **Device Tree**
-   - 前提：OpenSBIの`a1`を起動ABIどおり保持できる。
-   - 完了：DTBパーサーをホスト上のテスト用データで検証し、RAM、UART、タイムベースを固定定数なしで取得する。
-2. **動的ヒープ**
-   - 前提：利用可能なRAMと予約範囲をDevice Treeから確定し、物理ページの所有権を守れる。
-   - 完了：確保、解放、枯渇をテストし、カーネル内のコレクションが確保に失敗したときの規約を定める。
-3. **Sv39仮想メモリー**
-   - 前提：ページテーブル用のページを、物理アロケーターとヒープから安全に所有できる。
-   - 完了：カーネル各セクションのアクセス権、恒等写像からの移行、UARTのMMIO写像、ページフォールトの診断をQEMUで確認する。
-4. **ユーザーモード**
-   - 前提：カーネルとユーザーの写像を分離し、トラップ時に使うカーネルスタックを用意できる。
-   - 完了：`sret`でU-modeのコードを実行し、特権操作が安全にトラップすることを確認する。
-5. **システムコール**
-   - 前提：ユーザーのトラップフレームを保存してカーネルへ戻れる。
-   - 完了：システムコール番号、引数、戻り値のABI、未知の番号、不正なポインターを検証する。
-6. **プロセス**
-   - 前提：システムコールで`yield`と`exit`を実行でき、アドレス空間、カーネルスタック、トラップフレームを所有できる。
-   - 完了：シングルハートのスケジューラーで、複数プロセスのコンテキスト切り替えと後始末を検証する。
-7. **VirtIOブロック機器**
-   - 前提：ヒープ、物理アドレスと仮想アドレスの変換、割り込み待ち、DMAバッファーの所有権がある。
-   - 完了：読み取り専用のセクター入出力、ディスクリプター枯渇、機器エラーをQEMUで検証する。
-8. **ファイルシステム**
-   - 前提：ブロック機器からセクターを安定して読み、バッファーの生存期間を管理できる。
-   - 完了：小さな読み取り専用ファイルシステムで検索と読み取り、壊れたメタデータの拒否を検証する。
-9. **マルチハート**
-   - 前提：スケジューラーとアロケーターの共有状態、割り込み禁止区間が明確である。
-   - 完了：ハートごとのスタック、IPI、ロック、アトミックなメモリー順序を追加し、競合を調べるテストを設計する。
-10. **ネットワーク**
-    - 前提：VirtIOキュー、タイマーの時間切れ、バッファーの所有権、複数プロセスの並行実行がある。
-    - 完了：VirtIOネットワーク、パケットパーサー、ARP、IPの順に、不正なパケットと時間切れを検証する。
-11. **実機**
-    - 前提：Device Treeから設定を取得してQEMUの固定値を除き、対象ボードのファームウェアとドライバーの規約を読める。
-    - 完了：シリアル出力だけの起動から始め、実機ごとのタイマー、割り込みコントローラー、ストレージを段階的に移植する。
+## 実装済み
 
-学習上の理由と各段階の演習は[第12章](../guide/12-next-steps.md)を参照してください。
+物理フレームアロケーターは、boot payload予約領域を除く`align_up(__kernel_end, 0x1000)..0x8780_0000`を管理します。
+
+Sv39の節目は完了しています。
+カーネルは4 KiB leafだけを使う三段page tableを構築し、section、managed RAM、UARTをS-mode専用で恒等写像します。
+`satp`の更新直後には`sfence.vma`を実行し、既存のboot、trap、timer、memory、shell経路をactiveなカーネルアドレス空間で維持します。
+`cargo xtask test vm`は全sectionとUARTの物理addressと`R/W/X/U`を検査し、payload開始位置が未写像であることを観測します。
+
+実行前ELF loaderの節目も完了しています。
+loaderは静的なRISC-V ELF64をallocation前に検証し、最大8個の`PT_LOAD`、2,048 user page、16 stack pageを固定容量の所有権表へmaterializeします。
+成功時の`LoadedImage`はinactiveな`AddressSpace`、entry point、user stack上端を所有し、失敗時と正常破棄時の両方で所有フレームを回収できます。
+`cargo xtask test elf`はfile byte、partial page、BSS、stack、guard、U bit、破棄後のallocator統計をS-modeから観測します。
+
+## 次
+
+次の受け入れ単位は、inactiveな`LoadedImage`で最小のU-modeプログラムを実行し、`write`と`exit`でS-modeへ戻すことです。
+
+1. **U-mode遷移**：`LoadedImage`のentryとuser stack上端から初期registerを作り、`sret`でU-modeへ入ります。
+2. **user trap context**：U-modeの全整数register、`sepc`、`sstatus`をカーネルstackへ保存し、system call後に復元します。
+3. **`write`**：user pointerの範囲とPTE権限を検査し、許可されたbyteだけをUARTへ出力します。
+4. **`exit`**：終了codeを記録し、user address spaceとkernel stackを回収して、hostへ観測できる状態へ変換します。
+
+### 受け入れ条件
+
+- U-modeで実行を開始し、S-mode専用pageへのaccessがpage faultになる。
+- U-modeの`ecall`がuser trap contextを失わずにS-modeのdispatchへ到達する。
+- `write`が正常なbufferを出力し、範囲外、未写像、書き込み不可など規約外のuser pointerをtyped errorとして拒否する。
+- `exit`が終了codeを保持し、`LoadedImage`とkernel stackの所有frameを回収する。
+- 未知のsystem call numberと予期しないuser trapを診断して実行単位を停止する。
+- 既存の19段階gateが引き続き成功し、新しいU-mode経路が専用markerまたは終了記録を持つ。
+
+この段階ではMiniBundle parser、QEMU host runtime、`minictr` CLIをminiOSへ実装しません。
+
+## その後
+
+MiniBundle payload統合は、予約物理領域から得たELF byte sliceを既存のminiOS ELF loaderへ渡します。
+ELFの検証、segment配置、ownership、rollbackを別のloaderとして再実装しません。
+
+QEMU子process、UART入出力、終了status、timeout、cleanupはMiniContainerのhost runtimeが担当します。
+`minictr run`は、そのruntimeとbundle storeを接続した後の段階です。
+
+Device TreeはRAM、UART、timebaseの固定値をmachine記述へ置き換えるときに導入します。
+汎用heapは固定容量の単一address spaceを越え、可変個のkernel objectとprocessを管理するときに導入します。
+その後にscheduler、VirtIO block、file system、network、multi-hart、実機対応を進めます。
+
+学習上の理由と演習は[第12章](../guide/12-next-steps.md)、現在のSv39とELFの境界は[第13章](../guide/13-sv39.md)と[第14章](../guide/14-elf-loading.md)を参照してください。
