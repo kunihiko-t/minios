@@ -30,7 +30,7 @@ loaderは静的なRISC-V ELF64をallocation前に検証し、最大8個の`PT_LO
 
 - U-modeで実行を開始し、S-mode専用pageへのaccessがpage faultになる。
 - U-modeの`ecall`がuser trap contextを失わずにS-modeのdispatchへ到達する。
-- `write`が正常なbufferを出力し、範囲外、未写像、書き込み不可など規約外のuser pointerをtyped errorとして拒否する。
+- `write`が正常なbufferを出力し、範囲外、未写像、読み取り不可など規約外のuser pointerをtyped errorとして拒否する。
 - `exit`が終了codeを保持し、`LoadedImage`とkernel stackの所有frameを回収する。
 - 未知のsystem call numberと予期しないuser trapを診断して実行単位を停止する。
 - 既存の19段階gateが引き続き成功し、新しいU-mode経路が専用markerまたは終了記録を持つ。
