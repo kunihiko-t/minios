@@ -47,8 +47,7 @@ shutting down
 
 | 区分 | 対応範囲 | 検証条件と制約 |
 | --- | --- | --- |
-| ホスト | Apple Silicon搭載macOS | 主な開発環境としてQEMU 11.1.0で検証 |
-| ホスト | LinuxおよびUbuntu 24.04 | GitHub Actionsで検証し、QEMU 8.2系を互換性の下限として使用 |
+| ホスト | Apple Silicon搭載macOS、Ubuntu 24.04 | macOSはQEMU 11.1.0、UbuntuはGitHub ActionsとQEMU 8.2系で検証 |
 | Rust | 安定版1.98.0 | rustfmt、Clippy、`riscv64gc-unknown-none-elf`を固定 |
 | ゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、1ハート、128 MiB RAM |
 | コンソール | 16550互換UART | MMIOベース`0x1000_0000`、QEMUのシリアル標準入出力 |

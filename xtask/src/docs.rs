@@ -39,24 +39,23 @@ const REQUIRED_PUBLICATION_FILES: [&str; 6] = [
     "README.md",
 ];
 
-const REQUIRED_CI_TEXT: [&str; 4] = [
-    "runs-on: ubuntu-24.04",
-    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-    "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",
-    "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
-];
-
-const REQUIRED_DEPENDABOT_TEXT: [&str; 4] = [
-    "version: 2",
-    "package-ecosystem: cargo",
-    "package-ecosystem: github-actions",
-    "interval: monthly",
+const REQUIRED_ACTIONS: [&str; 3] = [
+    "actions/checkout",
+    "dtolnay/rust-toolchain",
+    "Swatinem/rust-cache",
 ];
 
 #[derive(Clone, Copy)]
 struct Fence {
     marker: u8,
     length: usize,
+}
+
+#[derive(Clone, Copy)]
+struct YamlDirective<'a> {
+    indent: usize,
+    key: &'a str,
+    value: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -311,27 +310,215 @@ pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
             });
         }
     }
-    for (path, required_text) in [
-        (
-            Path::new(".github/workflows/ci.yml"),
-            REQUIRED_CI_TEXT.as_slice(),
-        ),
-        (
-            Path::new(".github/dependabot.yml"),
-            REQUIRED_DEPENDABOT_TEXT.as_slice(),
-        ),
+    let license = read_text(root, Path::new("LICENSE"))?;
+    for required in [
+        "SPDX-License-Identifier: MIT OR Apache-2.0",
+        "Apache License, Version 2.0",
+        "MIT License",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
     ] {
-        let contents = read_text(root, path)?;
-        for required in required_text {
-            if !contents.contains(required) {
-                return Err(DocsError::InvalidPublicationPolicy {
-                    path: path.to_owned(),
-                    required,
-                });
+        if !license.contains(required) {
+            return Err(DocsError::MissingPublicationText {
+                path: PathBuf::from("LICENSE"),
+                required,
+            });
+        }
+    }
+
+    let ci_path = Path::new(".github/workflows/ci.yml");
+    let ci = read_text(root, ci_path)?;
+    validate_ci_policy(&ci).map_err(|required| DocsError::InvalidPublicationPolicy {
+        path: ci_path.to_owned(),
+        required,
+    })?;
+
+    let dependabot_path = Path::new(".github/dependabot.yml");
+    let dependabot = read_text(root, dependabot_path)?;
+    validate_dependabot_policy(&dependabot).map_err(|required| {
+        DocsError::InvalidPublicationPolicy {
+            path: dependabot_path.to_owned(),
+            required,
+        }
+    })?;
+    Ok(())
+}
+
+fn validate_ci_policy(contents: &str) -> Result<(), &'static str> {
+    let directives = yaml_directives(contents);
+    let Some(jobs_index) = directives.iter().position(|directive| {
+        directive.indent == 0 && directive.key == "jobs" && directive.value.is_empty()
+    }) else {
+        return Err("active jobs mapping");
+    };
+    let jobs_indent = directives[jobs_index].indent;
+    let mut job_indent = None;
+    let mut steps_indent = None;
+    let mut has_pinned_runner = false;
+    let mut required_actions = [false; REQUIRED_ACTIONS.len()];
+    let total_uses = directives
+        .iter()
+        .filter(|directive| directive.key == "uses")
+        .count();
+    let mut valid_uses = 0;
+
+    for directive in directives.iter().skip(jobs_index + 1) {
+        if directive.indent <= jobs_indent {
+            break;
+        }
+        if directive.indent == jobs_indent + 2 && directive.value.is_empty() {
+            job_indent = Some(directive.indent);
+            steps_indent = None;
+            continue;
+        }
+        let Some(current_job_indent) = job_indent else {
+            continue;
+        };
+        if directive.indent <= current_job_indent {
+            job_indent = None;
+            steps_indent = None;
+            continue;
+        }
+        if steps_indent.is_some_and(|indent| directive.indent <= indent) {
+            steps_indent = None;
+        }
+        if directive.key == "runs-on" && directive.indent == current_job_indent + 2 {
+            if directive.value == "ubuntu-24.04" {
+                has_pinned_runner = true;
+            }
+            continue;
+        }
+        if directive.key == "steps" && directive.indent == current_job_indent + 2 {
+            steps_indent = Some(directive.indent);
+            continue;
+        }
+        if directive.key != "uses" {
+            continue;
+        }
+        let Some(current_steps_indent) = steps_indent else {
+            return Err("active steps.<step>.uses directive");
+        };
+        if directive.indent <= current_steps_indent {
+            return Err("active steps.<step>.uses directive");
+        }
+        let Some((action, reference)) = directive.value.rsplit_once('@') else {
+            return Err("active uses directives pinned to full 40-hex commit SHAs");
+        };
+        if action.is_empty()
+            || reference.len() != 40
+            || !reference.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("active uses directives pinned to full 40-hex commit SHAs");
+        }
+        valid_uses += 1;
+        for (index, required) in REQUIRED_ACTIONS.iter().enumerate() {
+            if action == *required {
+                required_actions[index] = true;
             }
         }
     }
+
+    if !has_pinned_runner {
+        return Err("active jobs.<job>.runs-on: ubuntu-24.04");
+    }
+    if valid_uses != total_uses {
+        return Err("active steps.<step>.uses directive");
+    }
+    if required_actions.iter().any(|present| !present) {
+        return Err("active pinned checkout, Rust toolchain, and Cargo cache actions");
+    }
     Ok(())
+}
+
+fn validate_dependabot_policy(contents: &str) -> Result<(), &'static str> {
+    let directives = yaml_directives(contents);
+    if !directives.iter().any(|directive| {
+        directive.indent == 0 && directive.key == "version" && directive.value == "2"
+    }) {
+        return Err("active version: 2");
+    }
+    let Some(updates_index) = directives.iter().position(|directive| {
+        directive.indent == 0 && directive.key == "updates" && directive.value.is_empty()
+    }) else {
+        return Err("active updates mapping");
+    };
+    let updates_indent = directives[updates_index].indent;
+    let mut cargo = false;
+    let mut github_actions = false;
+    let mut index = updates_index + 1;
+    while index < directives.len() {
+        let entry = directives[index];
+        if entry.indent <= updates_indent {
+            break;
+        }
+        if entry.indent != updates_indent + 2 || entry.key != "package-ecosystem" {
+            index += 1;
+            continue;
+        }
+        let entry_indent = entry.indent;
+        let ecosystem = entry.value;
+        let mut root_directory = false;
+        let mut weekly = false;
+        let mut schedule_indent = None;
+        index += 1;
+        while index < directives.len() {
+            let directive = directives[index];
+            if directive.indent <= entry_indent {
+                break;
+            }
+            if directive.key == "directory"
+                && directive.indent == entry_indent + 2
+                && directive.value == "/"
+            {
+                root_directory = true;
+            }
+            if directive.key == "schedule" && directive.indent == entry_indent + 2 {
+                schedule_indent = Some(directive.indent);
+            }
+            if directive.key == "interval"
+                && schedule_indent.is_some_and(|indent| directive.indent == indent + 2)
+                && directive.value == "weekly"
+            {
+                weekly = true;
+            }
+            index += 1;
+        }
+        if !root_directory || !weekly {
+            return Err("root-directory weekly Dependabot update entry");
+        }
+        match ecosystem {
+            "cargo" => cargo = true,
+            "github-actions" => github_actions = true,
+            _ => {}
+        }
+    }
+    if !cargo || !github_actions {
+        return Err("cargo and github-actions root-directory weekly update entries");
+    }
+    Ok(())
+}
+
+fn yaml_directives(contents: &str) -> Vec<YamlDirective<'_>> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let uncommented = line.split('#').next().unwrap_or_default().trim_end();
+            if uncommented.trim().is_empty() {
+                return None;
+            }
+            let indent = uncommented.len() - uncommented.trim_start().len();
+            let content = uncommented
+                .trim_start()
+                .strip_prefix("- ")
+                .unwrap_or(uncommented.trim_start());
+            let (key, value) = content.split_once(':')?;
+            Some(YamlDirective {
+                indent,
+                key: key.trim(),
+                value: value.trim(),
+            })
+        })
+        .collect()
 }
 
 fn has_heading(contents: &str, heading: &str) -> bool {
@@ -700,7 +887,7 @@ mod tests {
         let temp = TestTree::new();
         temp.write(
             "LICENSE",
-            "Licensed under either of Apache License, Version 2.0 or MIT license at your option.\nSee LICENSE-APACHE and LICENSE-MIT.\n",
+            "Licensed under either of Apache License, Version 2.0 or MIT License at your option.\nSee LICENSE-APACHE and LICENSE-MIT.\nSPDX-License-Identifier: MIT OR Apache-2.0\n",
         );
         for file in [
             "LICENSE-MIT",
@@ -716,11 +903,11 @@ mod tests {
         );
         temp.write(
             ".github/workflows/ci.yml",
-            "runs-on: ubuntu-24.04\nuses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\nuses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\nuses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
+            "name: CI\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
         );
         temp.write(
             ".github/dependabot.yml",
-            "version: 2\npackage-ecosystem: cargo\npackage-ecosystem: github-actions\ninterval: monthly\n",
+            "version: 2\nupdates:\n  - package-ecosystem: cargo\n    directory: /\n    schedule:\n      interval: weekly\n  - package-ecosystem: github-actions\n    directory: /\n    schedule:\n      interval: weekly\n",
         );
         temp
     }
@@ -812,6 +999,71 @@ mod tests {
             check_publication_files(temp.path()),
             Err(DocsError::MissingPublicationFile {
                 path: PathBuf::from("LICENSE"),
+            })
+        );
+    }
+
+    #[test]
+    fn publication_files_reject_nonempty_root_license_without_dual_spdx_markers() {
+        let temp = complete_publication_tree();
+        temp.write("LICENSE", "All rights reserved.\n");
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::MissingPublicationText {
+                path: PathBuf::from("LICENSE"),
+                required: "SPDX-License-Identifier: MIT OR Apache-2.0",
+            })
+        );
+    }
+
+    #[test]
+    fn publication_policy_rejects_commented_ci_directives_and_symbolic_action_refs() {
+        let temp = complete_publication_tree();
+        temp.write(
+            ".github/workflows/ci.yml",
+            "name: CI\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      # uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: actions/checkout@v7\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
+        );
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::InvalidPublicationPolicy {
+                path: PathBuf::from(".github/workflows/ci.yml"),
+                required: "active uses directives pinned to full 40-hex commit SHAs",
+            })
+        );
+    }
+
+    #[test]
+    fn publication_policy_rejects_commented_dependabot_update_entries() {
+        let temp = complete_publication_tree();
+        temp.write(
+            ".github/dependabot.yml",
+            "# version: 2\n# package-ecosystem: cargo\n# package-ecosystem: github-actions\n# interval: monthly\nnotes: package-ecosystem: cargo\n",
+        );
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::InvalidPublicationPolicy {
+                path: PathBuf::from(".github/dependabot.yml"),
+                required: "active version: 2",
+            })
+        );
+    }
+
+    #[test]
+    fn publication_policy_rejects_active_action_directives_outside_job_steps() {
+        let temp = complete_publication_tree();
+        temp.write(
+            ".github/workflows/ci.yml",
+            "name: CI\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\nuses: actions/cache@v4\n",
+        );
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::InvalidPublicationPolicy {
+                path: PathBuf::from(".github/workflows/ci.yml"),
+                required: "active steps.<step>.uses directive",
             })
         );
     }
