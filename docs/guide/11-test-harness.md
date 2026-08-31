@@ -4,7 +4,7 @@
 
 `cargo xtask`をローカル開発とCIの共通入口にする理由を学びます。
 読み終えると、ホスト単体テストとRISC-Vゲスト統合テストの違い、QEMUのマーカーモードと対話モード、時間切れになったプロセスの回収、対話記録の読み方を説明できるようになります。
-`cargo xtask check`が実行する19段階の順序も確認します。
+`cargo xtask check`が実行する24段階の順序も確認します。
 
 ## 背景
 
@@ -26,7 +26,7 @@ Cargoは`cargo xtask ...`を、ワークスペース内の`xtask`バイナリー
 cargo xtask setup
 cargo xtask build
 cargo xtask run
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|shell]
 cargo xtask check
 ```
 
@@ -52,13 +52,18 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 6. QEMUメモリーテスト
 7. QEMU VMテスト
 8. QEMU ELFテスト
-9. QEMUシェルテスト
+9. QEMU user-entryテスト
+10. QEMU user-trapテスト
+11. QEMU user-syscallテスト
+12. QEMU user-exitテスト
+13. QEMU payloadテスト
+14. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、対話シェルという依存関係の順にゲストの七経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、payload、対話シェルという依存関係の順にゲストの12経路を確認します。
 
 ### QEMUの二つの検証モード
 
-起動、トラップ、タイマー、メモリー、VM、ELFのテストは**マーカーモード**です。
+起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscallのテストは**マーカーモード**です。
 テストごとのCargo機能を有効にしてカーネルをビルドし、UARTの記録、終了ステータス0、次の完全一致するマーカーを要求します。
 
 ```text
@@ -68,6 +73,9 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 [MINIOS_TEST] memory: ok
 [MINIOS_TEST] vm: ok
 [MINIOS_TEST] elf: ok
+[MINIOS_TEST] user-entry: reached
+[MINIOS_TEST] user-trap: rejected
+[MINIOS_TEST] user-syscall: ok
 ```
 
 マーカーがなければ、終了ステータスが0でも成功とは見なしません。
@@ -95,9 +103,9 @@ QEMU起動前にビルドが失敗した場合も、Cargoコマンドにはテ�
 失敗した段階の見出しと、最後に見えた初期化行やマーカーを照合すると、ビルド失敗、ゲスト内の明示的な失敗、停止を区別できます。
 Cargoの子プロセスが失敗した場合も、実行コマンド、終了ステータス、標準出力、標準エラーを表示します。
 
-### `check`が実行する19段階
+### `check`が実行する24段階
 
-`cargo xtask check`は、次の19段階をこの順に実行し、最初の失敗で停止します。
+`cargo xtask check`は、次の24段階をこの順に実行し、最初の失敗で停止します。
 書式検査の直後に教材のリンクと章構造を調べ、その後でコンパイラーを動かします。
 静的検査より前にQEMUを起動しないことと、検査していないバイナリーをゲストテストへ渡さないことが、この順序を固定する理由です。
 
@@ -120,11 +128,16 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 16. QEMU memory test
 17. QEMU VM test
 18. QEMU ELF test
-19. QEMU shell test
+19. QEMU user-entry test
+20. QEMU user-trap test
+21. QEMU user-syscall test
+22. QEMU user-exit test
+23. QEMU payload test
+24. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 19 phases`を表示します。
+全段階に成功すると`summary: PASSED all 24 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -133,7 +146,7 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 - `xtask/src/lib.rs`：段階の順序、最初の失敗で止まる実行管理、結果の要約
 - `xtask/src/cargo.rs`：Cargoの子プロセスと、コマンド、終了ステータス、出力の診断
 - `xtask/src/qemu.rs`：QEMUの引数、マーカーと対話の検証、制限時間、プロセスの終了と回収、対話記録
-- `xtask/src/docs.rs`：ローカルのMarkdownリンクと第1章から第14章までの必須構造
+- `xtask/src/docs.rs`：ローカルのMarkdownリンクと第1章から第16章までの必須構造
 - `kernel/src/main.rs`：テスト用機能ごとのマーカーとシェルの起動
 - `.github/workflows/ci.yml`：Linux上で同じ`setup`と`check`を呼ぶCI
 
@@ -158,12 +171,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/19] cargo fmt --all -- --check
-phase 1/19 passed (elapsed: ...s)
+[1/24] cargo fmt --all -- --check
+phase 1/24 passed (elapsed: ...s)
 ...
-[19/19] QEMU shell test
-phase 19/19 passed (elapsed: ...s)
-summary: PASSED all 19 phases (elapsed: ...s)
+[24/24] QEMU shell test
+phase 24/24 passed (elapsed: ...s)
+summary: PASSED all 24 phases (elapsed: ...s)
 ```
 
 一つの経路だけを繰り返す場合は、たとえば`cargo xtask test trap`を使います。

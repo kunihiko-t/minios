@@ -1,6 +1,7 @@
 # MiniOSの全体構成
 
 MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ込め、純粋なロジックをホストでテストできるライブラリーへ分けています。
+静的RISC-V 64 ELFをMiniBundle boot payloadから検証し、U-modeで`write`と`exit`を実行して所有frameを回収します。
 依存方向はシェルとカーネルの入口から型の付いたAPIへ向かいます。
 上位モジュールがCSR、SBIのレジスター、UARTのoffset、PTEのbit列を直接操作することはありません。
 
@@ -13,7 +14,7 @@ MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ�
 
 - `kernel/linker.ld`：`_start`、ページ境界へそろえたELFセクション、BSS、64 KiBの起動用スタック、`__kernel_end`を定義します。
 - `kernel/src/arch/riscv64/entry.S`：OpenSBIの`a0/a1`を保持し、スタックとBSSを準備して`kernel_main`へ渡します。
-- `kernel/src/main.rs`：ハートID、トラップ、物理フレームアロケーター、カーネルアドレス空間、Sv39、タイマー、テスト用機能、シェルを順に接続します。
+- `kernel/src/main.rs`：ハートID、トラップ、物理フレームアロケーター、カーネルアドレス空間、Sv39、タイマー、U-mode test、boot payload、シェルを順に接続します。
   下位モジュールの実装詳細は、型の付いた関数を通して呼び出します。
 
 ### `arch/riscv64`
@@ -23,8 +24,8 @@ MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ�
   `activate_sv39`はroot PPNから`MODE=8`の`satp`値を作り、`csrw satp`の直後に`sfence.vma`を実行します。
 - `sbi.rs`：`set_timer(deadline)`、型の付いたreset種別と理由、`system_reset`、割り込みを無効にした`wfi`を提供します。
   共通の`SbiRet`と`SbiError`には、ホストでテストできるlibrary型を再利用します。
-- `trap.S`：256 byteのS-modeフレームへ整数レジスターを保存し、Rustのhandlerを呼び、復元後に`sret`します。
-  現在のフレームはuser trap contextを保存してU-modeと往復する実装ではありません。
+- `user.S`：`sscratch`と`sp`を交換して専用kernel trap stackへ全registerを保存し、`sret`でU-modeと往復します。
+- `trap.S`：S-modeで発生したtimerなどのtrapを保存し、既存のS-mode handlerへ渡します。
 - `trap.rs`：`scause`を`Interrupt`と`Exception`へ分け、Direct modeの`stvec`初期化、timerの振り分け、breakpointの受け入れテスト、予期しないtrapの診断を担当します。
 
 ### 機器とコンソール
@@ -61,7 +62,8 @@ MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ�
 
 `kernel_main`が構築して`satp`へ設定するカーネル`AddressSpace`は**active**です。
 この空間は`.text`を`R+X`、`.rodata`を`R`、writable sectionとstackとmanaged RAMとUARTを`R+W`で写像し、すべて`U=0`にします。
-boot payload予約領域は未写像です。
+payloadがない通常bootでは予約領域は未写像です。
+payloadがあるbootでは検証済みの使用pageだけをS-mode read-onlyでmapします。
 
 ### ELFの検証と配置
 
@@ -71,9 +73,17 @@ boot payload予約領域は未写像です。
 - `elf/load.rs`：検証済み`LoadPlan`からsegment、BSS、16ページのuser stackをmaterializeし、`LoadedImage`を返します。
   各user leafは`U=1`であり、`0x3ffe_f000..0x3fff_0000`のguard pageを未写像に保ちます。
 
-ELF loaderが返す`LoadedImage`は**inactive**です。
-この値は`AddressSpace`、entry point、user stack上端を所有しますが、そのrootを`satp`へ設定せず、entry pointを実行しません。
-構築失敗時はbuilderが所有フレームをrollbackし、成功後は`LoadedImage::destroy`がpage table、user page、stackを回収します。
+ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
+`UserRun`はkernel mappingとkernel trap stackを加えた後にrootを`satp`へ設定し、entry pointへ`sret`します。
+構築失敗時はbuilderが所有frameをrollbackし、`exit`またはfatal trap後は`UserRun::reclaim`がkernel trap stack、page table、user pageを回収します。
+
+### U-mode system call
+
+- `user/context.rs`：entry、user stack、`sstatus.SPP=0`を持つ`UserContext`を定義します。
+- `user/memory.rs`：user pointerを参照として解釈せず、pageごとに`U=1`とread権限を確認してcopyします。
+- `user/syscall.rs`：`a7`の番号と`a0`、`a1`、`a2`のargumentsから`write`と`exit`をdispatchします。
+- `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
+- `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 
 ### シェル
 
@@ -92,14 +102,14 @@ ELF loaderが返す`LoadedImage`は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`test`、`check`と、`vm`と`elf`を含むテスト対象の引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payloadを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
-- `qemu.rs`：QEMU `virt`の引数、対話modeとmarker mode、制限時間、並行した出力の読み取り、processの終了と回収、記録の検証を担当します。
-  `vm`経路はactiveなkernel mapping、`elf`経路はinactiveな`LoadedImage`のbyte、BSS、stack、guard、回収をS-modeから観測します。
-- `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第14章までの七つの必須節を検査します。
+- `qemu.rs`：QEMU `virt`の引数、MiniBundle loader、marker mode、制限時間、並行した出力の読み取り、childのkillとwait、記録の検証を担当します。
+  `user-exit`と`payload`経路はstdout、stderr、Exit、回収をcontrol frameで観測します。
+- `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第16章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
-- `lib.rs`：公開commandを19段階の計画へ変換し、最初の失敗で停止して経過時間をまとめます。
+- `lib.rs`：公開commandを24段階の計画へ変換し、host testの後にuser runtimeとpayloadのQEMU testを実行します。
 
 ## 起動からシェルまで
 
@@ -113,7 +123,7 @@ ELF loaderが返す`LoadedImage`は**inactive**です。
 8. **テストまたはシェル**：テスト用機能は対象を観測してmarkerを出し、通常buildはbannerと`minios> `を表示してcommandを処理します。
 9. **非同期timer**：シェル実行中もSupervisor timer trapが入り、レジスターの保存、tickの更新、次のdeadline予約、レジスターの復元を経て`sret`で中断位置へ戻ります。
 
-現在の`kernel_main`はinactiveな`LoadedImage`を通常bootで作成せず、U-modeへ遷移しません。
-U-mode用trap context、`write`、`exit`、MiniBundle payloadの取り出しは[発展ロードマップ](roadmap.md)の次段階です。
+payload bootでは`kernel_main`がMiniBundleを二段階で検証し、ELFをU-modeへ遷移させます。
+U-modeの`ecall`は`sscratch`によるstack交換を通り、`write`または`exit`を処理してからkernelへ戻ります。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

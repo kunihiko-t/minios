@@ -380,36 +380,34 @@ mod tests {
 
     #[test]
     fn check_plan_orders_compiler_operations_then_host_and_qemu_tests() {
-        assert_eq!(
-            check_phases(),
-            vec![
-                Phase::Format,
-                Phase::DocsLinks,
-                Phase::DocsGuideStructure,
-                Phase::DocsPublicationFiles,
-                Phase::ClippyXtask,
-                Phase::ClippyAbi,
-                Phase::ClippyKernelLib,
-                Phase::ClippyKernelBin,
-                Phase::BuildKernel,
-                Phase::AbiUnitTests,
-                Phase::KernelUnitTests,
-                Phase::XtaskUnitTests,
-                Phase::Qemu(qemu::TestKind::Boot),
-                Phase::Qemu(qemu::TestKind::Trap),
-                Phase::Qemu(qemu::TestKind::Timer),
-                Phase::Qemu(qemu::TestKind::Memory),
-                Phase::Qemu(qemu::TestKind::Vm),
-                Phase::Qemu(qemu::TestKind::Elf),
-                Phase::Qemu(qemu::TestKind::UserEntry),
-                Phase::Qemu(qemu::TestKind::UserTrap),
-                Phase::Qemu(qemu::TestKind::UserSyscall),
-                Phase::Qemu(qemu::TestKind::UserExit),
-                Phase::Qemu(qemu::TestKind::Payload),
-                Phase::Qemu(qemu::TestKind::Shell),
-            ]
-        );
-        assert_eq!(check_phases().len(), 24);
+        let expected = vec![
+            Phase::Format,
+            Phase::DocsLinks,
+            Phase::DocsGuideStructure,
+            Phase::DocsPublicationFiles,
+            Phase::ClippyXtask,
+            Phase::ClippyAbi,
+            Phase::ClippyKernelLib,
+            Phase::ClippyKernelBin,
+            Phase::BuildKernel,
+            Phase::AbiUnitTests,
+            Phase::KernelUnitTests,
+            Phase::XtaskUnitTests,
+            Phase::Qemu(qemu::TestKind::Boot),
+            Phase::Qemu(qemu::TestKind::Trap),
+            Phase::Qemu(qemu::TestKind::Timer),
+            Phase::Qemu(qemu::TestKind::Memory),
+            Phase::Qemu(qemu::TestKind::Vm),
+            Phase::Qemu(qemu::TestKind::Elf),
+            Phase::Qemu(qemu::TestKind::UserEntry),
+            Phase::Qemu(qemu::TestKind::UserTrap),
+            Phase::Qemu(qemu::TestKind::UserSyscall),
+            Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::Payload),
+            Phase::Qemu(qemu::TestKind::Shell),
+        ];
+        assert_eq!(check_phases(), expected);
+        assert_eq!(check_phases().len(), expected.len());
 
         let plan = check_phases();
         let position = |phase| {
@@ -419,6 +417,28 @@ mod tests {
         };
         assert!(position(Phase::ClippyAbi) < position(Phase::ClippyKernelLib));
         assert!(position(Phase::AbiUnitTests) < position(Phase::KernelUnitTests));
+    }
+
+    // Catches omitting a user-runtime acceptance phase, reordering the
+    // user-runtime sequence, or printing a phase total that disagrees with
+    // the plan that `cargo xtask check` actually runs.
+    #[test]
+    fn check_plan_runs_every_user_runtime_phase_after_host_tests() {
+        let plan = check_phases();
+        let host_tests_end = plan
+            .iter()
+            .position(|phase| *phase == Phase::XtaskUnitTests)
+            .expect("check plan must run xtask host tests");
+        let expected = [
+            Phase::Qemu(qemu::TestKind::UserEntry),
+            Phase::Qemu(qemu::TestKind::UserTrap),
+            Phase::Qemu(qemu::TestKind::UserSyscall),
+            Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::Payload),
+        ];
+
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 12], expected);
+        assert_eq!(plan.len(), 24);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 OSの実装順を、すべての将来機能に共通する一本道ではなく、今回の受け入れ条件に必要な依存関係として説明できるようになります。
 Device Treeと汎用ヒープをSv39より先に置いた旧順序と、固定容量の単一アドレス空間を先行させた現在の順序を比較します。
-現在のinactiveな`LoadedImage`から、U-mode遷移、user trap context、`write`、`exit`へ進む最小の段階も考えます。
+実装済みのU-mode遷移、user trap context、`write`、`exit`、boot payloadを確認し、その後の拡張を考えます。
 
 ## 背景
 
@@ -20,14 +20,13 @@ MiniContainerの最初の実行単位に必要なのは、QEMU `virt`上で一�
 
 ## 実装
 
-現在までに、物理フレームアロケーター、Sv39のactiveなカーネル空間、静的RISC-V 64 ELFから作るinactiveな`LoadedImage`が完成しています。
-次は次の順序で、実行前の所有物を一つずつ実行状態へ接続します。
+物理フレームアロケーター、Sv39のactiveなカーネル空間、静的RISC-V 64 ELFから作る`LoadedImage`、U-mode実行、MiniBundle payloadが完成しています。
+実行済みの接続は次のとおりです。
 
-1. **U-mode遷移とuser trap context**：`LoadedImage`のentryとuser stack上端を初期レジスターへ設定し、カーネルスタックと保存領域を用意して`sret`します。
-2. **`write` system call**：U-modeの`ecall`をS-modeへ戻し、user pointerの範囲とPTE権限を検査してからUARTへbyte列を出します。
-3. **`exit` system call**：終了コードをhostへ伝える内部状態を定義し、ユーザー空間とカーネルスタックの所有フレームを回収します。
-4. **MiniBundle payload統合**：予約済み物理領域からMiniBundle内のELFを取り出し、既存のminiOS loaderへ渡します。
-5. **QEMU host runtime**：MiniContainer側でQEMU子プロセス、UART、終了状態、timeout、後始末を一つのlifecycleへ接続します。
+1. **U-mode遷移とuser trap context**：`LoadedImage`のentryとuser stack上端から初期registerを作り、`sscratch`を使うkernel stackへtrapを保存して`sret`します。
+2. **`write` system call**：U-modeの`ecall`はuser pointerとPTE権限を検査し、stdoutまたはstderr control frameへbyteを送ります。
+3. **`exit` system call**：終了codeをExit frameで通知し、user address spaceとkernel trap stackの所有frameを回収します。
+4. **MiniBundle payload統合**：予約物理windowからMiniBundle内のELFを二段階で検証し、使用pageだけをS-mode read-onlyでmapします。
 
 Device Treeと汎用ヒープは、QEMU `virt`の固定値を外す段階と、固定容量の単一アドレス空間を越える段階で導入します。
 その後にprocessとscheduler、VirtIO、file system、network、multi-hart、実機対応を進めます。
@@ -35,21 +34,20 @@ Device Treeと汎用ヒープは、QEMU `virt`の固定値を外す段階と、�
 
 ## 実行と確認
 
-次の段階へ進む前と実装後に、19段階のrelease gateを実行します。
+実装後の全検査には、24段階のrelease gateを実行します。
 
 ```sh
 cargo xtask check
 ```
 
-新しいproduction behaviorには、まず失敗するhost testかQEMU経路を追加します。
-U-mode遷移にはentryと特権レベルを観測するQEMU marker、`write`には正常なbufferと不正なuser pointer、`exit`には終了コードと全所有フレームの回収が必要です。
-既存の`vm`と`elf`経路も残し、activeなカーネル空間とinactiveな`LoadedImage`の前提が壊れていないことを確認します。
+U-mode遷移にはentryと特権levelを観測するQEMU markerがあり、`write`には正常なbufferと不正なuser pointer、`exit`には終了codeと全所有frameの回収を確認する経路があります。
+`vm`と`elf`経路も残し、activeなカーネル空間と実行前`LoadedImage`の前提が壊れていないことを確認します。
 
 ## よくある失敗
 
 - 旧順序を現在の必須条件として残す：現在のSv39とELF loaderはDevice Treeも汎用ヒープも使わず、固定容量の所有権表で動いています。
-- inactiveな`LoadedImage`を実行済みと記述する：`satp`はカーネル空間を指したままで、user entryへ`sret`していません。
-- U-mode遷移と全system callを同時に作る：特権遷移、trap保存、pointer検査、UART出力、終了時回収の失敗を区別できるよう、`write`と`exit`へ範囲を絞ります。
+- `LoadedImage`を常に実行中と記述する：ELF loaderが返した直後はinactiveであり、`UserRun`がkernel mappingとtrap stackを加えた後だけ`sret`します。
+- U-mode実行をLinux互換と記述する：実装するsystem callは`write`と`exit`だけであり、Linux ABI全体は提供しません。
 - payload統合でELF loaderを作り直す：MiniBundleから得たELF byte sliceを既存の検証とmaterializeへ渡し、所有権とrollbackの規約を一つに保ちます。
 - 固定容量を暗黙の無制限構造として扱う：`PT_LOAD`は8個、user imageは2,048ページ、所有フレームは2,688個という拒否境界を維持します。
 
@@ -62,5 +60,6 @@ U-mode遷移、`write`、`exit`の三項目について、直接の前提、host
 ## 次の章
 
 [第13章「Sv39と単一アドレス空間」](13-sv39.md)では、先行実装したactiveなカーネル空間のpage walkと権限を追います。
-[第14章「ELFを実行前アドレス空間へ配置する」](14-elf-loading.md)では、固定容量の所有権表がinactiveな`LoadedImage`を構築して回収する流れを追います。
+[第14章「ELFを実行前アドレス空間へ配置する」](14-elf-loading.md)では、固定容量の所有権表が実行前の`LoadedImage`を構築して回収する流れを追います。
+[第15章「U-modeでELFを実行する」](15-user-mode.md)と[第16章「boot payloadを実行する」](16-boot-payload.md)では、実行、回収、payload rangeを追います。
 [全体構成](../reference/architecture.md)、[メモリーマップ](../reference/memory-map.md)、[発展ロードマップ](../reference/roadmap.md)も実装順の根拠として参照してください。

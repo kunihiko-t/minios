@@ -63,7 +63,6 @@ allocation後の失敗を注入する試験では、実行前後の`FrameStats`�
 
 ## 次の章
 
-次の実装段階では、inactiveな`LoadedImage`へuser trap contextとカーネルスタックを結び、`sret`でU-modeへ入ります。
+次の章では、inactiveな`LoadedImage`をkernel mappingとtrap stackへ結び、`sret`でU-modeへ入ります。
 最初のsystem callはUARTへ出力する`write`と終了状態を返す`exit`に絞り、未知の番号と不正なuser pointerも検査します。
-このU-mode実行段階はまだ実装されていないため、現在のガイドは[索引](README.md)で終わります。
-[発展ロードマップ](../reference/roadmap.md)には、次の受け入れ条件と後続のDevice Tree、heap、runtimeの順序があります。
+[第15章「U-modeでELFを実行する」](15-user-mode.md)へ進みます。

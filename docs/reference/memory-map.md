@@ -12,12 +12,15 @@ MiniOSはQEMU `virt`を`-m 128M`で起動し、物理RAMを`0x8000_0000..0x8800_
 | `0x8020_0000` | カーネルの先頭とELF entryの配置位置 | `linker.ld`のlocation counter、OpenSBIの`Next Address`、QEMUの`-kernel`が一致する位置 |
 | `0x8020_0000..__kernel_end` | `.text`、`.rodata`、`.data`、`.bss`、64 KiBの起動用stack、bitmap | カーネル自身が占有し、sectionごとの最小権限でS-modeへ恒等写像 |
 | `align_up(__kernel_end, 0x1000)..0x8780_0000` | 割り当て可能な物理RAM | 一つの`FrameAllocator`だけが排他的に取得し、S-modeの`R+W`で恒等写像 |
-| `0x8780_0000..0x8800_0000` | MiniContainer boot payloadの予約領域 | allocatorの対象外かつカーネル空間で未写像 |
+| `0x8780_0000..0x8800_0000` | MiniBundle boot payloadの予約領域 | allocatorの対象外であり、payloadがあるときは使用pageだけをS-mode read-onlyでmap |
 | `0x8800_0000` | 128 MiB RAMの排他的な上端 | RAMの上端であり、allocatorの上端ではない |
 | `0x1000_0000..0x1000_1000` | 16550互換UARTのMMIO | RAM外の機器領域としてS-modeの`R+W`で恒等写像し、volatile accessだけを使用 |
 
 `PHYSICAL_MEMORY_END`という実装定数は、物理RAM全体の上端ではなく、allocatorへ渡すmanaged RAMの上端`0x8780_0000`を表します。
 この上端をpayload開始位置と一致させることで、ELF loaderが確保するpage table、user page、stack pageと後続のMiniBundleが同じ物理ページを所有しません。
+
+payloadを検証した後は、使用lengthを4 KiBへ切り上げたpageだけをS-mode read-onlyかつ`U=0`でidentity mapします。
+payloadがない通常bootでは、この予約windowは未写像です。
 
 ## ユーザー仮想アドレス
 
@@ -32,7 +35,7 @@ ELF loaderは、次の下位Sv39範囲だけをuser imageに使います。
 
 `PT_LOAD`の正確なbyte範囲がguardより下にあっても、4 KiBへ丸めたpage範囲がguardまたはstackへ重なる場合は拒否します。
 entry pointは実行可能な`PT_LOAD`のmemory range内に必要です。
-loaderが返す`LoadedImage`はこの仮想配置を所有しますが、現在は`satp`へ設定しないinactiveな空間です。
+loaderが返す`LoadedImage`はこの仮想配置を所有し、実行時にはkernel mappingとkernel trap stackを加えたaddress spaceで`satp`へ設定します。
 
 ## OpenSBIとカーネルの境界
 
@@ -46,4 +49,4 @@ bitmapも`.bss`内にあるため、この境界より下にあります。
 OpenSBIから渡されるDTBは検証環境ではRAMの高位に置かれますが、現在の段階では内容を読みません。
 将来DTBを解析するときは、Blobが実際に使う範囲を確定し、payloadと同じくallocatorの予約領域へ追加する必要があります。
 
-[全体構成](architecture.md) | [Sv39の学習章](../guide/13-sv39.md) | [ELF loaderの学習章](../guide/14-elf-loading.md) | [問題の切り分け方](troubleshooting.md)
+[全体構成](architecture.md) | [U-modeの学習章](../guide/15-user-mode.md) | [payloadの学習章](../guide/16-boot-payload.md) | [問題の切り分け方](troubleshooting.md)
