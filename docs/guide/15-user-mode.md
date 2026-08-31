@@ -19,6 +19,7 @@ ELF loaderが作る`LoadedImage`は、user pageとpage tableを所有します�
 
 [`UserContext::new`](../../kernel/src/user/context.rs)がentry、stack、`sstatus.SPIE`を初期化します。
 [`__run_user`](../../kernel/src/arch/riscv64/user.S)はkernel stack topを`sscratch`へ保存し、user用の`satp`、`sepc`、`sstatus`、整数registerを復元して`sret`します。
+ELF loaderは実行pageを通常のstoreで書くため、`__run_user`は`sret`の前に`fence.i`を実行し、同じhartの後続instruction fetchへ書き込みを反映します。
 
 U-modeでtrapが起きると、[`__user_trap_entry`](../../kernel/src/arch/riscv64/user.S)は最初の命令で`sp`と`sscratch`を交換します。
 この交換により、user stackを信用して保存領域を確保せず、kernel trap stackへ全register、`sepc`、`sstatus`を保存できます。
@@ -34,6 +35,7 @@ system call番号は`a7`です。
 [`UserRun::finish_exit`](../../kernel/src/user/run.rs)はExit control frameを送ってから`reclaim`を呼びます。
 [`UserRun::reclaim`](../../kernel/src/user/run.rs)はkernel trap stackを返し、続いて`LoadedImage::destroy`でuser pageとpage tableを返します。
 回収に失敗した値はrun内へ戻るため、呼び出し側は所有権を失わず再試行できます。
+回収済みの`UserRun`を再実行すると、解放済みのpage tableとtrap stackを参照するため、二回目の`execute`はarchitecture入口へ進む前に拒否されます。
 
 ## 実行と確認
 

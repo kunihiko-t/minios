@@ -68,6 +68,7 @@ payloadがあるbootでは検証済みの使用pageだけをS-mode read-onlyでm
 ### ELFの検証と配置
 
 - `elf/header.rs`：借用したbyte sliceからELF64 headerとprogram headerをchecked parseし、little-endian、RISC-V、`ET_EXEC`を検査します。
+  動的loaderを要求する`PT_INTERP`と`PT_DYNAMIC`は拒否します。
 - `elf/plan.rs`：最大8個の`PT_LOAD`についてfile範囲、memory範囲、alignment、合同条件、page重複、`W+X`、entry、user range、stackとの衝突をallocation前に検査します。
   user imageはpageへ丸めた合計2,048ページまでです。
 - `elf/load.rs`：検証済み`LoadPlan`からsegment、BSS、16ページのuser stackをmaterializeし、`LoadedImage`を返します。
@@ -75,7 +76,7 @@ payloadがあるbootでは検証済みの使用pageだけをS-mode read-onlyでm
 
 ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 `load_image_with_kernel_mappings`はkernel mappingをborrowed leafとしてimageへ加え、`UserRun::new`はkernel trap stackを確保します。
-`__run_user`が実行用rootを`satp`へ設定してentry pointへ`sret`します。
+`__run_user`が実行用rootを`satp`へ設定し、`sfence.vma`と`fence.i`を実行してからentry pointへ`sret`します。
 構築失敗時はbuilderが所有frameをrollbackし、`exit`またはfatal trap後は`UserRun::reclaim`がkernel trap stack、page table、user pageを回収します。
 
 ### U-mode system call

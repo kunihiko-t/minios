@@ -1119,6 +1119,17 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-trap"))]
 fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
+    const STORE_PAGE_FAULT: usize = 15;
+    const SUPERVISOR_UART_PAGE: usize = 0x1000_0000;
+    if scause != STORE_PAGE_FAULT || stval != SUPERVISOR_UART_PAGE {
+        crate::console::emergency_print(format_args!(
+            "[MINIOS_TEST] failed: user-trap expected supervisor UART denial, scause={scause:#018x} stval={stval:#018x}\r\n"
+        ));
+        arch::riscv64::sbi::system_reset(
+            arch::riscv64::sbi::ResetType::Shutdown,
+            arch::riscv64::sbi::ResetReason::SystemFailure,
+        )
+    }
     // 期待markerは独立した正確な一行で出す。成功marker (`user-trap: ok`) は
     // 決して出力しない。診断は次の行へ置く。
     crate::console::emergency_print(format_args!(
@@ -1158,15 +1169,21 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
     target_arch = "riscv64",
     any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
 ))]
-const USER_PROBE_ELF_LEN: usize = 0x1008;
+const USER_PROBE_CODE_LEN: usize = 12;
 
 #[cfg(all(
     target_arch = "riscv64",
     any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
 ))]
-// 決定的な1 segment ELFを返す。textは8 byteのコード領域だけで、
+const USER_PROBE_ELF_LEN: usize = 0x1000 + USER_PROBE_CODE_LEN;
+
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+// 決定的な1 segment ELFを返す。textは12 byteのコード領域だけで、
 // 中身は呼び出し側のprobeが指定する。
-fn user_probe_elf(code: &[u8; 8]) -> [u8; USER_PROBE_ELF_LEN] {
+fn user_probe_elf(code: &[u8; USER_PROBE_CODE_LEN]) -> [u8; USER_PROBE_ELF_LEN] {
     let mut bytes = [0u8; USER_PROBE_ELF_LEN];
     bytes[0..4].copy_from_slice(b"\x7fELF");
     bytes[4] = 2;
@@ -1185,24 +1202,32 @@ fn user_probe_elf(code: &[u8; 8]) -> [u8; USER_PROBE_ELF_LEN] {
     bytes[header + 4..header + 8].copy_from_slice(&5u32.to_le_bytes());
     bytes[header + 8..header + 16].copy_from_slice(&0x1000u64.to_le_bytes());
     bytes[header + 16..header + 24].copy_from_slice(&0x0010_0000u64.to_le_bytes());
-    bytes[header + 32..header + 40].copy_from_slice(&8u64.to_le_bytes());
+    bytes[header + 32..header + 40].copy_from_slice(&(USER_PROBE_CODE_LEN as u64).to_le_bytes());
     bytes[header + 40..header + 48].copy_from_slice(&0x1000u64.to_le_bytes());
     bytes[header + 48..header + 56].copy_from_slice(&0x1000u64.to_le_bytes());
-    bytes[0x1000..0x1008].copy_from_slice(code);
+    bytes[0x1000..0x1000 + USER_PROBE_CODE_LEN].copy_from_slice(code);
     bytes
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
 // textは`ecall`一命令と自己ループだけで、trap handlerへ到達できたこと以外を表明しない。
 fn user_entry_ecall_elf() -> [u8; USER_PROBE_ELF_LEN] {
-    user_probe_elf(&[0x73, 0x00, 0x00, 0x00, 0x6f, 0x00, 0x00, 0x00])
+    user_probe_elf(&[
+        0x73, 0x00, 0x00, 0x00, // ecall
+        0x6f, 0x00, 0x00, 0x00, // jal x0, 0
+        0x6f, 0x00, 0x00, 0x00, // jal x0, 0
+    ])
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-trap"))]
-// textは未map領域0x0000_0000への`sd x0, 0(x0)`でstore page fault (原因15)を
-// 起こす。faultしなければ自己ループで停止し、harnessのtimeoutが失敗を報告する。
+// textはU=0でmapされたUART page 0x1000_0000へのstoreでpage fault (原因15)を
+// 起こす。storeが通れば自己ループで停止し、harnessのtimeoutが失敗を報告する。
 fn user_trap_fault_elf() -> [u8; USER_PROBE_ELF_LEN] {
-    user_probe_elf(&[0x23, 0x30, 0x00, 0x00, 0x6f, 0x00, 0x00, 0x00])
+    user_probe_elf(&[
+        0xb7, 0x02, 0x00, 0x10, // lui t0, 0x10000
+        0x23, 0xb0, 0x02, 0x00, // sd x0, 0(t0)
+        0x6f, 0x00, 0x00, 0x00, // jal x0, 0
+    ])
 }
 
 #[cfg(all(

@@ -18,6 +18,7 @@ segmentの先頭と末尾がページ境界に一致しない場合は、周囲�
 ## 実装
 
 `ElfImage::parse`は入力byte sliceを借用し、ELF64、little-endian、RISC-V、`ET_EXEC`、program header表の範囲を検査します。
+MiniOSは動的loaderを持たないため、`PT_INTERP`または`PT_DYNAMIC`を含む実行ファイルを静的ELFとして受理しません。
 **`LoadPlan`**は最大8個の`PT_LOAD`を走査し、`p_filesz <= p_memsz`、alignment、`p_vaddr`と`p_offset`の合同条件、checked range、page単位の重複、user範囲、stackとの衝突、`W+X`、entry pointを検査します。
 空でないload segmentのpage合計は2,048ページまでで、すべてのheaderを検証し終えるまで物理フレームを確保しません。
 
