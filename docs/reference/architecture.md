@@ -74,7 +74,8 @@ payloadがあるbootでは検証済みの使用pageだけをS-mode read-onlyでm
   各user leafは`U=1`であり、`0x3ffe_f000..0x3fff_0000`のguard pageを未写像に保ちます。
 
 ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
-`UserRun`はkernel mappingとkernel trap stackを加えた後にrootを`satp`へ設定し、entry pointへ`sret`します。
+`load_image_with_kernel_mappings`はkernel mappingをborrowed leafとしてimageへ加え、`UserRun::new`はkernel trap stackを確保します。
+`__run_user`が実行用rootを`satp`へ設定してentry pointへ`sret`します。
 構築失敗時はbuilderが所有frameをrollbackし、`exit`またはfatal trap後は`UserRun::reclaim`がkernel trap stack、page table、user pageを回収します。
 
 ### U-mode system call

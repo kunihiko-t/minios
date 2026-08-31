@@ -101,7 +101,7 @@
     <figure>
       <svg viewBox="0 0 1280 720" role="img" aria-labelledby="sv39-loaded-image-architecture-title sv39-loaded-image-architecture-desc" xmlns="http://www.w3.org/2000/svg">
         <title id="sv39-loaded-image-architecture-title">Sv39と実行前ELFロードの構成</title>
-        <desc id="sv39-loaded-image-architecture-desc">QEMUとOpenSBIからkernel_mainを経てactiveなSv39カーネル空間を作る起動経路と、ELF64 byteを検証してinactiveなLoadedImageを作るロード経路が、同じFrameAllocatorからframeを確保しつつ、active側のKERNEL_ADDRESS_SPACE_STORAGEとinactive側のELF_ADDRESS_SPACE_STORAGEに別々のownership ledgerを保持し、vmとelfのQEMU harnessが両方をS-modeから観測する一方、U-modeはまだ実行しない構成です。</desc>
+        <desc id="sv39-loaded-image-architecture-desc">QEMUとOpenSBIからkernel_mainを経てactiveなSv39カーネル空間を作る起動経路と、ELF64 byteを検証してinactiveなLoadedImageを作るロード経路が、同じFrameAllocatorからframeを確保しつつ、active側のKERNEL_ADDRESS_SPACE_STORAGEとinactive側のELF_ADDRESS_SPACE_STORAGEに別々のownership ledgerを保持します。U-mode runtimeはLoadedImageをkernel mappingとtrap stackへ結び、writeとexitの後に所有frameを回収します。</desc>
         <defs>
           <marker id="sv39-loaded-image-architecture-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
