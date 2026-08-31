@@ -1,52 +1,31 @@
 use core::fmt::{self, Write};
 
-#[cfg(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::uart::Uart;
 
 /// Ready frame送信後に立てる。このmodeではguest UARTにplain textを混在させず、
 /// 通常出力も緊急出力もcontrol frameへ載せ替える。
-#[cfg(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit"))]
 static CONTROL_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Ready frameの送信が完了した後にcontrol.rsから呼ぶ。
-#[cfg(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit"))]
 pub fn enter_control_mode() {
     CONTROL_MODE.store(true, Ordering::Relaxed);
 }
 
-#[cfg(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit"))]
 fn control_mode() -> bool {
     CONTROL_MODE.load(Ordering::Relaxed)
 }
 
-// UART control writerを持たないbuildでは、Ready送信経路が存在しないため
-// control modeへ移行しない。
-#[cfg(not(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")))]
-fn control_mode() -> bool {
-    false
-}
-
-// control frameを載せる経路は、UART control writerを持つbuildだけに存在する。
-#[cfg(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit"))]
 fn control_diagnostic(text: &[u8]) {
     crate::control::send_diagnostic(text);
 }
 
-#[cfg(not(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")))]
-fn control_diagnostic(_text: &[u8]) {}
-
-#[cfg(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit"))]
 fn control_guest_error(text: &[u8]) {
     crate::control::send_guest_error(text);
 }
 
-#[cfg(not(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")))]
-fn control_guest_error(_text: &[u8]) {}
-
 /// control frameのheaderやpayloadなど、整形しないbyte列をUARTへそのまま書く。
-#[cfg(any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit"))]
 pub fn write_bytes(bytes: &[u8]) {
     let mut uart = Uart::qemu_virt();
     for byte in bytes {
