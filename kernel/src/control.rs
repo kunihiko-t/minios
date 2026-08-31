@@ -44,10 +44,6 @@ pub fn send_ready() {
     crate::console::enter_control_mode();
 }
 
-pub fn send_exit(code: u32) {
-    send_frame(FrameKind::Exit, &code.to_le_bytes());
-}
-
 pub fn send_guest_error(message: &[u8]) {
     send_frame(FrameKind::GuestError, message);
 }

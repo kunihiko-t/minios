@@ -9,6 +9,7 @@
 // RISC-Vバイナリー側は`main.rs`の`arch`を使い、起動シンボルの二重定義を避ける。
 #[cfg(not(target_arch = "riscv64"))]
 pub mod arch;
+pub mod boot_payload;
 pub mod elf;
 pub mod memory;
 pub mod sbi;

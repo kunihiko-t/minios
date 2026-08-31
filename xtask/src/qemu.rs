@@ -22,6 +22,11 @@ const USER_TRAP_REJECTED_MARKER: &str = "[MINIOS_TEST] user-trap: rejected";
 const USER_TRAP_OK_MARKER: &str = "[MINIOS_TEST] user-trap: ok";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
 const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
+const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\0\0";
+const PAYLOAD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x03\0\0\0MK6";
+const PAYLOAD_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK6";
+const PAYLOAD_EXIT_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
+const PAYLOAD_DIAGNOSTIC_FRAME: &[u8] = b"MCF1\x06\0\0\0\x1d\0\0\0\r\nMiniOS payload: ok code=42\n";
 const USER_EXIT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
@@ -43,6 +48,7 @@ pub enum TestKind {
     UserTrap,
     UserSyscall,
     UserExit,
+    Payload,
     Shell,
 }
 
@@ -59,6 +65,7 @@ impl TestKind {
             Self::UserTrap => "qemu-test-user-trap",
             Self::UserSyscall => "qemu-test-user-syscall",
             Self::UserExit => "qemu-test-user-exit",
+            Self::Payload => unreachable!("the payload test boots the normal kernel"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -75,6 +82,7 @@ impl TestKind {
             Self::UserTrap => USER_TRAP_REJECTED_MARKER,
             Self::UserSyscall => USER_SYSCALL_MARKER,
             Self::UserExit => USER_EXIT_MARKER,
+            Self::Payload => unreachable!("the payload test verifies raw control frames"),
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -118,6 +126,10 @@ pub enum QemuError {
     ForbiddenMarker {
         command: String,
         forbidden: &'static str,
+        output: String,
+    },
+    PayloadFrames {
+        command: String,
         output: String,
     },
     MissingControlFrame {
@@ -184,6 +196,11 @@ impl fmt::Display for QemuError {
                 "QEMU test printed the forbidden marker {forbidden}:\ncommand: {command}\n{}",
                 output.trim_end()
             ),
+            Self::PayloadFrames { command, output } => write!(
+                formatter,
+                "QEMU payload run did not emit the expected Ready/stdout/stderr/Exit/cleanup frame sequence:\ncommand: {command}\n{}",
+                output.trim_end()
+            ),
             Self::MissingControlFrame {
                 command,
                 expected,
@@ -227,6 +244,15 @@ pub fn run_kernel() -> Result<(), QemuError> {
 }
 
 pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError> {
+    if kind == TestKind::Payload {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_payload_result(&command_line, completed.status.code(), &completed.output);
+    }
+
     if kind == TestKind::Shell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let (command, command_line) = qemu_command(&kernel);
@@ -548,6 +574,282 @@ fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8
         .join()
         .map_err(|_| "output reader thread panicked".to_owned())?
         .map_err(|error| error.to_string())
+}
+
+fn qemu_command_with_payload(kernel: &Path, bundle: &Path) -> (Command, String) {
+    let mut args = qemu_args(kernel);
+    args.push("-device".to_owned());
+    args.push(format!(
+        "loader,file={},addr=0x87800000,force-raw=on",
+        bundle.display()
+    ));
+    let command_line = render_command(QEMU_PROGRAM, &args);
+    let mut command = Command::new(QEMU_PROGRAM);
+    command.args(&args);
+    (command, command_line)
+}
+
+/// payload検査で期待されるcontrol frame列 (Ready→stdout→stderr→Exit→cleanup)。
+fn expected_payload_frames() -> Vec<u8> {
+    let mut expected = Vec::new();
+    expected.extend_from_slice(PAYLOAD_READY_FRAME);
+    expected.extend_from_slice(PAYLOAD_STDOUT_FRAME);
+    expected.extend_from_slice(PAYLOAD_STDERR_FRAME);
+    expected.extend_from_slice(PAYLOAD_EXIT_FRAME);
+    expected.extend_from_slice(PAYLOAD_DIAGNOSTIC_FRAME);
+    expected
+}
+
+fn verify_payload_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let expected = expected_payload_frames();
+    let output_bytes = output.as_bytes();
+    if !output_bytes
+        .windows(expected.len())
+        .any(|window| window == expected)
+    {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+/// payload検査用の一時MiniBundle file。生成時に書き込み、removeで必ず消す。
+struct PayloadBundle {
+    path: std::path::PathBuf,
+}
+
+impl PayloadBundle {
+    fn create() -> Result<Self, QemuError> {
+        let path = std::env::temp_dir().join(format!(
+            "minios-payload-{}-{}.mcb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock must be after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&path, payload_bundle_bytes()).map_err(|error| QemuError::Spawn {
+            command: path.display().to_string(),
+            error: error.to_string(),
+        })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Drop for PayloadBundle {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+/// kernelに渡す決定的なpayload MiniBundle (manifest "hello" + payload ELF)。
+fn payload_bundle_bytes() -> Vec<u8> {
+    const MANIFEST: &[u8] = b"version=1\nname=hello\n";
+    let elf = payload_elf_bytes();
+    let manifest_end = 96 + MANIFEST.len();
+    let padding_len = (8 - manifest_end % 8) % 8;
+    let elf_offset = manifest_end + padding_len;
+    let total_len = elf_offset + elf.len();
+
+    let mut header = [0u8; 96];
+    header[0..8].copy_from_slice(b"MINICTR\0");
+    header[8..10].copy_from_slice(&1u16.to_le_bytes());
+    header[12..14].copy_from_slice(&96u16.to_le_bytes());
+    header[16..24].copy_from_slice(&(total_len as u64).to_le_bytes());
+    header[24..32].copy_from_slice(&(96u64).to_le_bytes());
+    header[32..40].copy_from_slice(&(MANIFEST.len() as u64).to_le_bytes());
+    header[40..48].copy_from_slice(&(elf_offset as u64).to_le_bytes());
+    header[48..56].copy_from_slice(&(elf.len() as u64).to_le_bytes());
+
+    let mut bytes = vec![0u8; total_len];
+    bytes[..96].copy_from_slice(&header);
+    bytes[96..manifest_end].copy_from_slice(MANIFEST);
+    bytes[elf_offset..].copy_from_slice(&elf);
+    // digest = SHA-256(digest fieldを0にしたheader || header以降の可変bytes)。
+    let mut digest_input = Vec::with_capacity(96 + total_len - 96);
+    let mut zeroed_header = header;
+    zeroed_header[56..88].fill(0);
+    digest_input.extend_from_slice(&zeroed_header);
+    digest_input.extend_from_slice(&bytes[96..]);
+    bytes[56..88].copy_from_slice(&sha256(&digest_input));
+    bytes
+}
+
+/// payload ELF: stdout "MK6"、stderr "MK6"、exit(42)を順に発行するだけの
+/// 決定的な1 segment RV64実行fileである。
+fn payload_elf_bytes() -> Vec<u8> {
+    const X0: u32 = 0;
+    const SP: u32 = 2;
+    const T0: u32 = 5;
+    const S0: u32 = 8;
+    const A0: u32 = 10;
+    const A1: u32 = 11;
+    const A2: u32 = 12;
+    const A7: u32 = 17;
+    let addi = |rd: u32, rs1: u32, imm: i16| {
+        (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (rd << 7) | 0x0013
+    };
+    let sb = |rs2: u32, rs1: u32, imm: i16| {
+        let imm = imm as u32;
+        (((imm >> 5) & 0x7f) << 25) | (rs2 << 20) | (rs1 << 15) | ((imm & 0x1f) << 7) | 0x0023
+    };
+    let ecall = || 0x0000_0073u32;
+
+    let mut code: Vec<u32> = Vec::new();
+    code.push(addi(S0, SP, -64));
+    for (offset, byte) in [(0_i16, 0x4d_i16), (1, 0x4b), (2, 0x36)] {
+        code.push(addi(T0, X0, byte));
+        code.push(sb(T0, S0, offset));
+    }
+    for descriptor in [1_u32, 2] {
+        code.push(addi(A0, X0, descriptor as i16));
+        code.push(addi(A1, S0, 0));
+        code.push(addi(A2, X0, 3));
+        code.push(addi(A7, X0, 1));
+        code.push(ecall());
+    }
+    // exit(42)
+    code.push(addi(A0, X0, 42));
+    code.push(addi(A7, X0, 2));
+    code.push(ecall());
+    // 到達しない安全ループ
+    code.push(0x0000_006f);
+
+    let code_bytes: Vec<u8> = code.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let elf_len = 0x1000 + code_bytes.len();
+    let mut bytes = vec![0u8; elf_len];
+    bytes[0..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+    bytes[18..20].copy_from_slice(&243u16.to_le_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+    bytes[24..32].copy_from_slice(&0x0010_0000u64.to_le_bytes());
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+    bytes[52..54].copy_from_slice(&64u16.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+    let header = 64;
+    bytes[header..header + 4].copy_from_slice(&1u32.to_le_bytes());
+    bytes[header + 4..header + 8].copy_from_slice(&5u32.to_le_bytes());
+    bytes[header + 8..header + 16].copy_from_slice(&0x1000u64.to_le_bytes());
+    bytes[header + 16..header + 24].copy_from_slice(&0x0010_0000u64.to_le_bytes());
+    bytes[header + 32..header + 40].copy_from_slice(&(code_bytes.len() as u64).to_le_bytes());
+    bytes[header + 40..header + 48].copy_from_slice(&0x1000u64.to_le_bytes());
+    bytes[header + 48..header + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+    bytes[0x1000..].copy_from_slice(&code_bytes);
+    bytes
+}
+
+/// SHA-256 (FIPS 180-4)。外部crateを追加せずにpayload digestを計算するための
+/// 最小実装である。
+mod sha256 {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    pub fn digest(message: &[u8]) -> [u8; 32] {
+        let mut h: [u32; 8] = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        let bit_len = (message.len() as u64).wrapping_mul(8);
+        let mut padded = message.to_vec();
+        padded.push(0x80);
+        while padded.len() % 64 != 56 {
+            padded.push(0);
+        }
+        padded.extend_from_slice(&bit_len.to_be_bytes());
+
+        for block in padded.chunks(64) {
+            let mut w = [0u32; 64];
+            for (index, word) in block.chunks(4).enumerate() {
+                w[index] = u32::from_be_bytes(word.try_into().expect("4-byte chunk"));
+            }
+            for index in 16..64 {
+                let s0 = w[index - 15].rotate_right(7)
+                    ^ w[index - 15].rotate_right(18)
+                    ^ (w[index - 15] >> 3);
+                let s1 = w[index - 2].rotate_right(17)
+                    ^ w[index - 2].rotate_right(19)
+                    ^ (w[index - 2] >> 10);
+                w[index] = w[index - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[index - 7])
+                    .wrapping_add(s1);
+            }
+            let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+                (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+            for index in 0..64 {
+                let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                let ch = (e & f) ^ ((!e) & g);
+                let temp1 = hh
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[index])
+                    .wrapping_add(w[index]);
+                let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                let maj = (a & b) ^ (a & c) ^ (b & c);
+                let temp2 = s0.wrapping_add(maj);
+                hh = g;
+                g = f;
+                f = e;
+                e = d.wrapping_add(temp1);
+                d = c;
+                c = b;
+                b = a;
+                a = temp1.wrapping_add(temp2);
+            }
+            h[0] = h[0].wrapping_add(a);
+            h[1] = h[1].wrapping_add(b);
+            h[2] = h[2].wrapping_add(c);
+            h[3] = h[3].wrapping_add(d);
+            h[4] = h[4].wrapping_add(e);
+            h[5] = h[5].wrapping_add(f);
+            h[6] = h[6].wrapping_add(g);
+            h[7] = h[7].wrapping_add(hh);
+        }
+        let mut digest = [0u8; 32];
+        for (index, word) in h.iter().enumerate() {
+            digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        digest
+    }
+}
+
+fn sha256(message: &[u8]) -> [u8; 32] {
+    sha256::digest(message)
 }
 
 fn qemu_command(kernel: &Path) -> (Command, String) {
@@ -1289,6 +1591,125 @@ mod tests {
             "shutting down",
         ]
         .join("\n")
+    }
+
+    // Catches a broken SHA-256 round (message schedule or padding drift)
+    // silently producing a digest that real importers would reject.
+    #[test]
+    fn sha256_matches_the_known_vectors() {
+        assert_eq!(
+            sha256(b""),
+            [
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+                0x78, 0x52, 0xb8, 0x55,
+            ]
+        );
+        assert_eq!(
+            sha256(b"abc"),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
+            ]
+        );
+    }
+
+    // Catches a bundle whose header, manifest, padding, ELF placement, or
+    // digest drifts from the canonical layout the kernel parser validates.
+    #[test]
+    fn payload_bundle_is_canonical_and_self_consistent() {
+        let bundle = payload_bundle_bytes();
+        assert_eq!(&bundle[0..8], b"MINICTR\0");
+        assert_eq!(&bundle[8..10], &1u16.to_le_bytes());
+        let total_len = u64::from_le_bytes(bundle[16..24].try_into().unwrap());
+        assert_eq!(total_len as usize, bundle.len());
+        let manifest_len = u64::from_le_bytes(bundle[32..40].try_into().unwrap()) as usize;
+        assert_eq!(&bundle[96..96 + manifest_len], b"version=1\nname=hello\n");
+        let manifest_end = 96 + manifest_len;
+        let elf_offset = u64::from_le_bytes(bundle[40..48].try_into().unwrap()) as usize;
+        assert_eq!(elf_offset, manifest_end + (8 - manifest_end % 8) % 8);
+        assert_eq!(
+            bundle[manifest_end..elf_offset],
+            vec![0u8; elf_offset - manifest_end]
+        );
+        assert!(bundle[elf_offset..].starts_with(b"\x7fELF"));
+        assert_eq!(
+            u64::from_le_bytes(bundle[48..56].try_into().unwrap()),
+            (bundle.len() - elf_offset) as u64
+        );
+
+        // digestを自力で再計算し、headerのdigest fieldと一致することへ確認する。
+        let mut digest_input = Vec::new();
+        let mut zeroed = bundle[..96].to_vec();
+        zeroed[56..88].fill(0);
+        digest_input.extend_from_slice(&zeroed);
+        digest_input.extend_from_slice(&bundle[96..]);
+        assert_eq!(&bundle[56..88], &sha256(&digest_input)[..]);
+    }
+
+    // Catches a payload ELF that stops emitting stdout/stderr/exit or changes
+    // the written bytes the frame assertions depend on.
+    #[test]
+    fn payload_elf_is_deterministic_and_minimal() {
+        assert_eq!(payload_elf_bytes(), payload_elf_bytes());
+        assert!(payload_elf_bytes().starts_with(b"\x7fELF"));
+        assert_eq!(payload_elf_bytes().len(), 0x1000 + 21 * 4);
+        // 最後の命令はecall (exit) であり、その手前はa7=2 (Exit) の設定である。
+        let code = &payload_elf_bytes()[0x1000..];
+        // 最後は安全ループ (jal x0, 0)、その手前がecall (exit) である。
+        assert_eq!(&code[code.len() - 4..], &0x0000_006fu32.to_le_bytes());
+        assert_eq!(
+            &code[code.len() - 8..code.len() - 4],
+            &0x0000_0073u32.to_le_bytes()
+        );
+    }
+
+    // Catches a loader argument drift that would place the bundle outside the
+    // reserved window the kernel validates.
+    #[test]
+    fn payload_qemu_command_carries_the_reserved_window_loader() {
+        let (command, command_line) =
+            qemu_command_with_payload(Path::new("kernel.elf"), Path::new("/tmp/hello.mcb"));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert!(contains_pair(
+            &args,
+            "-device",
+            "loader,file=/tmp/hello.mcb,addr=0x87800000,force-raw=on"
+        ));
+        assert!(command_line.contains("loader,file=/tmp/hello.mcb"));
+    }
+
+    // Catches a payload run that misses any of the five control frames or
+    // reorders them.
+    #[test]
+    fn payload_verification_requires_the_exact_frame_sequence() {
+        let mut output = "OpenSBI\n[ok] traps\n".to_owned();
+        for frame in expected_payload_frames() {
+            output.push(frame as char);
+        }
+        assert_eq!(
+            verify_payload_result(TEST_COMMAND, Some(0), &output).map(|_| ()),
+            Ok(())
+        );
+
+        let truncated = {
+            let expected = expected_payload_frames();
+            let mut output = String::from("boot\n");
+            output.push_str(&String::from_utf8_lossy(&expected[..expected.len() - 4]));
+            output
+        };
+        assert!(matches!(
+            verify_payload_result(TEST_COMMAND, Some(0), &truncated),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+        assert!(matches!(
+            verify_payload_result(TEST_COMMAND, Some(1), &output),
+            Err(QemuError::Failed { .. })
+        ));
     }
 
     #[test]

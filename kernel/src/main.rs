@@ -98,83 +98,47 @@ mod shell;
 #[cfg(target_arch = "riscv64")]
 mod time;
 
-#[cfg(all(
-    target_arch = "riscv64",
-    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
-))]
+#[cfg(target_arch = "riscv64")]
 mod control;
 
 #[cfg(target_arch = "riscv64")]
 use core::panic::PanicInfo;
 #[cfg(target_arch = "riscv64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_arch = "riscv64")]
+use minios_kernel::boot_payload::BootPayload;
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 use minios_kernel::elf::fixture::user_exit_probe_elf;
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-syscall"))]
 use minios_kernel::elf::fixture::user_syscall_probe_elf;
-#[cfg(all(
-    target_arch = "riscv64",
-    any(
-        feature = "qemu-test-user-entry",
-        feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
-    )
-))]
+#[cfg(target_arch = "riscv64")]
 use minios_kernel::elf::load::load_image_with_kernel_mappings;
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 use minios_kernel::memory::frame::{FrameStats, PhysFrame};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::memory::{
-    KernelSections, PHYSICAL_MEMORY_END,
+    BOOT_PAYLOAD_START, KernelSections, PHYSICAL_MEMORY_END,
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+#[cfg(target_arch = "riscv64")]
 use minios_kernel::user::run::{RunCompletion, RunOutcome, UserRun};
-#[cfg(all(
-    target_arch = "riscv64",
-    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
-))]
+#[cfg(target_arch = "riscv64")]
 use minios_kernel::user::syscall::{SyscallFlow, dispatch_syscall};
-#[cfg(all(
-    target_arch = "riscv64",
-    any(
-        feature = "qemu-test-user-entry",
-        feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
-    )
-))]
+#[cfg(target_arch = "riscv64")]
 use minios_kernel::user::trap::TrapAction;
-#[cfg(all(
-    target_arch = "riscv64",
-    any(
-        feature = "qemu-test-user-entry",
-        feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
-    )
-))]
+#[cfg(target_arch = "riscv64")]
 use minios_kernel::user::{RunExit, UserContext};
-#[cfg(all(
-    target_arch = "riscv64",
-    any(
-        feature = "qemu-test-user-entry",
-        feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
-    )
-))]
+#[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::AddressSpace;
-#[cfg(all(
-    target_arch = "riscv64",
-    any(feature = "qemu-test-vm", feature = "qemu-test-elf")
-))]
-use minios_kernel::vm::{AddressSpace, VirtAddr, VmError};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::{
     AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, PhysPageNum,
 };
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-vm", feature = "qemu-test-elf")
+))]
+use minios_kernel::vm::{VirtAddr, VmError};
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 use minios_kernel::{
     elf::{
@@ -239,34 +203,23 @@ struct UserProbeTrapStack([u8; USER_PROBE_TRAP_STACK_BYTES]);
 static mut USER_PROBE_TRAP_STACK: UserProbeTrapStack =
     UserProbeTrapStack([0; USER_PROBE_TRAP_STACK_BYTES]);
 
-#[cfg(all(
-    target_arch = "riscv64",
-    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
-))]
-// handlerへ渡すprobe imageのaddress spaceとframe store。
+// handlerへ渡す実行中imageのaddress spaceとframe store。test probeと
+// production payload pathの両方が使う。
 // Safety: `__run_user`の直前にrunnerが設定し、handlerだけが解参照する。
+// kernelへ戻った直後にrunnerが0へ戻す。
 static mut USER_SYSCALL_PROBE_SPACE: usize = 0;
-#[cfg(all(
-    target_arch = "riscv64",
-    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
-))]
 static mut USER_SYSCALL_PROBE_MEMORY: usize = 0;
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+#[cfg(target_arch = "riscv64")]
+static mut PAYLOAD_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
+
 static USER_EXIT_CODE: AtomicUsize = AtomicUsize::new(usize::MAX);
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 static USER_RUN_OUTCOME: AtomicUsize = AtomicUsize::new(USER_RUN_OUTCOME_NONE);
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 static USER_FATAL_SCAUSE: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 static USER_FATAL_STVAL: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 const USER_RUN_OUTCOME_NONE: usize = 0;
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 const USER_RUN_OUTCOME_EXIT: usize = 1;
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 const USER_RUN_OUTCOME_FATAL_TRAP: usize = 2;
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 const USER_RUN_OUTCOME_SINK_FAILURE: usize = 3;
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
@@ -315,9 +268,31 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         };
 
     let sections = kernel_sections();
+    // 予約窓はこの時点ではまだaddress spaceをactivateしていないbare mode
+    // (VA==PA) にあるため、物理addressから直接検証できる。loaderがpayloadを
+    // 置いていない場合はNoneとなり、shellへ抜ける。
+    let payload = if unsafe { BootPayload::reserved_window_has_bundle() } {
+        // Safety: `-m 128M`と`-device loader`が予約窓を有効RAMとして配置する。
+        match unsafe { BootPayload::from_reserved_window() } {
+            Ok(payload) => Some(payload),
+            Err(error) => fatal_payload_error(format_args!(
+                "MiniOS payload: invalid bundle, {error:?}\r\n"
+            )),
+        }
+    } else {
+        None
+    };
     let plan = match KernelMapPlan::new(&sections, managed_memory_start, PHYSICAL_MEMORY_END) {
         Ok(plan) => plan,
         Err(error) => panic!("invalid kernel mapping plan: {error:?}"),
+    };
+    // payloadが存在するときだけ、使用page (切り上げ) をS-mode read-onlyで
+    // kernel空間とuser空間のborrowed mappingへ加える。全8 MiBはmapしない。
+    let plan = match payload.as_ref() {
+        Some(payload) => plan
+            .with_payload_pages(BOOT_PAYLOAD_START, payload.total_len() as usize)
+            .unwrap_or_else(|error| panic!("invalid payload mapping plan: {error:?}")),
+        None => plan,
     };
     // Safety: QEMU virt exposes managed_memory_start..PHYSICAL_MEMORY_END as
     // valid RAM. Bare translation reaches it by identity before satp changes,
@@ -390,6 +365,10 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     #[cfg(feature = "qemu-test-memory")]
     {
         run_memory_test(&mut frames);
+    }
+
+    if let Some(payload) = payload {
+        run_boot_payload(&kernel_space, &plan, &mut frames, &mut memory, payload);
     }
 
     crate::println!("MiniOS booting...");
@@ -964,15 +943,7 @@ fn expect_zero_virtual<const N: usize>(
     Ok(())
 }
 
-#[cfg(all(
-    target_arch = "riscv64",
-    any(
-        feature = "qemu-test-user-entry",
-        feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
-    )
-))]
+#[cfg(target_arch = "riscv64")]
 unsafe extern "C" {
     // Safety: `user.S`が`sret`でU-modeへ降りる唯一の入口として公開するC ABI境界である。
     fn __run_user(
@@ -985,27 +956,86 @@ unsafe extern "C" {
     fn __user_trap_entry();
 }
 
-#[cfg(all(
-    target_arch = "riscv64",
-    any(
-        feature = "qemu-test-user-entry",
-        feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
-    )
-))]
+#[cfg(target_arch = "riscv64")]
 // `user.S`がシンボル名とC ABIを直接指定して呼ぶため、この名前とABIを変えてはならない。
-// a0はassemblyが組み立てたUserContextを受け取り、戻り値a0がRunExitになる。
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_user_trap_handler(context: *mut UserContext) -> RunExit {
+extern "C" fn rust_user_trap_handler(context: *mut UserContext) -> RunExit {
+    // Safety: `user.S`がtrap frameとして組み立てた直後のkernel stack上の
+    // 有効なcontextだけを渡す。
+    unsafe { rust_user_trap_handler_impl(context) }
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn rust_user_trap_handler_impl(context: *mut UserContext) -> RunExit {
     let scause = arch::riscv64::csr::read_scause();
     let stval = arch::riscv64::csr::read_stval();
-    // Safety: `user.S`がtrap frameとして組み立てた直後のkernel stack上のcontextである。
+    // Safety: 呼び出し側の契約により有効なcontextである。
     let context = unsafe { &mut *context };
     match minios_kernel::user::trap::handle_user_trap(context, scause, stval) {
         TrapAction::SystemCall => user_trap_system_call(context),
         TrapAction::Fatal { scause, stval } => user_trap_fatal(scause, stval),
     }
+}
+
+#[cfg(all(
+    target_arch = "riscv64",
+    not(any(
+        feature = "qemu-test-user-entry",
+        feature = "qemu-test-user-trap",
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
+    ))
+))]
+fn user_trap_system_call(context: &mut UserContext) -> RunExit {
+    // production payload path: dispatch staticsが設定されていない状態での
+    // syscall (shell経由など) は起こり得ない。0なら早期に FAIL へ落とす。
+    // Safety: 0比較のみで解参照しない。
+    if unsafe { USER_SYSCALL_PROBE_SPACE } == 0 {
+        crate::console::emergency_print(format_args!(
+            "MiniOS user syscall without an active run\r\n"
+        ));
+        arch::riscv64::sbi::system_reset(
+            arch::riscv64::sbi::ResetType::Shutdown,
+            arch::riscv64::sbi::ResetReason::SystemFailure,
+        );
+    }
+    // Safety: runnerが`__run_user`の直前に設定した単一hart静的参照である。
+    // handlerの実行中はrunnerがassembly内で待機しているため、同時にaliasしない。
+    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
+    let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
+    let flow = dispatch_syscall(context, space, memory, &mut control::UartControlSink);
+    match flow {
+        SyscallFlow::Resume => RunExit::Resume,
+        SyscallFlow::Exit(code) => {
+            USER_EXIT_CODE.store(code as usize, Ordering::Relaxed);
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXIT, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
+        SyscallFlow::Fatal(()) => {
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SINK_FAILURE, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "riscv64",
+    not(any(
+        feature = "qemu-test-user-entry",
+        feature = "qemu-test-user-trap",
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
+    ))
+))]
+fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
+    // fatal trapの診断はcontrol modeではGuestError frameとしてhostへ届く。
+    crate::console::emergency_print(format_args!(
+        "MiniOS user trap: scause={scause:#018x} stval={stval:#018x}\r\n"
+    ));
+    USER_FATAL_SCAUSE.store(scause, Ordering::Relaxed);
+    USER_FATAL_STVAL.store(stval, Ordering::Relaxed);
+    USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
+    RunExit::ReturnToKernel
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
@@ -1037,7 +1067,10 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
         SyscallFlow::Exit(code) => {
-            control::send_exit(code);
+            // このprobeのExit経路はsinkへ直接frameを1回載せる。
+            use minios_kernel::user::syscall::ControlSink as _;
+            let mut sink = control::UartControlSink;
+            let _ = sink.frame(minios_abi::control::FrameKind::Exit, &code.to_le_bytes());
             RunExit::ReturnToKernel
         }
         SyscallFlow::Fatal(()) => {
@@ -1414,6 +1447,146 @@ fn run_user_exit_test<const KERNEL_N: usize>(
             "user-exit returned without an outcome after cleanup"
         )),
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
+    // payload pathの失敗はhost (minictr) が即座に検出できるよう異常shutdownする。
+    crate::console::emergency_print(arguments);
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
+
+/// production payload path: Ready frameを送り、予約窓のELFをuser実行し、
+/// Exit後のresource回収を検証してからshutdownする。
+#[cfg(target_arch = "riscv64")]
+fn run_boot_payload<const KERNEL_N: usize>(
+    kernel_space: &AddressSpace<'_, KERNEL_N>,
+    plan: &KernelMapPlan,
+    frames: &mut FrameAllocator<512>,
+    memory: &mut IdentityFrameStore,
+    payload: BootPayload<'static>,
+) -> ! {
+    let before = frames.stats();
+    // Safety: このpathは単一boot hartでだけ実行し、このstorageを一度だけ取得する。
+    let storage_pointer = &raw mut PAYLOAD_ADDRESS_SPACE_STORAGE;
+    let storage = unsafe { storage_pointer.as_mut() }
+        .expect("a static payload storage pointer is never null");
+    if !storage.is_empty() {
+        fatal_payload_error(format_args!(
+            "MiniOS payload: storage precondition failed, len={}\r\n",
+            storage.len()
+        ));
+    }
+
+    let image = match load_image_with_kernel_mappings(
+        payload.elf(),
+        frames,
+        memory,
+        storage,
+        plan.mappings(),
+    ) {
+        Ok(image) => image,
+        Err(error) => fatal_payload_error(format_args!("MiniOS payload: load, {error:?}\r\n")),
+    };
+    // imageはUserRunへmoveされるため、entryとstack topは先にcontextへ固定する。
+    let mut context = UserContext::new(image.entry(), image.user_stack_top());
+    let kernel_root = PhysPageNum::from_start(kernel_space.root().as_u64())
+        .expect("kernel root page number is valid");
+    let mut run = match UserRun::new(image, frames, memory, kernel_root) {
+        Ok(run) => run,
+        Err(error) => fatal_payload_error(format_args!("MiniOS payload: run build, {error:?}\r\n")),
+    };
+
+    // Safety: pointer値を保存するだけでここでは解参照しない。handlerだけが
+    // assemblyの実行窓で読み、kernelへ戻った直後に0へ戻す。
+    unsafe {
+        USER_SYSCALL_PROBE_SPACE = run.address_space() as *const _ as usize;
+        USER_SYSCALL_PROBE_MEMORY = run.memory() as *const IdentityFrameStore as usize;
+    }
+
+    // payloadはtimer tickに依存せず、Supervisor timer割り込みはuser trapの
+    // 分類上Fatalなので、実行窓だけSTIEを無効化する。
+    const SIE_STIE: usize = 1 << 5;
+    // Safety: S-modeで`sie`と`stvec`を書く。
+    unsafe {
+        let sie = arch::riscv64::csr::read_sie();
+        arch::riscv64::csr::write_sie(sie & !SIE_STIE);
+        arch::riscv64::csr::write_stvec(__user_trap_entry as *const () as usize);
+    }
+
+    // Ready frameを最後のplain text出力の後に送り、以降のUARTをcontrol frame
+    // へ限定する。
+    control::send_ready();
+
+    let completion = {
+        let mut assembly_exit = RunExit::Resume;
+        let mut sink = control::UartControlSink;
+        let completion = run.execute(&mut sink, |launch| {
+            // Safety: runが両address space、frame memory、連続した専用trap stackを
+            // 所有する。assemblyはkernel satpとboot stackを復元してから戻る。
+            assembly_exit = unsafe {
+                __run_user(
+                    &raw mut context,
+                    launch.user_satp(),
+                    launch.kernel_satp(),
+                    launch.kernel_stack_top(),
+                )
+            };
+            if assembly_exit != RunExit::ReturnToKernel {
+                return RunOutcome::Fatal;
+            }
+            match USER_RUN_OUTCOME.load(Ordering::Relaxed) {
+                USER_RUN_OUTCOME_EXIT => {
+                    RunOutcome::Exit(USER_EXIT_CODE.load(Ordering::Relaxed) as u32)
+                }
+                _ => RunOutcome::Fatal,
+            }
+        });
+        // Safety: handlerが今後走らないkernel側へ戻ったため、danglingになり得る
+        // pointer値を解放前に無効化する。
+        unsafe {
+            USER_SYSCALL_PROBE_SPACE = 0;
+            USER_SYSCALL_PROBE_MEMORY = 0;
+        }
+        completion
+    };
+    let completion = match completion {
+        Ok(completion) => completion,
+        Err(error) => fatal_payload_error(format_args!("MiniOS payload: finish, {error:?}\r\n")),
+    };
+
+    let after = frames.stats();
+    let storage_len = storage.len();
+    if after != before || storage_len != 0 {
+        fatal_payload_error(format_args!(
+            "MiniOS payload: recovery, allocator expected={before:?} actual={after:?}; storage len={storage_len}\r\n"
+        ));
+    }
+
+    match completion {
+        RunCompletion::Exit(code) => {
+            // control mode中の唯一のplain text出力経路であり、Diagnostic frame
+            // としてhostへ届くresource cleanup markerである。
+            crate::println!("\r\nMiniOS payload: ok code={code}");
+            successful_payload_shutdown()
+        }
+        RunCompletion::Fatal => fatal_payload_error(format_args!(
+            "MiniOS payload: fatal, scause={:#018x} stval={:#018x}\r\n",
+            USER_FATAL_SCAUSE.load(Ordering::Relaxed),
+            USER_FATAL_STVAL.load(Ordering::Relaxed)
+        )),
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn successful_payload_shutdown() -> ! {
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::NoReason,
+    )
 }
 
 #[cfg(all(

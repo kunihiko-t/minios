@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use crate::memory::{KernelSections, frame::PAGE_SIZE};
+use crate::memory::{BOOT_PAYLOAD_END, KernelSections, frame::PAGE_SIZE};
 
 use super::{PageFlags, PhysAddr, VirtPage};
 
@@ -11,16 +11,19 @@ const UART_END: usize = UART_START + PAGE_SIZE;
 pub enum KernelMapError {
     Unaligned,
     InvalidManagedRange,
+    /// payload rangeが予約窓の外、非整列、またはmanaged範囲と隣接していない。
+    InvalidPayloadRange,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MappingRange {
     addresses: Range<usize>,
     flags: PageFlags,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KernelMapPlan {
-    ranges: [MappingRange; 6],
+    ranges: [MappingRange; 7],
 }
 
 impl KernelMapPlan {
@@ -62,8 +65,41 @@ impl KernelMapPlan {
                     addresses: UART_START..UART_END,
                     flags: PageFlags::supervisor_rw(),
                 },
+                // boot payloadの予約窓は既定では1pageもmapしない。
+                // with_payload_pagesが検証済みの使用pageだけをS-mode read-onlyで加える。
+                MappingRange {
+                    addresses: managed_end..managed_end,
+                    flags: PageFlags::supervisor_r(),
+                },
             ],
         })
+    }
+
+    /// boot payloadの使用page (4 KiB単位で切り上げ) だけをS-mode read-onlyで
+    /// 追加する。全8 MiBを常時mapしない。
+    ///
+    /// payload rangeはmanaged範囲の直後 (=予約窓の先端) から始まり、
+    /// 予約窓の中に収まらなければならない。
+    pub fn with_payload_pages(mut self, start: usize, len: usize) -> Result<Self, KernelMapError> {
+        let managed_end = self.ranges[4].addresses.end;
+        if len == 0 {
+            return Ok(self);
+        }
+        if start != managed_end || !start.is_multiple_of(PAGE_SIZE) {
+            return Err(KernelMapError::InvalidPayloadRange);
+        }
+        let page_count = len.div_ceil(PAGE_SIZE);
+        let end = start
+            .checked_add(page_count * PAGE_SIZE)
+            .ok_or(KernelMapError::InvalidPayloadRange)?;
+        if end > BOOT_PAYLOAD_END {
+            return Err(KernelMapError::InvalidPayloadRange);
+        }
+        self.ranges[6] = MappingRange {
+            addresses: start..end,
+            flags: PageFlags::supervisor_r(),
+        };
+        Ok(self)
     }
 
     pub fn flags_at(&self, address: usize) -> Option<PageFlags> {
@@ -115,7 +151,7 @@ impl KernelMapping {
 mod tests {
     extern crate std;
 
-    use super::KernelMapPlan;
+    use super::{KernelMapError, KernelMapPlan};
     use crate::{memory::KernelSections, vm::PageFlags};
     use std::{collections::BTreeSet, vec::Vec};
 
@@ -230,5 +266,72 @@ mod tests {
             let address = mapping.page().start().as_u64();
             !(0x8780_0000..0x8800_0000).contains(&address)
         }));
+    }
+
+    // Catches mapping the whole 8 MiB window, granting write or user access to
+    // payload pages, rounding pages down, or letting payload pages replace the
+    // identity mappings.
+    #[test]
+    fn payload_pages_map_exactly_the_used_pages_supervisor_read_only() {
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000)
+            .unwrap()
+            .with_payload_pages(0x8780_0000, 0x1234)
+            .unwrap();
+
+        // 0x1234 byteは2 pageへ切り上げされる。
+        assert_eq!(plan.flags_at(0x8780_0000), Some(PageFlags::supervisor_r()));
+        assert_eq!(plan.flags_at(0x8780_1000), Some(PageFlags::supervisor_r()));
+        assert_eq!(plan.flags_at(0x8780_2000), None);
+        for address in [0x8780_0000, 0x8780_1000] {
+            let flags = plan.flags_at(address).unwrap();
+            assert!(!flags.user());
+            assert!(!flags.write());
+            assert!(flags.read());
+        }
+
+        // 既存のidentity mappingはpayload pageに隣接したまま保たれる。
+        assert_eq!(plan.flags_at(0x877f_f000), Some(PageFlags::supervisor_rw()));
+        // 窓の残り (8 MiB - 8 KiB) はmapしない。
+        assert_eq!(plan.flags_at(0x8790_0000), None);
+        let payload_mappings = plan
+            .mappings()
+            .filter(|mapping| (0x8780_0000..0x8800_0000).contains(&mapping.page().start().as_u64()))
+            .count();
+        assert_eq!(payload_mappings, 2);
+    }
+
+    // Catches a payload range that does not start at the reserved window base
+    // or that reaches past the window end.
+    #[test]
+    fn payload_pages_reject_ranges_outside_the_reserved_window() {
+        let sections = fixture_sections();
+        let base = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000).unwrap();
+
+        assert_eq!(
+            base.clone().with_payload_pages(0x8780_0001, 0x1000),
+            Err(KernelMapError::InvalidPayloadRange)
+        );
+        assert_eq!(
+            base.clone().with_payload_pages(0x8790_0000, 0x1000),
+            Err(KernelMapError::InvalidPayloadRange)
+        );
+        assert_eq!(
+            base.with_payload_pages(0x8780_0000, 8 * 1024 * 1024 + 1),
+            Err(KernelMapError::InvalidPayloadRange)
+        );
+    }
+
+    // Catches a zero-length payload range changing the plan at all.
+    #[test]
+    fn payload_pages_accept_an_empty_range_as_a_no_op() {
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000)
+            .unwrap()
+            .with_payload_pages(0x8780_0000, 0)
+            .unwrap();
+
+        assert_eq!(plan.flags_at(0x8780_0000), None);
+        assert_eq!(plan.mappings().count(), 30_209);
     }
 }
