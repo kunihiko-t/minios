@@ -12,7 +12,8 @@
             feature = "qemu-test-elf",
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
-            feature = "qemu-test-user-syscall"
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit"
         )
     ),
     all(
@@ -24,7 +25,8 @@
             feature = "qemu-test-elf",
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
-            feature = "qemu-test-user-syscall"
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit"
         )
     ),
     all(
@@ -35,7 +37,8 @@
             feature = "qemu-test-elf",
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
-            feature = "qemu-test-user-syscall"
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit"
         )
     ),
     all(
@@ -45,7 +48,8 @@
             feature = "qemu-test-elf",
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
-            feature = "qemu-test-user-syscall"
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit"
         )
     ),
     all(
@@ -54,7 +58,8 @@
             feature = "qemu-test-elf",
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
-            feature = "qemu-test-user-syscall"
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit"
         )
     ),
     all(
@@ -62,14 +67,23 @@
         any(
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
-            feature = "qemu-test-user-syscall"
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit"
         )
     ),
     all(
         feature = "qemu-test-user-entry",
-        any(feature = "qemu-test-user-trap", feature = "qemu-test-user-syscall")
+        any(
+            feature = "qemu-test-user-trap",
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit"
+        )
     ),
-    all(feature = "qemu-test-user-trap", feature = "qemu-test-user-syscall")
+    all(
+        feature = "qemu-test-user-trap",
+        any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
+    ),
+    all(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
 ))]
 compile_error!("QEMU kernel test features are mutually exclusive; enable at most one");
 
@@ -84,13 +98,18 @@ mod shell;
 #[cfg(target_arch = "riscv64")]
 mod time;
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-syscall"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
+))]
 mod control;
 
 #[cfg(target_arch = "riscv64")]
 use core::panic::PanicInfo;
 #[cfg(target_arch = "riscv64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+use minios_kernel::elf::fixture::user_exit_probe_elf;
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-syscall"))]
 use minios_kernel::elf::fixture::user_syscall_probe_elf;
 #[cfg(all(
@@ -98,7 +117,8 @@ use minios_kernel::elf::fixture::user_syscall_probe_elf;
     any(
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 use minios_kernel::elf::load::load_image_with_kernel_mappings;
@@ -109,14 +129,20 @@ use minios_kernel::memory::{
     KernelSections, PHYSICAL_MEMORY_END,
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-syscall"))]
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+use minios_kernel::user::run::UserRun;
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
+))]
 use minios_kernel::user::syscall::{SyscallFlow, dispatch_syscall};
 #[cfg(all(
     target_arch = "riscv64",
     any(
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 use minios_kernel::user::trap::TrapAction;
@@ -125,7 +151,8 @@ use minios_kernel::user::trap::TrapAction;
     any(
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 use minios_kernel::user::{RunExit, UserContext};
@@ -134,7 +161,8 @@ use minios_kernel::user::{RunExit, UserContext};
     any(
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 use minios_kernel::vm::AddressSpace;
@@ -171,7 +199,8 @@ static mut ELF_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceSt
     any(
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 static mut USER_PROBE_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
@@ -210,12 +239,21 @@ struct UserProbeTrapStack([u8; USER_PROBE_TRAP_STACK_BYTES]);
 static mut USER_PROBE_TRAP_STACK: UserProbeTrapStack =
     UserProbeTrapStack([0; USER_PROBE_TRAP_STACK_BYTES]);
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-syscall"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
+))]
 // handlerへ渡すprobe imageのaddress spaceとframe store。
 // Safety: `__run_user`の直前にrunnerが設定し、handlerだけが解参照する。
 static mut USER_SYSCALL_PROBE_SPACE: usize = 0;
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-syscall"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
+))]
 static mut USER_SYSCALL_PROBE_MEMORY: usize = 0;
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+static USER_EXIT_CODE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 const ELF_FIXTURE_OWNED_FRAMES: usize = 23;
@@ -323,6 +361,11 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     ))]
     {
         run_user_mode_probe_test(&kernel_space, &plan, &mut frames, &mut memory);
+    }
+
+    #[cfg(feature = "qemu-test-user-exit")]
+    {
+        run_user_exit_test(&kernel_space, &plan, &mut frames, &mut memory);
     }
 
     #[cfg(feature = "qemu-test-elf")]
@@ -912,7 +955,8 @@ fn expect_zero_virtual<const N: usize>(
     any(
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 unsafe extern "C" {
@@ -932,7 +976,8 @@ unsafe extern "C" {
     any(
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 // `user.S`がシンボル名とC ABIを直接指定して呼ぶため、この名前とABIを変えてはならない。
@@ -993,6 +1038,31 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     }
 }
 
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+fn user_trap_system_call(context: &mut UserContext) -> RunExit {
+    // Safety: user-exit runnerが`__run_user`の直前に設定し、assemblyが
+    // kernelへ戻るまで所有する単一hart静的参照である。
+    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
+    let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
+    let flow = dispatch_syscall(context, space, memory, &mut control::UartControlSink);
+    match flow {
+        SyscallFlow::Resume => RunExit::Resume,
+        SyscallFlow::Exit(code) => {
+            USER_EXIT_CODE.store(code as usize, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
+        SyscallFlow::Fatal(()) => {
+            crate::console::emergency_print(format_args!(
+                "[MINIOS_TEST] failed: user-exit sink failure\r\n"
+            ));
+            arch::riscv64::sbi::system_reset(
+                arch::riscv64::sbi::ResetType::Shutdown,
+                arch::riscv64::sbi::ResetReason::SystemFailure,
+            )
+        }
+    }
+}
+
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
 fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
     crate::console::emergency_print(format_args!(
@@ -1026,6 +1096,17 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
     }
     crate::console::emergency_print(format_args!(
         "[MINIOS_TEST] failed: user-syscall unexpected fatal, scause={scause:#018x} stval={stval:#018x}\r\n"
+    ));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
+    crate::console::emergency_print(format_args!(
+        "[MINIOS_TEST] failed: user-exit unexpected fatal, scause={scause:#018x} stval={stval:#018x}\r\n"
     ));
     arch::riscv64::sbi::system_reset(
         arch::riscv64::sbi::ResetType::Shutdown,
@@ -1195,6 +1276,106 @@ fn run_user_mode_probe_test<const KERNEL_N: usize>(
     }
 }
 
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+fn run_user_exit_test<const KERNEL_N: usize>(
+    kernel_space: &AddressSpace<'_, KERNEL_N>,
+    plan: &KernelMapPlan,
+    frames: &mut FrameAllocator<512>,
+    memory: &mut IdentityFrameStore,
+) {
+    let before = frames.stats();
+    // Safety: このfeatureは単一boot hartでだけ実行し、このstorageを一度だけ
+    // 取得する。runを破棄するまで別の参照を作らない。
+    let storage_pointer = &raw mut USER_PROBE_ADDRESS_SPACE_STORAGE;
+    let storage = unsafe { storage_pointer.as_mut() }
+        .expect("a static user-exit storage pointer is never null");
+    if !storage.is_empty() {
+        fatal_qemu_test(format_args!(
+            "user-exit precondition: expected empty storage, actual len={}",
+            storage.len()
+        ));
+    }
+
+    let fixture = user_exit_probe_elf();
+    let image =
+        match load_image_with_kernel_mappings(&fixture, frames, memory, storage, plan.mappings()) {
+            Ok(image) => image,
+            Err(error) => fatal_qemu_test(format_args!("user-exit load: {error:?}")),
+        };
+    let mut context = UserContext::new(image.entry(), image.user_stack_top());
+    let kernel_root = PhysPageNum::from_start(kernel_space.root().as_u64())
+        .expect("kernel root page number is valid");
+    let mut run = match UserRun::new(image, frames, memory, kernel_root) {
+        Ok(run) => run,
+        Err(error) => fatal_qemu_test(format_args!("user-exit run build: {error:?}")),
+    };
+
+    USER_EXIT_CODE.store(usize::MAX, Ordering::Relaxed);
+    // Safety: pointer値を保存するだけでここでは解参照しない。handlerだけが
+    // assemblyの実行窓で読み、kernelへ戻った直後に両方をclearする。
+    unsafe {
+        USER_SYSCALL_PROBE_SPACE = run.address_space() as *const _ as usize;
+        USER_SYSCALL_PROBE_MEMORY = run.memory() as *const IdentityFrameStore as usize;
+    }
+
+    // probeはtimer tickに依存せず、Supervisor timer割り込みはuser trapの
+    // 分類上Fatalなので、実行窓だけSTIEを無効化する。
+    const SIE_STIE: usize = 1 << 5;
+    // Safety: S-modeで`sie`のSupervisor timer許可bitだけを落とす。
+    unsafe {
+        let sie = arch::riscv64::csr::read_sie();
+        arch::riscv64::csr::write_sie(sie & !SIE_STIE);
+        arch::riscv64::csr::write_stvec(__user_trap_entry as *const () as usize);
+    }
+
+    // Safety: runが両address space、frame memory、連続した専用trap stackを
+    // 所有する。assemblyがReturnToKernelを返す前にkernel satpとboot stackを
+    // 復元するため、戻った後だけresourceを回収する。
+    let exit = unsafe {
+        __run_user(
+            &raw mut context,
+            run.user_satp(),
+            run.kernel_satp(),
+            run.kernel_stack_top(),
+        )
+    };
+    // Safety: handlerが今後走らないkernel側へ戻ったため、danglingになり得る
+    // pointer値を解放前に無効化する。
+    unsafe {
+        USER_SYSCALL_PROBE_SPACE = 0;
+        USER_SYSCALL_PROBE_MEMORY = 0;
+    }
+
+    if exit != RunExit::ReturnToKernel {
+        fatal_qemu_test(format_args!(
+            "user-exit return: expected ReturnToKernel, actual {exit:?}"
+        ));
+    }
+    let code = USER_EXIT_CODE.load(Ordering::Relaxed);
+    if code != 42 {
+        fatal_qemu_test(format_args!("user-exit code: expected 42, actual {code}"));
+    }
+
+    let mut sink = control::UartControlSink;
+    if let Err(error) = run.finish_exit(code as u32, &mut sink) {
+        fatal_qemu_test(format_args!("user-exit finish: {error:?}"));
+    }
+    drop(run);
+
+    let after = frames.stats();
+    let storage_len = storage.len();
+    if after != before || storage_len != 0 {
+        fatal_qemu_test(format_args!(
+            "user-exit recovery: allocator expected={before:?} actual={after:?}; storage expected len=0 actual len={storage_len}"
+        ));
+    }
+
+    // 直前のstdout、stderr、Exitは改行を含まないbinary frameなので、markerを
+    // 独立した一行として始める。
+    crate::println!("\r\n[MINIOS_TEST] user-exit: ok code=42");
+    successful_qemu_test_shutdown()
+}
+
 #[cfg(all(
     target_arch = "riscv64",
     any(
@@ -1202,7 +1383,8 @@ fn run_user_mode_probe_test<const KERNEL_N: usize>(
         feature = "qemu-test-elf",
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -1219,7 +1401,8 @@ fn successful_qemu_test_shutdown() -> ! {
         feature = "qemu-test-elf",
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall"
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {

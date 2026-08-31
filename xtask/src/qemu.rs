@@ -21,6 +21,7 @@ const USER_ENTRY_MARKER: &str = "[MINIOS_TEST] user-entry: reached";
 const USER_TRAP_REJECTED_MARKER: &str = "[MINIOS_TEST] user-trap: rejected";
 const USER_TRAP_OK_MARKER: &str = "[MINIOS_TEST] user-trap: ok";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
+const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] = b"help\ninfo\nuptime\nmemory\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
@@ -38,6 +39,7 @@ pub enum TestKind {
     UserEntry,
     UserTrap,
     UserSyscall,
+    UserExit,
     Shell,
 }
 
@@ -53,6 +55,7 @@ impl TestKind {
             Self::UserEntry => "qemu-test-user-entry",
             Self::UserTrap => "qemu-test-user-trap",
             Self::UserSyscall => "qemu-test-user-syscall",
+            Self::UserExit => "qemu-test-user-exit",
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -68,6 +71,7 @@ impl TestKind {
             Self::UserEntry => USER_ENTRY_MARKER,
             Self::UserTrap => USER_TRAP_REJECTED_MARKER,
             Self::UserSyscall => USER_SYSCALL_MARKER,
+            Self::UserExit => USER_EXIT_MARKER,
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -806,6 +810,11 @@ mod tests {
             TestKind::UserSyscall.marker(),
             "[MINIOS_TEST] user-syscall: ok"
         );
+        assert_eq!(TestKind::UserExit.feature(), "qemu-test-user-exit");
+        assert_eq!(
+            TestKind::UserExit.marker(),
+            "[MINIOS_TEST] user-exit: ok code=42"
+        );
         for kind in [
             TestKind::Boot,
             TestKind::Timer,
@@ -815,6 +824,7 @@ mod tests {
             TestKind::Elf,
             TestKind::UserEntry,
             TestKind::UserSyscall,
+            TestKind::UserExit,
             TestKind::Shell,
         ] {
             assert_eq!(kind.forbidden_marker(), None);
