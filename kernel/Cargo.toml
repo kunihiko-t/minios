@@ -16,6 +16,7 @@ qemu-test-memory = []
 qemu-test-vm = []
 qemu-test-elf = []
 qemu-test-user-entry = []
+qemu-test-user-trap = []
 
 [lib]
 path = "src/lib.rs"

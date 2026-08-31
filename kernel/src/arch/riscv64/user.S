@@ -3,15 +3,19 @@
  * C ABI: __run_user(a0=&UserContext, a1=user_satp, a2=kernel_satp,
  * a3=kernel_stack_top) -> a0=RunExit discriminant.
  *
- * kernel trap stack上部には144バイトの固定headerを置く。`user.S`とRust側が
+ * kernel trap stack上位には144バイトの固定headerを置く。`user.S`とRust側が
  * このoffset規約を共有するため、片方だけを変更してはならない。
  *   0(sp)  ra              64(sp)  s4            112(sp) s11
  *   8(sp)  gp              72(sp)  s5            120(sp) 呼び出し側のboot stack sp
  *  16(sp)  tp              80(sp)  s6            128(sp) kernel satp
- *  24(sp)  s0              88(sp)  s7            136(sp) RunExit結果slot
+ *  24(sp)  s0              88(sp)  s7            136(sp) 予約（未使用）
  *  32(sp)  s1              96(sp)  s8
  *  40(sp)  s2             104(sp)  s9
  *  48(sp)  s3                                       header合計 = 144 bytes
+ *
+ * trap frameのUserContext（34語、272バイト）はheaderの直下
+ * [kernel_stack_top-416, kernel_stack_top-144) に置く。
+ * register i は 8*i、sepc=256、sstatus=264 が`UserContext`のC ABI layoutである。
  */
 .section .text.user, "ax"
 .balign 4
@@ -87,31 +91,120 @@ __run_user:
     sret
 .size __run_user, . - __run_user
 
-/* user trap入口。stvecは実行前にここを指す。sscratchとの交換で
- * kernel trap stack topへ降り、user spはsscratchへ退避する。
- * handlerは固定headerの下に専用frameを確保してから呼ぶ。headerを
- * 上書きするとkernel復帰値が壊れるため、frame幅はheaderと無関係に保つ。
- * a0には固定header内のRunExit結果slot地址を渡す。 */
+/* user trap入口。stvecは実行前にここを指す。
+ * 最初の命令でsscratchとspを交換し、spをkernel trap stack topへ降ろす。
+ * 交換後のkernel stack上にUserContextを組み立て、x1とx3..x31を保存し、
+ * 交換前のuser spをsscratchから読んでregisters[2]へ、sepcとsstatusも
+ * contextへ保存してからhandlerへ渡す。handlerの戻り値a0がRunExitである。
+ * Resume(0)ならcontextから逆順に復元してsretし、
+ * ReturnToKernel(1)なら固定header経由でkernelへ戻る。 */
+.balign 4
 .globl __user_trap_entry
 .type __user_trap_entry, @function
 __user_trap_entry:
     csrrw sp, sscratch, sp
-    addi a0, sp, -8
+    addi sp, sp, -416
+    sd ra,   8(sp)
+    sd gp,  24(sp)
+    sd tp,  32(sp)
+    sd t0,  40(sp)
+    sd t1,  48(sp)
+    sd t2,  56(sp)
+    sd s0,  64(sp)
+    sd s1,  72(sp)
+    sd a0,  80(sp)
+    sd a1,  88(sp)
+    sd a2,  96(sp)
+    sd a3, 104(sp)
+    sd a4, 112(sp)
+    sd a5, 120(sp)
+    sd a6, 128(sp)
+    sd a7, 136(sp)
+    sd s2, 144(sp)
+    sd s3, 152(sp)
+    sd s4, 160(sp)
+    sd s5, 168(sp)
+    sd s6, 176(sp)
+    sd s7, 184(sp)
+    sd s8, 192(sp)
+    sd s9, 200(sp)
+    sd s10, 208(sp)
+    sd s11, 216(sp)
+    sd t3, 224(sp)
+    sd t4, 232(sp)
+    sd t5, 240(sp)
+    sd t6, 248(sp)
+    /* t0..t2のuser値は保存済み。以降のcsrr退避にt0を使う。 */
+    csrr t0, sscratch
+    sd t0,  16(sp)
+    csrr t0, sepc
+    sd t0, 256(sp)
+    csrr t0, sstatus
+    sd t0, 264(sp)
+    mv a0, sp
+    /* handlerはcontextの直下に専用frameを確保して呼ぶ。
+     * headerとcontextを上書きするとkernel復帰値が壊れるため、frame幅は
+     * それらと無関係に保つ。1920 - 416 = 2336 byte使用し、stackは4 KiB page内に収まる。 */
     addi sp, sp, -1920
     call rust_user_trap_handler
-    addi sp, sp, 1776
+    addi sp, sp, 1920
+    bnez a0, 2f
+    /* Resume: 次のuser trapに備えてsscratchへkernel stack topを戻してから、
+     * sstatus・sepcをcontextの値でCSRへ書き戻し、registerを逆順に復元する。 */
+    addi t1, sp, 416
+    csrw sscratch, t1
+    ld t1, 264(sp)
+    csrw sstatus, t1
+    ld t1, 256(sp)
+    csrw sepc, t1
+    mv t0, sp
+    ld ra,   8(t0)
+    ld sp,  16(t0)
+    ld gp,  24(t0)
+    ld tp,  32(t0)
+    ld t1,  48(t0)
+    ld t2,  56(t0)
+    ld s0,  64(t0)
+    ld s1,  72(t0)
+    ld a0,  80(t0)
+    ld a1,  88(t0)
+    ld a2,  96(t0)
+    ld a3, 104(t0)
+    ld a4, 112(t0)
+    ld a5, 120(t0)
+    ld a6, 128(t0)
+    ld a7, 136(t0)
+    ld s2, 144(t0)
+    ld s3, 152(t0)
+    ld s4, 160(t0)
+    ld s5, 168(t0)
+    ld s6, 176(t0)
+    ld s7, 184(t0)
+    ld s8, 192(t0)
+    ld s9, 200(t0)
+    ld s10, 208(t0)
+    ld s11, 216(t0)
+    ld t3, 224(t0)
+    ld t4, 232(t0)
+    ld t5, 240(t0)
+    ld t6, 248(t0)
+    ld t0, 40(t0)
+    sret
+2:
+    /* spをcontext baseから固定header baseへ戻し、kernelへ復帰する。 */
+    addi sp, sp, 272
     j __user_run_leave
 .size __user_trap_entry, . - __user_trap_entry
 
 /* kernel address spaceとboot stackを復元し、Rust callerへRunExitを返す。
- * spは固定headerのbase、つまりkernel_stack_top - 144でなければならない。 */
+ * spは固定headerのbase、つまりkernel_stack_top - 144でなければならない。
+ * a0にはhandlerが返したRunExitが入ったままなので、ここでは決して書き換えない。 */
 .globl __user_run_leave
 .type __user_run_leave, @function
 __user_run_leave:
     ld t0, 128(sp)
     csrw satp, t0
     sfence.vma zero, zero
-    ld a0, 136(sp)
     ld ra,   0(sp)
     ld gp,   8(sp)
     ld tp,  16(sp)
