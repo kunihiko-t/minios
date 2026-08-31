@@ -299,9 +299,98 @@ pub fn user_syscall_probe_elf() -> [u8; USER_SYSCALL_ELF_LEN] {
     bytes
 }
 
+const EXIT_PROBE_CODE_WORDS: usize = 22;
+const EXIT_PROBE_FAIL_INDEX: usize = 20;
+const USER_EXIT_ELF_LEN: usize = 0x1000 + EXIT_PROBE_CODE_WORDS * 4;
+
+fn assemble_exit_probe() -> [u32; EXIT_PROBE_CODE_WORDS] {
+    let mut code = [0u32; EXIT_PROBE_CODE_WORDS];
+    let mut i = 0;
+
+    // s0 = sp - 64へ"MK5"を置く。
+    code[i] = addi(S0, SP, -64);
+    i += 1;
+    for (offset, byte) in [(0_i16, 0x4d_i16), (1, 0x4b), (2, 0x35)] {
+        code[i] = addi(T0, X0, byte);
+        i += 1;
+        code[i] = sb(T0, S0, offset);
+        i += 1;
+    }
+
+    // write(1, s0, 3)
+    code[i] = addi(A0, X0, 1);
+    i += 1;
+    code[i] = addi(A1, S0, 0);
+    i += 1;
+    code[i] = addi(A2, X0, 3);
+    i += 1;
+    code[i] = addi(A7, X0, 1);
+    i += 1;
+    code[i] = ecall();
+    i += 1;
+
+    // write(2, s0, 3)
+    code[i] = addi(A0, X0, 2);
+    i += 1;
+    code[i] = addi(A1, S0, 0);
+    i += 1;
+    code[i] = addi(A2, X0, 3);
+    i += 1;
+    code[i] = addi(A7, X0, 1);
+    i += 1;
+    code[i] = ecall();
+    i += 1;
+
+    // exit(42)。kernelが復帰した場合だけfail blockへ落ちる。
+    code[i] = addi(A0, X0, 42);
+    i += 1;
+    code[i] = addi(A7, X0, 2);
+    i += 1;
+    code[i] = ecall();
+    i += 1;
+    assert!(i == EXIT_PROBE_FAIL_INDEX, "exit probe layout drifted");
+    code[i] = sd(X0, X0, 0);
+    code[i + 1] = jal_self();
+    code
+}
+
+/// stdout、stderr、`exit(42)`とkernel側resource回収を実QEMUで検査するfixture。
+pub fn user_exit_probe_elf() -> [u8; USER_EXIT_ELF_LEN] {
+    let code = assemble_exit_probe();
+    let mut bytes = [0u8; USER_EXIT_ELF_LEN];
+    bytes[0..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+    bytes[18..20].copy_from_slice(&243u16.to_le_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+    bytes[24..32].copy_from_slice(&0x0010_0000u64.to_le_bytes());
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+    bytes[52..54].copy_from_slice(&64u16.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+    let header = 64;
+    bytes[header..header + 4].copy_from_slice(&1u32.to_le_bytes());
+    bytes[header + 4..header + 8].copy_from_slice(&5u32.to_le_bytes());
+    bytes[header + 8..header + 16].copy_from_slice(&0x1000u64.to_le_bytes());
+    bytes[header + 16..header + 24].copy_from_slice(&0x0010_0000u64.to_le_bytes());
+    bytes[header + 32..header + 40].copy_from_slice(&(EXIT_PROBE_CODE_WORDS * 4).to_le_bytes());
+    bytes[header + 40..header + 48].copy_from_slice(&0x1000u64.to_le_bytes());
+    bytes[header + 48..header + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+    for (index, word) in code.iter().enumerate() {
+        let offset = 0x1000 + index * 4;
+        bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod probe_tests {
-    use super::{PROBE_FAIL_INDEX, USER_SYSCALL_ELF_LEN, X0, ebreak, sd, user_syscall_probe_elf};
+    use super::{
+        PROBE_FAIL_INDEX, USER_SYSCALL_ELF_LEN, X0, ebreak, sd, user_exit_probe_elf,
+        user_syscall_probe_elf,
+    };
     use crate::elf::{ElfImage, LoadPlan};
 
     // Catches an ELF envelope that the kernel loader or planner would reject.
@@ -335,5 +424,22 @@ mod probe_tests {
         // fail blockは未map先0x0へのsd (0x00003023... sd x0,0(x0)) である。
         assert_eq!(word, sd(X0, X0, 0).to_le_bytes());
         assert_eq!(bytes.len(), USER_SYSCALL_ELF_LEN);
+    }
+
+    // Catches an exit fixture envelope that the real loader rejects before
+    // the QEMU test can exercise stdout, stderr, exit, and reclamation.
+    #[test]
+    fn exit_probe_elf_is_a_loadable_user_executable() {
+        let bytes = user_exit_probe_elf();
+        let image = ElfImage::parse(&bytes).unwrap();
+        let plan = LoadPlan::new(&image).unwrap();
+
+        assert_eq!(image.entry().as_u64(), 0x0010_0000);
+        assert_eq!(plan.segments().count(), 1);
+        let segment = plan.segments().into_iter().next().unwrap();
+        assert!(segment.flags().user());
+        assert!(segment.flags().read());
+        assert!(segment.flags().execute());
+        assert!(!segment.flags().write());
     }
 }

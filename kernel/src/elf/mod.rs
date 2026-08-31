@@ -11,5 +11,10 @@ pub use plan::{
     USER_STACK_TOP, USER_START,
 };
 
-#[cfg(any(test, feature = "qemu-test-elf", feature = "qemu-test-user-syscall"))]
+#[cfg(any(
+    test,
+    feature = "qemu-test-elf",
+    feature = "qemu-test-user-syscall",
+    feature = "qemu-test-user-exit"
+))]
 pub mod fixture;
