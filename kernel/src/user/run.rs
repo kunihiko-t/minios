@@ -64,6 +64,8 @@ impl<const N: usize, E: fmt::Debug> fmt::Debug for RunBuildFailure<'_, N, E> {
 /// user実行の終了または回収時の失敗。
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunError<E> {
+    /// 回収済みのrunを再びarchitecture入口へ渡そうとした。
+    AlreadyExecuted,
     /// Exit control frameをsinkへ渡せなかった。
     Sink(E),
     /// user imageまたはkernel trap stackを回収できなかった。
@@ -120,6 +122,7 @@ pub struct UserRun<'run, const N: usize, const WORDS: usize, M: FrameStore> {
     kernel_stack_bottom: usize,
     user_satp: u64,
     kernel_satp: u64,
+    executed: bool,
 }
 
 impl<const N: usize, const WORDS: usize, M: FrameStore> fmt::Debug for UserRun<'_, N, WORDS, M> {
@@ -193,6 +196,7 @@ impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, W
             kernel_stack_bottom: stack_bottom.expect("kernel stack has at least one page"),
             user_satp: sv39_satp_bits(user_root),
             kernel_satp: sv39_satp_bits(kernel_root),
+            executed: false,
         })
     }
 
@@ -241,6 +245,10 @@ impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, W
         S: ControlSink,
         F: FnOnce(UserLaunch) -> RunOutcome,
     {
+        if self.executed {
+            return Err(RunError::AlreadyExecuted);
+        }
+        self.executed = true;
         let launch = UserLaunch {
             user_satp: self.user_satp,
             kernel_satp: self.kernel_satp,
@@ -275,6 +283,7 @@ impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, W
     ///
     /// 失敗した所有権はstruct内へ戻すため、呼び出し側は同じrunで再試行できる。
     pub fn reclaim(&mut self) -> Result<(), FrameError> {
+        self.executed = true;
         for index in (0..KERNEL_STACK_PAGES).rev() {
             let Some(frame) = self.kernel_stack[index].take() else {
                 continue;
@@ -611,6 +620,53 @@ mod tests {
 
         assert_eq!(completion, RunCompletion::Fatal);
         assert!(sink.frames.is_empty());
+        assert_eq!(fixture.frames.stats(), before);
+        assert!(fixture.storage.is_empty());
+    }
+
+    // Catches launching again with the stale SATP and trap-stack addresses
+    // left behind after the first execution reclaimed every owned frame.
+    #[test]
+    fn reclaimed_run_rejects_a_second_execution() {
+        let mut fixture = RunFixture::new();
+        let before = fixture.baseline();
+        let mut sink = FakeSink::default();
+        let mut run = fixture.build_run();
+
+        assert_eq!(
+            run.execute(&mut sink, |_| RunOutcome::Fatal),
+            Ok(RunCompletion::Fatal)
+        );
+        let mut entered_again = false;
+        let second = run.execute(&mut sink, |_| {
+            entered_again = true;
+            RunOutcome::Fatal
+        });
+
+        assert_eq!(second, Err(RunError::AlreadyExecuted));
+        assert!(!entered_again);
+        assert_eq!(fixture.frames.stats(), before);
+        assert!(fixture.storage.is_empty());
+    }
+
+    // Catches explicitly reclaiming an inactive run and then launching with
+    // the addresses of the page tables and trap stack that reclaim released.
+    #[test]
+    fn explicitly_reclaimed_run_cannot_be_executed() {
+        let mut fixture = RunFixture::new();
+        let before = fixture.baseline();
+        let mut sink = FakeSink::default();
+        let mut run = fixture.build_run();
+
+        run.reclaim().unwrap();
+        let mut entered = false;
+        let outcome = run.execute(&mut sink, |_| {
+            entered = true;
+            RunOutcome::Fatal
+        });
+
+        assert_eq!(outcome, Err(RunError::AlreadyExecuted));
+        assert!(!entered);
         assert_eq!(fixture.frames.stats(), before);
         assert!(fixture.storage.is_empty());
     }

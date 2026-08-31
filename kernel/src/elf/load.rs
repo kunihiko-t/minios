@@ -800,7 +800,7 @@ mod tests {
     }
 
     // Catches normal destruction retaining any frame/storage token and proves
-    // the same storage can immediately own another complete image.
+    // a reused executable frame is overwritten by the next complete image.
     #[test]
     fn successful_destroy_restores_allocator_and_reuses_storage() {
         let bytes = fixture::valid_riscv64_elf();
@@ -808,14 +808,28 @@ mod tests {
         let before = allocator.stats();
         let mut memory = TestFrameStore::default();
         let mut storage = AddressSpaceStorage::<2688>::new();
+        let entry = VirtAddr::try_new(0x0010_0000).unwrap();
 
         let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let first_text_frame = image.address_space().translate(&memory, entry).unwrap().0;
+        assert_eq!(
+            read_virtual(&image, &memory, 0x0010_0000, 4),
+            [0x13, 0, 0, 0]
+        );
         assert!(allocator.stats().allocated > 0);
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
         assert_eq!(storage.len(), 0);
 
-        let second = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let mut replacement = fixture::valid_riscv64_elf();
+        replacement[0x1000..0x1004].copy_from_slice(&0x0010_0073_u32.to_le_bytes());
+        let second = load_image(&replacement, &mut allocator, &mut memory, &mut storage).unwrap();
+        let second_text_frame = second.address_space().translate(&memory, entry).unwrap().0;
+        assert_eq!(second_text_frame, first_text_frame);
+        assert_eq!(
+            read_virtual(&second, &memory, 0x0010_0000, 4),
+            0x0010_0073_u32.to_le_bytes()
+        );
         second.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
         assert_eq!(storage.len(), 0);

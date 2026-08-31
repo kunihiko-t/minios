@@ -21,6 +21,8 @@ const ELF_MARKER: &str = "[MINIOS_TEST] elf: ok";
 const USER_ENTRY_MARKER: &str = "[MINIOS_TEST] user-entry: reached";
 const USER_TRAP_REJECTED_MARKER: &str = "[MINIOS_TEST] user-trap: rejected";
 const USER_TRAP_OK_MARKER: &str = "[MINIOS_TEST] user-trap: ok";
+const USER_TRAP_FAULT_DIAGNOSTIC: &str =
+    "MiniOS user trap: scause=0x000000000000000f stval=0x0000000010000000";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
 const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
 const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\0\0";
@@ -987,6 +989,17 @@ fn verify_test_result(
             output: output.to_owned(),
         });
     }
+    if kind == TestKind::UserTrap
+        && !normalized
+            .lines()
+            .any(|line| line == USER_TRAP_FAULT_DIAGNOSTIC)
+    {
+        return Err(QemuError::MissingMarker {
+            command: command.to_owned(),
+            expected: USER_TRAP_FAULT_DIAGNOSTIC,
+            output: output.to_owned(),
+        });
+    }
     if kind == TestKind::UserExit {
         verify_user_exit_control_frames(command, output)?;
     }
@@ -1233,10 +1246,22 @@ mod tests {
     #[test]
     fn user_trap_rejection_requires_the_marker_and_forbids_the_success_marker() {
         let rejected = "OpenSBI\r\n[MINIOS_TEST] user-trap: rejected\r\n";
+        let supervisor_page_rejected = concat!(
+            "OpenSBI\r\n",
+            "[MINIOS_TEST] user-trap: rejected\r\n",
+            "MiniOS user trap: scause=0x000000000000000f ",
+            "stval=0x0000000010000000\r\n",
+        );
 
+        assert!(verify_test_result(TEST_COMMAND, TestKind::UserTrap, Some(0), rejected).is_err());
         assert_eq!(
-            verify_test_result(TEST_COMMAND, TestKind::UserTrap, Some(0), rejected),
-            Ok(rejected.to_owned())
+            verify_test_result(
+                TEST_COMMAND,
+                TestKind::UserTrap,
+                Some(0),
+                supervisor_page_rejected
+            ),
+            Ok(supervisor_page_rejected.to_owned())
         );
         assert_eq!(
             verify_test_result(

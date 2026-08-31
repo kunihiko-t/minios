@@ -5,13 +5,13 @@
  *
  * kernel trap stack上位には144バイトの固定headerを置く。`user.S`とRust側が
  * このoffset規約を共有するため、片方だけを変更してはならない。
- *   0(sp)  ra              64(sp)  s4            112(sp) s11
- *   8(sp)  gp              72(sp)  s5            120(sp) 呼び出し側のboot stack sp
- *  16(sp)  tp              80(sp)  s6            128(sp) kernel satp
- *  24(sp)  s0              88(sp)  s7            136(sp) 予約（未使用）
- *  32(sp)  s1              96(sp)  s8
- *  40(sp)  s2             104(sp)  s9
- *  48(sp)  s3                                       header合計 = 144 bytes
+ *   0(sp)  ra              56(sp)  s4            112(sp) s11
+ *   8(sp)  gp              64(sp)  s5            120(sp) 呼び出し側のboot stack sp
+ *  16(sp)  tp              72(sp)  s6            128(sp) kernel satp
+ *  24(sp)  s0              80(sp)  s7            136(sp) 予約（未使用）
+ *  32(sp)  s1              88(sp)  s8
+ *  40(sp)  s2              96(sp)  s9
+ *  48(sp)  s3             104(sp)  s10            header合計 = 144 bytes
  *
  * trap frameのUserContext（34語、272バイト）はheaderの直下
  * [kernel_stack_top-416, kernel_stack_top-144) に置く。
@@ -49,6 +49,8 @@ __run_user:
     csrw sscratch, a3
     csrw satp, a1
     sfence.vma zero, zero
+    /* loaderが通常storeで書いたuser textを、このhartの後続fetchへ反映する。 */
+    fence.i
     /* user PCとsstatusをCSRへ復元する。sstatusはSPP=0、SPIE=1なので、
      * sretはU-modeへ遷移しSIEへSPIEをコピーする。 */
     ld t1, 256(a0)

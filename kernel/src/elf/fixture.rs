@@ -152,7 +152,7 @@ fn jal_self() -> u32 {
 fn assemble_syscall_probe() -> [u32; PROBE_CODE_WORDS] {
     let mut code = [0u32; PROBE_CODE_WORDS];
     let mut i = 0;
-    let branch_to_fail = |from: usize| bne(A0, T1, ((PROBE_FAIL_INDEX - from - 1) * 4) as i32);
+    let branch_to_fail = |from: usize| bne(A0, T1, ((PROBE_FAIL_INDEX - from) * 4) as i32);
 
     // s0 = sp - 64 (0x3fff_ffc0)。"MK4"をuser stackへ組み立てる。
     code[i] = addi(S0, SP, -64);
@@ -388,8 +388,8 @@ pub fn user_exit_probe_elf() -> [u8; USER_EXIT_ELF_LEN] {
 #[cfg(test)]
 mod probe_tests {
     use super::{
-        PROBE_FAIL_INDEX, USER_SYSCALL_ELF_LEN, X0, ebreak, sd, user_exit_probe_elf,
-        user_syscall_probe_elf,
+        PROBE_FAIL_INDEX, USER_SYSCALL_ELF_LEN, X0, assemble_syscall_probe, ebreak, sd,
+        user_exit_probe_elf, user_syscall_probe_elf,
     };
     use crate::elf::{ElfImage, LoadPlan};
 
@@ -424,6 +424,31 @@ mod probe_tests {
         // fail blockは未map先0x0へのsd (0x00003023... sd x0,0(x0)) である。
         assert_eq!(word, sd(X0, X0, 0).to_le_bytes());
         assert_eq!(bytes.len(), USER_SYSCALL_ELF_LEN);
+    }
+
+    // Catches an off-by-one branch displacement that routes a failed syscall
+    // result to the success ebreak instead of the faulting fail block.
+    #[test]
+    fn every_syscall_result_branch_targets_the_fail_block() {
+        let code = assemble_syscall_probe();
+        let mut branch_count = 0;
+
+        for (index, word) in code.into_iter().enumerate() {
+            if word & 0x7f != 0x63 {
+                continue;
+            }
+            branch_count += 1;
+            let immediate = (((word >> 31) & 0x1) << 12)
+                | (((word >> 7) & 0x1) << 11)
+                | (((word >> 25) & 0x3f) << 5)
+                | (((word >> 8) & 0xf) << 1);
+            let signed_immediate = ((immediate as i32) << 19) >> 19;
+            let target = index as i32 * 4 + signed_immediate;
+
+            assert_eq!(target, PROBE_FAIL_INDEX as i32 * 4);
+        }
+
+        assert_eq!(branch_count, 6);
     }
 
     // Catches an exit fixture envelope that the real loader rejects before

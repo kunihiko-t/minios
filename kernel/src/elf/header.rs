@@ -9,6 +9,8 @@ const ELFDATA2LSB: u8 = 1;
 const ELF_VERSION: u32 = 1;
 const ET_EXEC: u16 = 2;
 const EM_RISCV: u16 = 243;
+const PT_DYNAMIC: u32 = 2;
+const PT_INTERP: u32 = 3;
 const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
@@ -30,6 +32,8 @@ pub enum ElfError {
     UnsupportedVersion,
     /// The ELF object is not a static executable.
     UnsupportedType,
+    /// The executable requires a dynamic linker or dynamic linking metadata.
+    DynamicLinkingUnsupported,
     /// The ELF object does not target RISC-V.
     UnsupportedMachine,
     /// The ELF header is truncated or reports the wrong size.
@@ -126,7 +130,11 @@ impl<'a> ElfImage<'a> {
         };
         let mut load_count = 0usize;
         for header in image.program_headers() {
-            if header?.is_load() {
+            let header = header?;
+            if matches!(header.kind, PT_DYNAMIC | PT_INTERP) {
+                return Err(ElfError::DynamicLinkingUnsupported);
+            }
+            if header.is_load() {
                 load_count = load_count
                     .checked_add(1)
                     .ok_or(ElfError::TooManyLoadSegments)?;
@@ -365,6 +373,26 @@ mod tests {
         let mut bytes = fixture::valid_riscv64_elf();
         put_u16(&mut bytes, 16, 3);
         assert_eq!(ElfImage::parse(&bytes), Err(ElfError::UnsupportedType));
+    }
+
+    #[test]
+    fn rejects_an_executable_that_requires_an_elf_interpreter() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        put_u32(&mut bytes, 64 + 56, 3);
+        assert_eq!(
+            ElfImage::parse(&bytes),
+            Err(ElfError::DynamicLinkingUnsupported)
+        );
+    }
+
+    #[test]
+    fn rejects_an_executable_with_dynamic_linking_metadata() {
+        let mut bytes = fixture::valid_riscv64_elf();
+        put_u32(&mut bytes, 64 + 56, 2);
+        assert_eq!(
+            ElfImage::parse(&bytes),
+            Err(ElfError::DynamicLinkingUnsupported)
+        );
     }
 
     #[test]
