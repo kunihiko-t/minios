@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use crate::memory::{BOOT_PAYLOAD_END, KernelSections, frame::PAGE_SIZE};
+use crate::memory::{BOOT_PAYLOAD_END, BOOT_PAYLOAD_START, KernelSections, frame::PAGE_SIZE};
 
 use super::{PageFlags, PhysAddr, VirtPage};
 
@@ -78,19 +78,27 @@ impl KernelMapPlan {
     /// boot payloadの使用page (4 KiB単位で切り上げ) だけをS-mode read-onlyで
     /// 追加する。全8 MiBを常時mapしない。
     ///
-    /// payload rangeはmanaged範囲の直後 (=予約窓の先端) から始まり、
-    /// 予約窓の中に収まらなければならない。
+    /// payload rangeは固定予約窓の先端から始まり、予約窓の中に
+    /// 収まらなければならない。
     pub fn with_payload_pages(mut self, start: usize, len: usize) -> Result<Self, KernelMapError> {
-        let managed_end = self.ranges[4].addresses.end;
+        if start != BOOT_PAYLOAD_START || !start.is_multiple_of(PAGE_SIZE) {
+            return Err(KernelMapError::InvalidPayloadRange);
+        }
         if len == 0 {
             return Ok(self);
         }
-        if start != managed_end || !start.is_multiple_of(PAGE_SIZE) {
+        if len > BOOT_PAYLOAD_END - BOOT_PAYLOAD_START {
             return Err(KernelMapError::InvalidPayloadRange);
         }
-        let page_count = len.div_ceil(PAGE_SIZE);
+        let page_count = len
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(KernelMapError::InvalidPayloadRange)?
+            / PAGE_SIZE;
+        let rounded_len = page_count
+            .checked_mul(PAGE_SIZE)
+            .ok_or(KernelMapError::InvalidPayloadRange)?;
         let end = start
-            .checked_add(page_count * PAGE_SIZE)
+            .checked_add(rounded_len)
             .ok_or(KernelMapError::InvalidPayloadRange)?;
         if end > BOOT_PAYLOAD_END {
             return Err(KernelMapError::InvalidPayloadRange);
@@ -111,17 +119,15 @@ impl KernelMapPlan {
 
     pub fn mappings(&self) -> impl Iterator<Item = KernelMapping> + '_ {
         self.ranges.iter().flat_map(|range| {
-            range
-                .addresses
-                .clone()
-                .step_by(PAGE_SIZE)
-                .map(|address| KernelMapping {
-                    page: VirtPage::from_start(address as u64)
+            range.addresses.clone().step_by(PAGE_SIZE).map(|address| {
+                KernelMapping::new(
+                    VirtPage::from_start(address as u64)
                         .expect("validated kernel mapping ranges are page-aligned"),
-                    physical: PhysAddr::try_new(address as u64)
+                    PhysAddr::try_new(address as u64)
                         .expect("kernel identity mappings fit the physical address field"),
-                    flags: range.flags,
-                })
+                    range.flags,
+                )
+            })
         })
     }
 }
@@ -134,6 +140,16 @@ pub struct KernelMapping {
 }
 
 impl KernelMapping {
+    /// Creates a kernel mapping for crate-internal consumers that validate
+    /// borrowed kernel leaves before installation.
+    pub(crate) const fn new(page: VirtPage, physical: PhysAddr, flags: PageFlags) -> Self {
+        Self {
+            page,
+            physical,
+            flags,
+        }
+    }
+
     pub const fn page(self) -> VirtPage {
         self.page
     }
@@ -318,6 +334,33 @@ mod tests {
         );
         assert_eq!(
             base.with_payload_pages(0x8780_0000, 8 * 1024 * 1024 + 1),
+            Err(KernelMapError::InvalidPayloadRange)
+        );
+    }
+
+    // Catches treating a plan's managed-RAM end as the payload window base,
+    // which can skip the fixed reservation start and map an arbitrary window
+    // suffix instead.
+    #[test]
+    fn payload_pages_reject_a_start_after_the_fixed_reserved_window_base() {
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_1000).unwrap();
+
+        assert_eq!(
+            plan.with_payload_pages(0x8780_1000, 0x1000),
+            Err(KernelMapError::InvalidPayloadRange)
+        );
+    }
+
+    // Catches overflowing while rounding an untrusted payload length up to a
+    // page boundary before the reservation-window check can reject it.
+    #[test]
+    fn payload_pages_reject_an_overflowing_length_without_panicking() {
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000).unwrap();
+
+        assert_eq!(
+            plan.with_payload_pages(0x8780_0000, usize::MAX),
             Err(KernelMapError::InvalidPayloadRange)
         );
     }

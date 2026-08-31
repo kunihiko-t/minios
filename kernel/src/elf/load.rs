@@ -14,6 +14,8 @@ use crate::{
 pub enum LoadError<E> {
     /// ELF parsing or complete load-plan validation failed before allocation.
     Elf(ElfError),
+    /// A borrowed kernel mapping exposed a page to U-mode.
+    UserAccessibleKernelMapping,
     /// Address-space construction failed.
     Vm(VmError<E>),
     /// Copying validated segment bytes into a mapped frame failed.
@@ -120,8 +122,8 @@ pub fn load_image<'storage, const N: usize, const WORDS: usize, M: FrameStore>(
 ///
 /// The kernel mappings must be installed before the user pages so that the
 /// U-mode entry, trap stack, and console stay reachable the moment `sret`
-/// switches `satp`, while the borrowed leaves keep `U=0` and can never be
-/// read or written by user code.
+/// switches `satp`. A mapping with `U=1` is rejected before it can become a
+/// borrowed leaf, so only user-image pages can be user-accessible.
 pub fn load_image_with_kernel_mappings<
     'storage,
     const N: usize,
@@ -144,6 +146,9 @@ pub fn load_image_with_kernel_mappings<
     let mut builder =
         AddressSpaceBuilder::new(allocator, memory, storage).map_err(LoadError::Vm)?;
     for mapping in kernel_mappings {
+        if mapping.flags().user() {
+            return Err(LoadError::UserAccessibleKernelMapping);
+        }
         builder
             .map_borrowed(mapping.page(), mapping.physical(), mapping.flags())
             .map_err(LoadError::Vm)?;
@@ -245,7 +250,10 @@ mod tests {
             KernelSections,
             frame::{FrameAllocator, FrameError, PAGE_SIZE},
         },
-        vm::{AddressSpaceStorage, FrameStore, KernelMapPlan, PageFlags, VirtAddr, VmError},
+        vm::{
+            AddressSpaceStorage, FrameStore, KernelMapPlan, KernelMapping, PageFlags, PhysAddr,
+            VirtAddr, VirtPage, VmError,
+        },
     };
 
     const FIRST_HEADER: usize = 64;
@@ -464,6 +472,32 @@ mod tests {
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats().allocated, 0);
         assert_eq!(storage.len(), 0);
+    }
+
+    // Catches accepting a caller-supplied borrowed kernel mapping with U=1,
+    // which would make a kernel identity page readable from U-mode after sret.
+    #[test]
+    fn load_rejects_user_accessible_borrowed_kernel_mappings() {
+        let bytes = fixture::valid_riscv64_elf();
+        let mapping = KernelMapping::new(
+            VirtPage::from_start(0x8020_0000).unwrap(),
+            PhysAddr::try_new(0x8020_0000).unwrap(),
+            PageFlags::new(true, false, true, true).unwrap(),
+        );
+        let mut allocator = test_allocator::<16>(0x1000, 0x181_000);
+        let mut memory = TestFrameStore::default();
+        let mut storage = AddressSpaceStorage::<2688>::new();
+
+        assert!(matches!(
+            load_image_with_kernel_mappings(
+                &bytes,
+                &mut allocator,
+                &mut memory,
+                &mut storage,
+                [mapping],
+            ),
+            Err(LoadError::UserAccessibleKernelMapping)
+        ));
     }
 
     fn read_virtual<const N: usize>(
