@@ -4,8 +4,8 @@ use crate::{
     elf::{ElfError, ElfImage, LoadPlan, LoadSegment, USER_STACK_BOTTOM, USER_STACK_TOP},
     memory::frame::{FrameAllocator, FrameError, PAGE_SIZE},
     vm::{
-        AddressSpace, AddressSpaceBuilder, AddressSpaceStorage, FrameKind, FrameStore, PageFlags,
-        VirtAddr, VirtPage, VmError,
+        AddressSpace, AddressSpaceBuilder, AddressSpaceStorage, FrameKind, FrameStore,
+        KernelMapping, PageFlags, VirtAddr, VirtPage, VmError,
     },
 };
 
@@ -98,11 +98,38 @@ impl<'storage, const N: usize> LoadedImage<'storage, N> {
 }
 
 /// Validates an ELF completely, then materializes it into an inactive address space.
+///
+/// Host unit tests use this entry point with an empty kernel-mapping iterator;
+/// the U-mode runtime borrows the kernel identity pages through
+/// [`load_image_with_kernel_mappings`] instead.
 pub fn load_image<'storage, const N: usize, const WORDS: usize, M: FrameStore>(
     bytes: &[u8],
     allocator: &mut FrameAllocator<WORDS>,
     memory: &mut M,
     storage: &'storage mut AddressSpaceStorage<N>,
+) -> Result<LoadedImage<'storage, N>, LoadError<M::Error>> {
+    load_image_with_kernel_mappings(bytes, allocator, memory, storage, core::iter::empty())
+}
+
+/// Validates an ELF completely, then materializes it into an inactive address
+/// space that also borrows every kernel mapping as supervisor-only pages.
+///
+/// The kernel mappings must be installed before the user pages so that the
+/// U-mode entry, trap stack, and console stay reachable the moment `sret`
+/// switches `satp`, while the borrowed leaves keep `U=0` and can never be
+/// read or written by user code.
+pub fn load_image_with_kernel_mappings<
+    'storage,
+    const N: usize,
+    const WORDS: usize,
+    M: FrameStore,
+    I: IntoIterator<Item = KernelMapping>,
+>(
+    bytes: &[u8],
+    allocator: &mut FrameAllocator<WORDS>,
+    memory: &mut M,
+    storage: &'storage mut AddressSpaceStorage<N>,
+    kernel_mappings: I,
 ) -> Result<LoadedImage<'storage, N>, LoadError<M::Error>> {
     let image = ElfImage::parse(bytes).map_err(LoadError::Elf)?;
     let plan = LoadPlan::new(&image).map_err(LoadError::Elf)?;
@@ -112,6 +139,11 @@ pub fn load_image<'storage, const N: usize, const WORDS: usize, M: FrameStore>(
 
     let mut builder =
         AddressSpaceBuilder::new(allocator, memory, storage).map_err(LoadError::Vm)?;
+    for mapping in kernel_mappings {
+        builder
+            .map_borrowed(mapping.page(), mapping.physical(), mapping.flags())
+            .map_err(LoadError::Vm)?;
+    }
     for segment in plan.segments() {
         materialize_segment(bytes, &mut builder, segment)?;
     }
@@ -202,11 +234,14 @@ mod tests {
 
     use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
-    use super::{LoadError, LoadedImage, load_image};
+    use super::{LoadError, LoadedImage, load_image, load_image_with_kernel_mappings};
     use crate::{
         elf::{USER_GUARD_BOTTOM, USER_STACK_BOTTOM, USER_STACK_TOP, fixture},
-        memory::frame::{FrameAllocator, FrameError, PAGE_SIZE},
-        vm::{AddressSpaceStorage, FrameStore, PageFlags, VirtAddr, VmError},
+        memory::{
+            KernelSections,
+            frame::{FrameAllocator, FrameError, PAGE_SIZE},
+        },
+        vm::{AddressSpaceStorage, FrameStore, KernelMapPlan, PageFlags, VirtAddr, VmError},
     };
 
     const FIRST_HEADER: usize = 64;
@@ -362,6 +397,69 @@ mod tests {
 
     fn fixture_allocator() -> FrameAllocator<1> {
         test_allocator(0x1000, 0x41_000)
+    }
+
+    fn kernel_plan_fixture() -> KernelMapPlan {
+        let sections = KernelSections::new(
+            0x8020_0000..0x8020_2000,
+            0x8020_2000..0x8020_3000,
+            0x8020_3000..0x8020_5000,
+            0x8020_5000..0x8021_5000,
+            0x8021_5000,
+        )
+        .unwrap();
+        KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000).unwrap()
+    }
+
+    // Catches borrowing kernel pages with the U bit set, dropping a borrowed
+    // range, or letting the U bit leak onto any user page. Mirrors the exact
+    // production borrow list the U-mode entry probe installs in QEMU.
+    #[test]
+    fn user_space_borrows_kernel_pages_supervisor_only_and_maps_only_user_pages_as_user() {
+        let bytes = fixture::valid_riscv64_elf();
+        let plan = kernel_plan_fixture();
+        let mut allocator = test_allocator::<16>(0x1000, 0x181_000);
+        let mut memory = TestFrameStore::default();
+        let mut storage = AddressSpaceStorage::<2688>::new();
+
+        let image = load_image_with_kernel_mappings(
+            &bytes,
+            &mut allocator,
+            &mut memory,
+            &mut storage,
+            plan.mappings(),
+        )
+        .unwrap();
+
+        for (region, address) in [
+            ("kernel text", 0x8020_0000u64),
+            ("boot stack", 0x8020_5000),
+            ("managed RAM", 0x8021_5000),
+            ("UART", 0x1000_0000),
+        ] {
+            let (_, flags) = image
+                .address_space()
+                .translate(&memory, VirtAddr::try_new(address).unwrap())
+                .unwrap_or_else(|error| panic!("{region} must stay reachable: {error:?}"));
+            assert!(!flags.user(), "{region} @ {address:#x} must keep U=0");
+        }
+
+        let user_text = image
+            .address_space()
+            .translate(&memory, VirtAddr::try_new(0x0010_0000).unwrap())
+            .unwrap()
+            .1;
+        assert_eq!(user_text, PageFlags::new(true, false, true, true).unwrap());
+        let user_stack = image
+            .address_space()
+            .translate(&memory, VirtAddr::try_new(USER_STACK_BOTTOM).unwrap())
+            .unwrap()
+            .1;
+        assert_eq!(user_stack, PageFlags::new(true, true, false, true).unwrap());
+
+        image.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats().allocated, 0);
+        assert_eq!(storage.len(), 0);
     }
 
     fn read_virtual<const N: usize>(
