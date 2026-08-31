@@ -64,6 +64,12 @@ impl UserContext {
     pub(crate) fn set_sepc(&mut self, value: usize) {
         self.sepc = value;
     }
+
+    /// Writes one register slot. Only the syscall dispatcher records the
+    /// guest-visible return value through this boundary.
+    pub(crate) fn set_register(&mut self, index: usize, value: usize) {
+        self.registers[index] = value;
+    }
 }
 
 #[cfg(test)]

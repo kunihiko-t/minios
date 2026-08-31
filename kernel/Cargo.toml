@@ -17,6 +17,10 @@ qemu-test-vm = []
 qemu-test-elf = []
 qemu-test-user-entry = []
 qemu-test-user-trap = []
+qemu-test-user-syscall = []
+
+[dependencies]
+minios-abi = { path = "../abi" }
 
 [lib]
 path = "src/lib.rs"

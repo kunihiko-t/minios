@@ -151,6 +151,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::Elf) => "QEMU ELF test".to_owned(),
             Self::Qemu(qemu::TestKind::UserEntry) => "QEMU user-entry test".to_owned(),
             Self::Qemu(qemu::TestKind::UserTrap) => "QEMU user-trap test".to_owned(),
+            Self::Qemu(qemu::TestKind::UserSyscall) => "QEMU user-syscall test".to_owned(),
             Self::Qemu(qemu::TestKind::Shell) => "QEMU shell test".to_owned(),
             _ => unreachable!("Cargo phases returned above"),
         }
@@ -169,6 +170,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Elf),
         Phase::Qemu(qemu::TestKind::UserEntry),
         Phase::Qemu(qemu::TestKind::UserTrap),
+        Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -195,6 +197,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Elf),
         Phase::Qemu(qemu::TestKind::UserEntry),
         Phase::Qemu(qemu::TestKind::UserTrap),
+        Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -296,6 +299,9 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::Elf) => Some(vec![Phase::Qemu(qemu::TestKind::Elf)]),
         Command::Test(TestFilter::UserEntry) => Some(vec![Phase::Qemu(qemu::TestKind::UserEntry)]),
         Command::Test(TestFilter::UserTrap) => Some(vec![Phase::Qemu(qemu::TestKind::UserTrap)]),
+        Command::Test(TestFilter::UserSyscall) => {
+            Some(vec![Phase::Qemu(qemu::TestKind::UserSyscall)])
+        }
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
         Command::Check => Some(check_phases()),
         Command::Setup | Command::Build | Command::Run => None,
@@ -336,6 +342,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Elf),
                 Phase::Qemu(qemu::TestKind::UserEntry),
                 Phase::Qemu(qemu::TestKind::UserTrap),
+                Phase::Qemu(qemu::TestKind::UserSyscall),
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
@@ -386,10 +393,11 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Elf),
                 Phase::Qemu(qemu::TestKind::UserEntry),
                 Phase::Qemu(qemu::TestKind::UserTrap),
+                Phase::Qemu(qemu::TestKind::UserSyscall),
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
-        assert_eq!(check_phases().len(), 21);
+        assert_eq!(check_phases().len(), 22);
 
         let plan = check_phases();
         let position = |phase| {
@@ -419,6 +427,10 @@ mod tests {
             phase_plan_for(&Command::Test(TestFilter::UserTrap)),
             Some(vec![Phase::Qemu(qemu::TestKind::UserTrap)])
         );
+        assert_eq!(
+            phase_plan_for(&Command::Test(TestFilter::UserSyscall)),
+            Some(vec![Phase::Qemu(qemu::TestKind::UserSyscall)])
+        );
         assert_eq!(Phase::Qemu(qemu::TestKind::Vm).command(), "QEMU VM test");
         assert_eq!(Phase::Qemu(qemu::TestKind::Elf).command(), "QEMU ELF test");
         assert_eq!(
@@ -428,6 +440,10 @@ mod tests {
         assert_eq!(
             Phase::Qemu(qemu::TestKind::UserTrap).command(),
             "QEMU user-trap test"
+        );
+        assert_eq!(
+            Phase::Qemu(qemu::TestKind::UserSyscall).command(),
+            "QEMU user-syscall test"
         );
     }
 

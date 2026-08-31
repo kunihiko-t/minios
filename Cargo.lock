@@ -9,6 +9,9 @@ version = "0.1.1"
 [[package]]
 name = "minios-kernel"
 version = "0.1.0"
+dependencies = [
+ "minios-abi",
+]
 
 [[package]]
 name = "xtask"
