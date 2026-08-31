@@ -130,7 +130,7 @@ use minios_kernel::memory::{
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
-use minios_kernel::user::run::UserRun;
+use minios_kernel::user::run::{RunCompletion, RunOutcome, UserRun};
 #[cfg(all(
     target_arch = "riscv64",
     any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
@@ -254,6 +254,20 @@ static mut USER_SYSCALL_PROBE_MEMORY: usize = 0;
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 static USER_EXIT_CODE: AtomicUsize = AtomicUsize::new(usize::MAX);
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+static USER_RUN_OUTCOME: AtomicUsize = AtomicUsize::new(USER_RUN_OUTCOME_NONE);
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+static USER_FATAL_SCAUSE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+static USER_FATAL_STVAL: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+const USER_RUN_OUTCOME_NONE: usize = 0;
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+const USER_RUN_OUTCOME_EXIT: usize = 1;
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+const USER_RUN_OUTCOME_FATAL_TRAP: usize = 2;
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
+const USER_RUN_OUTCOME_SINK_FAILURE: usize = 3;
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 const ELF_FIXTURE_OWNED_FRAMES: usize = 23;
@@ -1049,16 +1063,12 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
         SyscallFlow::Resume => RunExit::Resume,
         SyscallFlow::Exit(code) => {
             USER_EXIT_CODE.store(code as usize, Ordering::Relaxed);
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXIT, Ordering::Relaxed);
             RunExit::ReturnToKernel
         }
         SyscallFlow::Fatal(()) => {
-            crate::console::emergency_print(format_args!(
-                "[MINIOS_TEST] failed: user-exit sink failure\r\n"
-            ));
-            arch::riscv64::sbi::system_reset(
-                arch::riscv64::sbi::ResetType::Shutdown,
-                arch::riscv64::sbi::ResetReason::SystemFailure,
-            )
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SINK_FAILURE, Ordering::Relaxed);
+            RunExit::ReturnToKernel
         }
     }
 }
@@ -1105,13 +1115,10 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
-    crate::console::emergency_print(format_args!(
-        "[MINIOS_TEST] failed: user-exit unexpected fatal, scause={scause:#018x} stval={stval:#018x}\r\n"
-    ));
-    arch::riscv64::sbi::system_reset(
-        arch::riscv64::sbi::ResetType::Shutdown,
-        arch::riscv64::sbi::ResetReason::SystemFailure,
-    )
+    USER_FATAL_SCAUSE.store(scause, Ordering::Relaxed);
+    USER_FATAL_STVAL.store(stval, Ordering::Relaxed);
+    USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
+    RunExit::ReturnToKernel
 }
 
 #[cfg(all(
@@ -1311,6 +1318,9 @@ fn run_user_exit_test<const KERNEL_N: usize>(
     };
 
     USER_EXIT_CODE.store(usize::MAX, Ordering::Relaxed);
+    USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_NONE, Ordering::Relaxed);
+    USER_FATAL_SCAUSE.store(0, Ordering::Relaxed);
+    USER_FATAL_STVAL.store(0, Ordering::Relaxed);
     // Safety: pointer値を保存するだけでここでは解参照しない。handlerだけが
     // assemblyの実行窓で読み、kernelへ戻った直後に両方をclearする。
     unsafe {
@@ -1328,17 +1338,30 @@ fn run_user_exit_test<const KERNEL_N: usize>(
         arch::riscv64::csr::write_stvec(__user_trap_entry as *const () as usize);
     }
 
-    // Safety: runが両address space、frame memory、連続した専用trap stackを
-    // 所有する。assemblyがReturnToKernelを返す前にkernel satpとboot stackを
-    // 復元するため、戻った後だけresourceを回収する。
-    let exit = unsafe {
-        __run_user(
-            &raw mut context,
-            run.user_satp(),
-            run.kernel_satp(),
-            run.kernel_stack_top(),
-        )
-    };
+    let mut assembly_exit = RunExit::Resume;
+    let mut sink = control::UartControlSink;
+    let completion = run.execute(&mut sink, |launch| {
+        // Safety: runが両address space、frame memory、連続した専用trap stackを
+        // 所有する。assemblyはkernel satpとboot stackを復元してから戻る。
+        assembly_exit = unsafe {
+            __run_user(
+                &raw mut context,
+                launch.user_satp(),
+                launch.kernel_satp(),
+                launch.kernel_stack_top(),
+            )
+        };
+        if assembly_exit != RunExit::ReturnToKernel {
+            return RunOutcome::Fatal;
+        }
+        match USER_RUN_OUTCOME.load(Ordering::Relaxed) {
+            USER_RUN_OUTCOME_EXIT => {
+                RunOutcome::Exit(USER_EXIT_CODE.load(Ordering::Relaxed) as u32)
+            }
+            USER_RUN_OUTCOME_FATAL_TRAP | USER_RUN_OUTCOME_SINK_FAILURE => RunOutcome::Fatal,
+            _ => RunOutcome::Fatal,
+        }
+    });
     // Safety: handlerが今後走らないkernel側へ戻ったため、danglingになり得る
     // pointer値を解放前に無効化する。
     unsafe {
@@ -1346,20 +1369,14 @@ fn run_user_exit_test<const KERNEL_N: usize>(
         USER_SYSCALL_PROBE_MEMORY = 0;
     }
 
-    if exit != RunExit::ReturnToKernel {
-        fatal_qemu_test(format_args!(
-            "user-exit return: expected ReturnToKernel, actual {exit:?}"
-        ));
-    }
-    let code = USER_EXIT_CODE.load(Ordering::Relaxed);
-    if code != 42 {
-        fatal_qemu_test(format_args!("user-exit code: expected 42, actual {code}"));
-    }
-
-    let mut sink = control::UartControlSink;
-    if let Err(error) = run.finish_exit(code as u32, &mut sink) {
-        fatal_qemu_test(format_args!("user-exit finish: {error:?}"));
-    }
+    let outcome_kind = USER_RUN_OUTCOME.load(Ordering::Relaxed);
+    let completion = match completion {
+        Ok(completion) => completion,
+        Err(error) => {
+            drop(run);
+            fatal_qemu_test(format_args!("user-exit finish: {error:?}"));
+        }
+    };
     drop(run);
 
     let after = frames.stats();
@@ -1370,10 +1387,33 @@ fn run_user_exit_test<const KERNEL_N: usize>(
         ));
     }
 
-    // 直前のstdout、stderr、Exitは改行を含まないbinary frameなので、markerを
-    // 独立した一行として始める。
-    crate::println!("\r\n[MINIOS_TEST] user-exit: ok code=42");
-    successful_qemu_test_shutdown()
+    match completion {
+        RunCompletion::Exit(42) => {
+            // 直前のstdout、stderr、Exitは改行を含まないbinary frameなので、
+            // markerを独立した一行として始める。
+            crate::println!("\r\n[MINIOS_TEST] user-exit: ok code=42");
+            successful_qemu_test_shutdown()
+        }
+        RunCompletion::Exit(code) => {
+            fatal_qemu_test(format_args!("user-exit code: expected 42, actual {code}"))
+        }
+        RunCompletion::Fatal if assembly_exit != RunExit::ReturnToKernel => fatal_qemu_test(
+            format_args!("user-exit return: expected ReturnToKernel, actual {assembly_exit:?}"),
+        ),
+        RunCompletion::Fatal if outcome_kind == USER_RUN_OUTCOME_SINK_FAILURE => {
+            fatal_qemu_test(format_args!("user-exit sink failure after cleanup"))
+        }
+        RunCompletion::Fatal if outcome_kind == USER_RUN_OUTCOME_FATAL_TRAP => {
+            fatal_qemu_test(format_args!(
+                "user-exit fatal after cleanup: scause={:#018x} stval={:#018x}",
+                USER_FATAL_SCAUSE.load(Ordering::Relaxed),
+                USER_FATAL_STVAL.load(Ordering::Relaxed)
+            ))
+        }
+        RunCompletion::Fatal => fatal_qemu_test(format_args!(
+            "user-exit returned without an outcome after cleanup"
+        )),
+    }
 }
 
 #[cfg(all(
