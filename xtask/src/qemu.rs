@@ -18,6 +18,8 @@ const MEMORY_MARKER: &str = "[MINIOS_TEST] memory: ok";
 const VM_MARKER: &str = "[MINIOS_TEST] vm: ok";
 const ELF_MARKER: &str = "[MINIOS_TEST] elf: ok";
 const USER_ENTRY_MARKER: &str = "[MINIOS_TEST] user-entry: reached";
+const USER_TRAP_REJECTED_MARKER: &str = "[MINIOS_TEST] user-trap: rejected";
+const USER_TRAP_OK_MARKER: &str = "[MINIOS_TEST] user-trap: ok";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] = b"help\ninfo\nuptime\nmemory\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
@@ -33,6 +35,7 @@ pub enum TestKind {
     Vm,
     Elf,
     UserEntry,
+    UserTrap,
     Shell,
 }
 
@@ -46,6 +49,7 @@ impl TestKind {
             Self::Vm => "qemu-test-vm",
             Self::Elf => "qemu-test-elf",
             Self::UserEntry => "qemu-test-user-entry",
+            Self::UserTrap => "qemu-test-user-trap",
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -59,7 +63,17 @@ impl TestKind {
             Self::Vm => VM_MARKER,
             Self::Elf => ELF_MARKER,
             Self::UserEntry => USER_ENTRY_MARKER,
+            Self::UserTrap => USER_TRAP_REJECTED_MARKER,
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
+        }
+    }
+
+    /// A marker that must never appear, proving a rejection test cannot
+    /// masquerade as its success counterpart.
+    fn forbidden_marker(self) -> Option<&'static str> {
+        match self {
+            Self::UserTrap => Some(USER_TRAP_OK_MARKER),
+            _ => None,
         }
     }
 }
@@ -88,6 +102,11 @@ pub enum QemuError {
     MissingMarker {
         command: String,
         expected: &'static str,
+        output: String,
+    },
+    ForbiddenMarker {
+        command: String,
+        forbidden: &'static str,
         output: String,
     },
     MissingShellOutput {
@@ -138,6 +157,15 @@ impl fmt::Display for QemuError {
             } => write!(
                 formatter,
                 "QEMU exited successfully but did not print {expected}:\ncommand: {command}\n{}",
+                output.trim_end()
+            ),
+            Self::ForbiddenMarker {
+                command,
+                forbidden,
+                output,
+            } => write!(
+                formatter,
+                "QEMU test printed the forbidden marker {forbidden}:\ncommand: {command}\n{}",
                 output.trim_end()
             ),
             Self::MissingShellOutput {
@@ -570,6 +598,15 @@ fn verify_test_result(
             output: output.to_owned(),
         });
     }
+    if let Some(forbidden) = kind.forbidden_marker()
+        && normalized.lines().any(|line| line == forbidden)
+    {
+        return Err(QemuError::ForbiddenMarker {
+            command: command.to_owned(),
+            forbidden,
+            output: output.to_owned(),
+        });
+    }
     Ok(output.to_owned())
 }
 
@@ -750,6 +787,74 @@ mod tests {
         assert_eq!(
             TestKind::UserEntry.marker(),
             "[MINIOS_TEST] user-entry: reached"
+        );
+        assert_eq!(TestKind::UserTrap.feature(), "qemu-test-user-trap");
+        assert_eq!(
+            TestKind::UserTrap.marker(),
+            "[MINIOS_TEST] user-trap: rejected"
+        );
+        assert_eq!(
+            TestKind::UserTrap.forbidden_marker(),
+            Some("[MINIOS_TEST] user-trap: ok")
+        );
+        for kind in [
+            TestKind::Boot,
+            TestKind::Timer,
+            TestKind::Trap,
+            TestKind::Memory,
+            TestKind::Vm,
+            TestKind::Elf,
+            TestKind::UserEntry,
+            TestKind::Shell,
+        ] {
+            assert_eq!(kind.forbidden_marker(), None);
+        }
+    }
+
+    // Catches a rejection test that resumes the guest and reports success
+    // alongside the expected diagnostic.
+    #[test]
+    fn user_trap_rejection_requires_the_marker_and_forbids_the_success_marker() {
+        let rejected = "OpenSBI\r\n[MINIOS_TEST] user-trap: rejected\r\n";
+
+        assert_eq!(
+            verify_test_result(TEST_COMMAND, TestKind::UserTrap, Some(0), rejected),
+            Ok(rejected.to_owned())
+        );
+        assert_eq!(
+            verify_test_result(
+                TEST_COMMAND,
+                TestKind::UserTrap,
+                Some(0),
+                "[MINIOS_TEST] user-trap: rejected\r\n[MINIOS_TEST] user-trap: ok\r\n"
+            ),
+            Err(QemuError::ForbiddenMarker {
+                command: TEST_COMMAND.to_owned(),
+                forbidden: USER_TRAP_OK_MARKER,
+                output: "[MINIOS_TEST] user-trap: rejected\r\n[MINIOS_TEST] user-trap: ok\r\n"
+                    .to_owned(),
+            })
+        );
+        assert_eq!(
+            verify_test_result(
+                TEST_COMMAND,
+                TestKind::UserTrap,
+                Some(0),
+                "[MINIOS_TEST] user-trap: rejected suffix\r\n"
+            ),
+            Err(QemuError::MissingMarker {
+                command: TEST_COMMAND.to_owned(),
+                expected: USER_TRAP_REJECTED_MARKER,
+                output: "[MINIOS_TEST] user-trap: rejected suffix\r\n".to_owned(),
+            })
+        );
+        assert_eq!(
+            verify_test_result(TEST_COMMAND, TestKind::UserTrap, Some(1), rejected),
+            Err(QemuError::Failed {
+                command: TEST_COMMAND.to_owned(),
+                status: Some(1),
+                output: rejected.to_owned(),
+            })
         );
     }
 

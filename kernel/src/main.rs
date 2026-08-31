@@ -10,7 +10,8 @@
             feature = "qemu-test-memory",
             feature = "qemu-test-vm",
             feature = "qemu-test-elf",
-            feature = "qemu-test-user-entry"
+            feature = "qemu-test-user-entry",
+            feature = "qemu-test-user-trap"
         )
     ),
     all(
@@ -20,7 +21,8 @@
             feature = "qemu-test-memory",
             feature = "qemu-test-vm",
             feature = "qemu-test-elf",
-            feature = "qemu-test-user-entry"
+            feature = "qemu-test-user-entry",
+            feature = "qemu-test-user-trap"
         )
     ),
     all(
@@ -29,7 +31,8 @@
             feature = "qemu-test-memory",
             feature = "qemu-test-vm",
             feature = "qemu-test-elf",
-            feature = "qemu-test-user-entry"
+            feature = "qemu-test-user-entry",
+            feature = "qemu-test-user-trap"
         )
     ),
     all(
@@ -37,14 +40,23 @@
         any(
             feature = "qemu-test-vm",
             feature = "qemu-test-elf",
-            feature = "qemu-test-user-entry"
+            feature = "qemu-test-user-entry",
+            feature = "qemu-test-user-trap"
         )
     ),
     all(
         feature = "qemu-test-vm",
-        any(feature = "qemu-test-elf", feature = "qemu-test-user-entry")
+        any(
+            feature = "qemu-test-elf",
+            feature = "qemu-test-user-entry",
+            feature = "qemu-test-user-trap"
+        )
     ),
-    all(feature = "qemu-test-elf", feature = "qemu-test-user-entry")
+    all(
+        feature = "qemu-test-elf",
+        any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+    ),
+    all(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
 ))]
 compile_error!("QEMU kernel test features are mutually exclusive; enable at most one");
 
@@ -63,7 +75,10 @@ mod time;
 use core::panic::PanicInfo;
 #[cfg(target_arch = "riscv64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
 use minios_kernel::elf::load::load_image_with_kernel_mappings;
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 use minios_kernel::memory::frame::{FrameStats, PhysFrame};
@@ -72,9 +87,20 @@ use minios_kernel::memory::{
     KernelSections, PHYSICAL_MEMORY_END,
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
-use minios_kernel::user::{RunExit, SSTATUS_SPP, UserContext};
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+use minios_kernel::user::trap::TrapAction;
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+use minios_kernel::user::{RunExit, UserContext};
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
 use minios_kernel::vm::AddressSpace;
 #[cfg(all(
     target_arch = "riscv64",
@@ -104,21 +130,33 @@ static mut KERNEL_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpac
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 static mut ELF_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
-static mut USER_ENTRY_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+static mut USER_PROBE_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
-const USER_ENTRY_TRAP_STACK_BYTES: usize = 4 * PAGE_SIZE;
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+const USER_PROBE_TRAP_STACK_BYTES: usize = 4 * PAGE_SIZE;
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
 // Safety: このstaticのバイト列をRustは読み書きしない。`user.S`がsp相対で
-// 固定headerとhandler frameを置くための、4 KiB整列した専用test trap stackである。
+// 固定header、UserContext、handler frameを置くための、4 KiB整列した専用test trap stackである。
 #[repr(align(4096))]
-struct UserEntryTrapStack([u8; USER_ENTRY_TRAP_STACK_BYTES]);
+struct UserProbeTrapStack([u8; USER_PROBE_TRAP_STACK_BYTES]);
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
-static mut USER_ENTRY_TRAP_STACK: UserEntryTrapStack =
-    UserEntryTrapStack([0; USER_ENTRY_TRAP_STACK_BYTES]);
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+static mut USER_PROBE_TRAP_STACK: UserProbeTrapStack =
+    UserProbeTrapStack([0; USER_PROBE_TRAP_STACK_BYTES]);
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 const ELF_FIXTURE_OWNED_FRAMES: usize = 23;
@@ -219,9 +257,9 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         run_vm_test(&kernel_space, &memory);
     }
 
-    #[cfg(feature = "qemu-test-user-entry")]
+    #[cfg(any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap"))]
     {
-        run_user_entry_test(&kernel_space, &plan, &mut frames, &mut memory);
+        run_user_mode_probe_test(&kernel_space, &plan, &mut frames, &mut memory);
     }
 
     #[cfg(feature = "qemu-test-elf")]
@@ -806,7 +844,10 @@ fn expect_zero_virtual<const N: usize>(
     Ok(())
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
 unsafe extern "C" {
     // Safety: `user.S`が`sret`でU-modeへ降りる唯一の入口として公開するC ABI境界である。
     fn __run_user(
@@ -819,39 +860,79 @@ unsafe extern "C" {
     fn __user_trap_entry();
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
 // `user.S`がシンボル名とC ABIを直接指定して呼ぶため、この名前とABIを変えてはならない。
+// a0はassemblyが組み立てたUserContextを受け取り、戻り値a0がRunExitになる。
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_user_trap_handler(result: *mut usize) {
+pub extern "C" fn rust_user_trap_handler(context: *mut UserContext) -> RunExit {
     let scause = arch::riscv64::csr::read_scause();
-    let sstatus = arch::riscv64::csr::read_sstatus();
-    // U-mode由来のecallだけが継続を許される。sstatus.SPP=0は、このtrapが
-    // U-modeから上がってきたことのハードウェアによる証左である。
-    if arch::riscv64::trap::decode_scause(scause) != arch::riscv64::trap::TrapCause::Exception(8)
-        || sstatus & SSTATUS_SPP != 0
-    {
-        crate::console::emergency_print(format_args!(
-            "[MINIOS_TEST] failed: user-entry expected U-mode ecall, scause={scause:#018x} sstatus={sstatus:#018x}\r\n"
-        ));
-        arch::riscv64::sbi::system_reset(
-            arch::riscv64::sbi::ResetType::Shutdown,
-            arch::riscv64::sbi::ResetReason::SystemFailure,
-        );
+    let stval = arch::riscv64::csr::read_stval();
+    // Safety: `user.S`がtrap frameとして組み立てた直後のkernel stack上のcontextである。
+    let context = unsafe { &mut *context };
+    match minios_kernel::user::trap::handle_user_trap(context, scause, stval) {
+        TrapAction::SystemCall => user_trap_system_call(),
+        TrapAction::Fatal { scause, stval } => user_trap_fatal(scause, stval),
     }
-    crate::println!("[MINIOS_TEST] user-entry: reached");
-    // Safety: `user.S`がkernel trap stack固定header内の結果slot地址をa0で渡す。
-    // この書き込み以降、`__user_run_leave`だけがこのslotを読む。
-    unsafe { *result = RunExit::ReturnToKernel as usize };
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
-const USER_ENTRY_ELF_LEN: usize = 0x1008;
+fn user_trap_system_call() -> RunExit {
+    // 分類を通過した時点で、このtrapがU-modeのecallであることは確定している。
+    crate::println!("[MINIOS_TEST] user-entry: reached");
+    RunExit::ReturnToKernel
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-trap"))]
+fn user_trap_system_call() -> RunExit {
+    // このprobeのfixtureはecallを実行しない。到達したらharness側の欠陥である。
+    crate::console::emergency_print(format_args!(
+        "[MINIOS_TEST] failed: user-trap unexpected ecall\r\n"
+    ));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
-// 決定的な1 segment ELFである。textは`ecall`一命令と自己ループだけで、
-// trap handlerへ到達できたこと以外を表明しない。
-fn user_entry_ecall_elf() -> [u8; USER_ENTRY_ELF_LEN] {
-    let mut bytes = [0u8; USER_ENTRY_ELF_LEN];
+fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
+    crate::console::emergency_print(format_args!(
+        "[MINIOS_TEST] failed: user-entry expected U-mode ecall, scause={scause:#018x} stval={stval:#018x}\r\n"
+    ));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-trap"))]
+fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
+    // 期待markerは独立した正確な一行で出す。成功marker (`user-trap: ok`) は
+    // 決して出力しない。診断は次の行へ置く。
+    crate::console::emergency_print(format_args!(
+        "[MINIOS_TEST] user-trap: rejected\r\nMiniOS user trap: scause={scause:#018x} stval={stval:#018x}\r\n"
+    ));
+    // 拒否自体はこのprobeの成功条件であるため、正常shutdownでharnessへ検証を委ねる。
+    successful_qemu_test_shutdown()
+}
+
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+const USER_PROBE_ELF_LEN: usize = 0x1008;
+
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+// 決定的な1 segment ELFを返す。textは8 byteのコード領域だけで、
+// 中身は呼び出し側のprobeが指定する。
+fn user_probe_elf(code: &[u8; 8]) -> [u8; USER_PROBE_ELF_LEN] {
+    let mut bytes = [0u8; USER_PROBE_ELF_LEN];
     bytes[0..4].copy_from_slice(b"\x7fELF");
     bytes[4] = 2;
     bytes[5] = 1;
@@ -872,13 +953,28 @@ fn user_entry_ecall_elf() -> [u8; USER_ENTRY_ELF_LEN] {
     bytes[header + 32..header + 40].copy_from_slice(&8u64.to_le_bytes());
     bytes[header + 40..header + 48].copy_from_slice(&0x1000u64.to_le_bytes());
     bytes[header + 48..header + 56].copy_from_slice(&0x1000u64.to_le_bytes());
-    bytes[0x1000..0x1004].copy_from_slice(&[0x73, 0x00, 0x00, 0x00]);
-    bytes[0x1004..0x1008].copy_from_slice(&[0x6f, 0x00, 0x00, 0x00]);
+    bytes[0x1000..0x1008].copy_from_slice(code);
     bytes
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
-fn run_user_entry_test<const KERNEL_N: usize>(
+// textは`ecall`一命令と自己ループだけで、trap handlerへ到達できたこと以外を表明しない。
+fn user_entry_ecall_elf() -> [u8; USER_PROBE_ELF_LEN] {
+    user_probe_elf(&[0x73, 0x00, 0x00, 0x00, 0x6f, 0x00, 0x00, 0x00])
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-trap"))]
+// textは未map領域0x0000_0000への`sd x0, 0(x0)`でstore page fault (原因15)を
+// 起こす。faultしなければ自己ループで停止し、harnessのtimeoutが失敗を報告する。
+fn user_trap_fault_elf() -> [u8; USER_PROBE_ELF_LEN] {
+    user_probe_elf(&[0x23, 0x30, 0x00, 0x00, 0x6f, 0x00, 0x00, 0x00])
+}
+
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-user-entry", feature = "qemu-test-user-trap")
+))]
+fn run_user_mode_probe_test<const KERNEL_N: usize>(
     kernel_space: &AddressSpace<'_, KERNEL_N>,
     plan: &KernelMapPlan,
     frames: &mut FrameAllocator<512>,
@@ -886,21 +982,24 @@ fn run_user_entry_test<const KERNEL_N: usize>(
 ) -> ! {
     // Safety: this feature path runs only on the single boot hart and obtains
     // the static ownership table once before loading the probe image.
-    let storage_pointer = &raw mut USER_ENTRY_ADDRESS_SPACE_STORAGE;
+    let storage_pointer = &raw mut USER_PROBE_ADDRESS_SPACE_STORAGE;
     let storage = unsafe { storage_pointer.as_mut() }
-        .expect("a static user-entry storage pointer is never null");
+        .expect("a static user-probe storage pointer is never null");
     if !storage.is_empty() {
         fatal_qemu_test(format_args!(
-            "user-entry precondition: expected empty storage, actual len={}",
+            "user probe precondition: expected empty storage, actual len={}",
             storage.len()
         ));
     }
 
+    #[cfg(feature = "qemu-test-user-entry")]
     let fixture = user_entry_ecall_elf();
+    #[cfg(feature = "qemu-test-user-trap")]
+    let fixture = user_trap_fault_elf();
     let image =
         match load_image_with_kernel_mappings(&fixture, frames, memory, storage, plan.mappings()) {
             Ok(image) => image,
-            Err(error) => fatal_qemu_test(format_args!("user-entry load: {error:?}")),
+            Err(error) => fatal_qemu_test(format_args!("user probe load: {error:?}")),
         };
 
     let mut context = UserContext::new(image.entry(), image.user_stack_top());
@@ -910,7 +1009,7 @@ fn run_user_entry_test<const KERNEL_N: usize>(
         .expect("kernel root page number is valid");
     // Safety: アドレスを作るだけでstaticのバイト列を読み書きしない。
     let trap_stack_top = unsafe {
-        core::ptr::addr_of!(USER_ENTRY_TRAP_STACK.0) as usize + USER_ENTRY_TRAP_STACK_BYTES
+        core::ptr::addr_of!(USER_PROBE_TRAP_STACK.0) as usize + USER_PROBE_TRAP_STACK_BYTES
     };
 
     // このprobeの間だけstvecをuser trap入口へ向ける。通常のS-mode入口は
@@ -929,12 +1028,24 @@ fn run_user_entry_test<const KERNEL_N: usize>(
         )
     };
 
-    if exit != RunExit::ReturnToKernel {
-        fatal_qemu_test(format_args!(
-            "user-entry exit: expected ReturnToKernel, actual {exit:?}"
-        ));
+    #[cfg(feature = "qemu-test-user-entry")]
+    {
+        if exit != RunExit::ReturnToKernel {
+            fatal_qemu_test(format_args!(
+                "user-entry exit: expected ReturnToKernel, actual {exit:?}"
+            ));
+        }
+        successful_qemu_test_shutdown()
     }
-    successful_qemu_test_shutdown()
+
+    #[cfg(feature = "qemu-test-user-trap")]
+    {
+        // このfeatureのhandlerはfatal trapを検証した時点でshutdownする。
+        // ここへ戻ったということは、拒否すべきtrapからkernelが復帰してしまった。
+        fatal_qemu_test(format_args!(
+            "user-trap: kernel resumed after the rejected trap, exit={exit:?}"
+        ))
+    }
 }
 
 #[cfg(all(
@@ -942,7 +1053,8 @@ fn run_user_entry_test<const KERNEL_N: usize>(
     any(
         feature = "qemu-test-vm",
         feature = "qemu-test-elf",
-        feature = "qemu-test-user-entry"
+        feature = "qemu-test-user-entry",
+        feature = "qemu-test-user-trap"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -957,7 +1069,8 @@ fn successful_qemu_test_shutdown() -> ! {
     any(
         feature = "qemu-test-vm",
         feature = "qemu-test-elf",
-        feature = "qemu-test-user-entry"
+        feature = "qemu-test-user-entry",
+        feature = "qemu-test-user-trap"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {

@@ -58,6 +58,41 @@ impl UserContext {
     pub const fn sstatus(&self) -> usize {
         self.sstatus
     }
+
+    /// Updates the program counter. Only the trap classifier advances it,
+    /// by exactly one `ecall` instruction width.
+    pub(crate) fn set_sepc(&mut self, value: usize) {
+        self.sepc = value;
+    }
+}
+
+#[cfg(test)]
+impl UserContext {
+    /// Builds a context whose every register slot holds a distinct pattern.
+    ///
+    /// Trap-classification tests use it to prove that only `sepc` moves and
+    /// every saved register byte survives the round trip.
+    pub(crate) fn patterned_for_test(sepc: usize) -> Self {
+        let mut context = Self {
+            registers: [0; 32],
+            sepc,
+            sstatus: SSTATUS_SPIE,
+        };
+        for (index, slot) in context.registers.iter_mut().enumerate() {
+            *slot = 0x5150_0000_0000_0000 | index;
+        }
+        context
+    }
+
+    /// Returns a copy of the raw register file for exact-equality assertions.
+    pub(crate) fn registers_for_test(&self) -> [usize; 32] {
+        self.registers
+    }
+
+    /// Forces `sstatus`, used to model a trap that originated in S-mode.
+    pub(crate) fn set_sstatus_for_test(&mut self, sstatus: usize) {
+        self.sstatus = sstatus;
+    }
 }
 
 #[cfg(test)]
