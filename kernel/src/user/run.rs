@@ -23,6 +23,8 @@ const fn sv39_satp_bits(root: PhysPageNum) -> u64 {
 /// `UserRun`構築中の失敗。
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunBuildError<E> {
+    /// imageと指定allocatorのprovenanceが一致しない。
+    WrongAllocator,
     /// trap stackを構成する物理frameが不足した。
     OutOfFrames,
     /// allocatorの断片化により連続したtrap stackを構成できなかった。
@@ -31,6 +33,32 @@ pub enum RunBuildError<E> {
     Memory(E),
     /// 構築失敗後の所有frame回収に失敗した。
     Cleanup(FrameError),
+}
+
+/// `UserRun`構築失敗と、必要ならcallerへ返すretryable image。
+pub struct RunBuildFailure<'storage, const N: usize, E> {
+    error: RunBuildError<E>,
+    image: Option<LoadedImage<'storage, N>>,
+}
+
+impl<'storage, const N: usize, E> RunBuildFailure<'storage, N, E> {
+    pub const fn error(&self) -> &RunBuildError<E> {
+        &self.error
+    }
+
+    pub fn into_parts(self) -> (RunBuildError<E>, Option<LoadedImage<'storage, N>>) {
+        (self.error, self.image)
+    }
+}
+
+impl<const N: usize, E: fmt::Debug> fmt::Debug for RunBuildFailure<'_, N, E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunBuildFailure")
+            .field("error", &self.error)
+            .field("retains_image", &self.image.is_some())
+            .finish()
+    }
 }
 
 /// user実行の終了または回収時の失敗。
@@ -42,6 +70,42 @@ pub enum RunError<E> {
     Reclaim(FrameError),
     /// sinkと回収が両方失敗した。
     SinkAndReclaim { sink: E, reclaim: FrameError },
+}
+
+/// architecture固有のU-mode入口へ渡す、borrowを含まない実行値。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserLaunch {
+    user_satp: u64,
+    kernel_satp: u64,
+    kernel_stack_top: usize,
+}
+
+impl UserLaunch {
+    pub const fn user_satp(self) -> u64 {
+        self.user_satp
+    }
+
+    pub const fn kernel_satp(self) -> u64 {
+        self.kernel_satp
+    }
+
+    pub const fn kernel_stack_top(self) -> usize {
+        self.kernel_stack_top
+    }
+}
+
+/// architecture固有の実行窓がkernelへ戻した結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Exit(u32),
+    Fatal,
+}
+
+/// resource回収まで完了した実行結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCompletion {
+    Exit(u32),
+    Fatal,
 }
 
 /// 一回のuser実行にだけ属するresourceをまとめる。
@@ -78,7 +142,13 @@ impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, W
         allocator: &'run mut FrameAllocator<WORDS>,
         memory: &'run mut M,
         kernel_root: PhysPageNum,
-    ) -> Result<Self, RunBuildError<M::Error>> {
+    ) -> Result<Self, RunBuildFailure<'run, N, M::Error>> {
+        if image.allocator_id() != allocator.allocator_id() {
+            return Err(RunBuildFailure {
+                error: RunBuildError::WrongAllocator,
+                image: Some(image),
+            });
+        }
         let user_root = PhysPageNum::from_start(image.address_space().root().as_u64())
             .expect("loaded image roots are page-aligned physical page numbers");
         let mut kernel_stack = [const { None }; KERNEL_STACK_PAGES];
@@ -157,6 +227,34 @@ impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, W
         self.allocator.stats()
     }
 
+    /// architecture固有の実行窓を一度呼び、kernelへ戻った後に必ず回収する。
+    ///
+    /// `enter`は`UserLaunch`を使ってU-modeへ移り、kernel satpとcaller stackを
+    /// 復元してから`RunOutcome`を返さなければならない。FatalではExit frameを
+    /// 送らず、Exitではframe送信成否にかかわらず同じ回収処理を実行する。
+    pub fn execute<S, F>(
+        &mut self,
+        sink: &mut S,
+        enter: F,
+    ) -> Result<RunCompletion, RunError<S::Error>>
+    where
+        S: ControlSink,
+        F: FnOnce(UserLaunch) -> RunOutcome,
+    {
+        let launch = UserLaunch {
+            user_satp: self.user_satp,
+            kernel_satp: self.kernel_satp,
+            kernel_stack_top: self.kernel_stack_top(),
+        };
+        match enter(launch) {
+            RunOutcome::Exit(code) => self.finish_exit(code, sink).map(RunCompletion::Exit),
+            RunOutcome::Fatal => {
+                self.reclaim().map_err(RunError::Reclaim)?;
+                Ok(RunCompletion::Fatal)
+            }
+        }
+    }
+
     /// Exit frameを一回送った後、送信成否にかかわらず全resourceを回収する。
     pub fn finish_exit<S: ControlSink>(
         &mut self,
@@ -206,30 +304,35 @@ fn build_failure<'storage, const N: usize, const WORDS: usize, E>(
     stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
     allocator: &mut FrameAllocator<WORDS>,
     primary: RunBuildError<E>,
-) -> RunBuildError<E> {
-    if let Err(error) = reclaim_stack(stack, allocator) {
-        return RunBuildError::Cleanup(error);
-    }
+) -> RunBuildFailure<'storage, N, E> {
+    reclaim_stack(stack, allocator);
     match image.destroy(allocator) {
-        Ok(()) => primary,
-        Err(error) => RunBuildError::Cleanup(error.frame_error()),
+        Ok(()) => RunBuildFailure {
+            error: primary,
+            image: None,
+        },
+        Err(error) => {
+            let (frame_error, image) = error.into_parts();
+            RunBuildFailure {
+                error: RunBuildError::Cleanup(frame_error),
+                image: Some(image),
+            }
+        }
     }
 }
 
 fn reclaim_stack<const WORDS: usize>(
     stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
     allocator: &mut FrameAllocator<WORDS>,
-) -> Result<(), FrameError> {
+) {
     for index in (0..KERNEL_STACK_PAGES).rev() {
         let Some(frame) = stack[index].take() else {
             continue;
         };
-        if let Err((error, frame)) = allocator.deallocate_recoverable(frame) {
-            stack[index] = Some(frame);
-            return Err(error);
-        }
+        allocator
+            .deallocate(frame)
+            .expect("newly allocated kernel stack frame remains owned during rollback");
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -238,7 +341,7 @@ mod tests {
 
     use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
-    use super::{KERNEL_STACK_PAGES, RunBuildError, RunError, UserRun};
+    use super::{KERNEL_STACK_PAGES, RunBuildError, RunCompletion, RunError, RunOutcome, UserRun};
     use crate::{
         elf::{fixture::valid_riscv64_elf, load_image},
         memory::frame::{FrameAllocator, FrameStats, PAGE_SIZE},
@@ -488,7 +591,7 @@ mod tests {
             ..FakeSink::default()
         };
         let mut run = fixture.build_run();
-        let outcome = run.finish_exit(42, &mut sink);
+        let outcome = run.execute(&mut sink, |_| RunOutcome::Exit(42));
 
         assert_eq!(outcome, Err(RunError::Sink(SinkError::Injected)));
         assert!(sink.frames.is_empty());
@@ -496,15 +599,18 @@ mod tests {
         assert!(fixture.storage.is_empty());
     }
 
-    // Catches leaking the run when a user trap turned fatal and no Exit frame
-    // was ever sent.
+    // Catches leaking the run when execution reports a fatal user trap and no
+    // Exit frame must be sent.
     #[test]
-    fn fatal_reclaim_restores_the_baseline_without_any_frame() {
+    fn fatal_execution_restores_the_baseline_without_any_frame() {
         let mut fixture = RunFixture::new();
         let before = fixture.baseline();
+        let mut sink = FakeSink::default();
         let mut run = fixture.build_run();
-        run.reclaim().unwrap();
+        let completion = run.execute(&mut sink, |_| RunOutcome::Fatal).unwrap();
 
+        assert_eq!(completion, RunCompletion::Fatal);
+        assert!(sink.frames.is_empty());
         assert_eq!(fixture.frames.stats(), before);
         assert!(fixture.storage.is_empty());
     }
@@ -533,7 +639,7 @@ mod tests {
 
         let outcome = UserRun::new(image, &mut fixture.frames, &mut fixture.memory, kernel_root);
 
-        assert_eq!(outcome.unwrap_err(), RunBuildError::OutOfFrames);
+        assert_eq!(outcome.unwrap_err().error(), &RunBuildError::OutOfFrames);
         assert_eq!(
             fixture.frames.stats().allocated,
             allocated_when_full - image_frames
@@ -562,9 +668,49 @@ mod tests {
         let outcome = UserRun::new(image, &mut fixture.frames, &mut fixture.memory, kernel_root);
 
         assert_eq!(
-            outcome.unwrap_err(),
-            RunBuildError::Memory(TestStoreError::InjectedZero)
+            outcome.unwrap_err().error(),
+            &RunBuildError::Memory(TestStoreError::InjectedZero)
         );
+        assert_eq!(fixture.frames.stats(), before);
+        assert!(fixture.storage.is_empty());
+    }
+
+    // Catches consuming a retryable image when the caller pairs it with a
+    // different allocator instance. No stack allocation may start first.
+    #[test]
+    fn wrong_allocator_failure_returns_the_image_for_origin_retry() {
+        let mut fixture = RunFixture::new();
+        let before = fixture.baseline();
+        let bytes = valid_riscv64_elf();
+        let image = load_image(
+            &bytes,
+            &mut fixture.frames,
+            &mut fixture.memory,
+            &mut fixture.storage,
+        )
+        .unwrap();
+        let loaded = fixture.frames.stats();
+        let mut wrong_allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x181_000) }.unwrap();
+        let wrong_before = wrong_allocator.stats();
+        let kernel_root = PhysPageNum::from_start(SYNTHETIC_KERNEL_ROOT).unwrap();
+
+        let failure = UserRun::new(
+            image,
+            &mut wrong_allocator,
+            &mut fixture.memory,
+            kernel_root,
+        )
+        .unwrap_err();
+        assert_eq!(failure.error(), &RunBuildError::WrongAllocator);
+        assert_eq!(fixture.frames.stats(), loaded);
+        let (error, image) = failure.into_parts();
+        assert_eq!(error, RunBuildError::WrongAllocator);
+        image
+            .expect("wrong allocator failure retains the image")
+            .destroy(&mut fixture.frames)
+            .unwrap();
+
+        assert_eq!(wrong_allocator.stats(), wrong_before);
         assert_eq!(fixture.frames.stats(), before);
         assert!(fixture.storage.is_empty());
     }

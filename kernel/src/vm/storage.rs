@@ -35,7 +35,7 @@ pub enum IdentityFrameStoreError {
     FrameOutsideManagedRange,
     IndexOutOfBounds,
     RangeOutOfBounds,
-    BufferOverlapsManagedRange,
+    BufferOverlapsCopyRange,
 }
 
 #[cfg(any(target_arch = "riscv64", test))]
@@ -106,16 +106,20 @@ fn checked_frame_range(
 }
 
 #[cfg(any(target_arch = "riscv64", test))]
-fn checked_external_buffer(
-    managed: &IdentityFrameRange,
+fn checked_copy_buffer(
+    copy_start: usize,
+    copy_len: usize,
     buffer_start: usize,
-    len: usize,
+    buffer_len: usize,
 ) -> Result<(), IdentityFrameStoreError> {
-    let buffer_end = buffer_start
-        .checked_add(len)
+    let copy_end = copy_start
+        .checked_add(copy_len)
         .ok_or(IdentityFrameStoreError::AddressOverflow)?;
-    if len != 0 && buffer_start < managed.end && buffer_end > managed.start {
-        return Err(IdentityFrameStoreError::BufferOverlapsManagedRange);
+    let buffer_end = buffer_start
+        .checked_add(buffer_len)
+        .ok_or(IdentityFrameStoreError::AddressOverflow)?;
+    if copy_len != 0 && buffer_len != 0 && buffer_start < copy_end && buffer_end > copy_start {
+        return Err(IdentityFrameStoreError::BufferOverlapsCopyRange);
     }
     Ok(())
 }
@@ -128,18 +132,18 @@ pub struct IdentityFrameStore {
 
 #[cfg(target_arch = "riscv64")]
 impl IdentityFrameStore {
-    /// Creates the sole byte-access capability for an identity-mapped RAM range.
+    /// Creates a checked byte-access capability for an identity-mapped RAM range.
     ///
     /// # Safety
     ///
     /// If this function returns `Ok`, `managed_start..managed_end` must remain
     /// valid RAM and identity-mapped for the entire lifetime of the returned
-    /// store. The caller must grant this store exclusive byte access to the
-    /// complete range: no overlapping `IdentityFrameStore`, raw access, or Rust
-    /// reference may read or write it except through this store. A frame
-    /// allocator may assign ownership within the range, but it must not itself
-    /// dereference frame memory. If validation returns `Err`, no capability is
-    /// created and the caller retains all obligations.
+    /// store. No overlapping `IdentityFrameStore` may exist. For each operation,
+    /// the caller must own the target frame and prevent concurrent access to the
+    /// same bytes. Allocator-owned frames may back kernel Rust buffers (for
+    /// example a trap stack); copy operations check that such a buffer is
+    /// disjoint from their actual source/destination range before raw access.
+    /// If validation returns `Err`, no capability is created.
     pub unsafe fn new(
         managed_start: usize,
         managed_end: usize,
@@ -200,11 +204,16 @@ impl FrameStore for IdentityFrameStore {
         let destination = frame_start
             .checked_add(offset)
             .ok_or(IdentityFrameStoreError::AddressOverflow)?;
-        checked_external_buffer(&self.managed, bytes.as_ptr() as usize, bytes.len())?;
+        checked_copy_buffer(
+            destination,
+            bytes.len(),
+            bytes.as_ptr() as usize,
+            bytes.len(),
+        )?;
         // Safety: the destination frame and byte range were checked before
-        // pointer derivation. The unsafe constructor grants the store exclusive
-        // access to all managed bytes, and the runtime buffer check rejects an
-        // overlapping source even if that constructor contract was violated.
+        // pointer derivation. The caller's target-frame ownership serializes
+        // access to these bytes, and the runtime check rejects an overlapping
+        // source buffer.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), destination as *mut u8, bytes.len())
         };
@@ -221,10 +230,16 @@ impl FrameStore for IdentityFrameStore {
         let source = frame_start
             .checked_add(offset)
             .ok_or(IdentityFrameStoreError::AddressOverflow)?;
-        checked_external_buffer(&self.managed, output.as_ptr() as usize, output.len())?;
+        checked_copy_buffer(
+            source,
+            output.len(),
+            output.as_mut_ptr() as usize,
+            output.len(),
+        )?;
         // Safety: the source frame and byte range were checked before pointer
-        // derivation. The unsafe constructor excludes Rust references into the
-        // managed range, and the runtime check also rejects overlapping output.
+        // derivation. Target-frame ownership serializes reads from the source,
+        // and the runtime check rejects an overlapping output buffer while
+        // allowing a disjoint allocator-owned kernel buffer.
         unsafe {
             core::ptr::copy_nonoverlapping(source as *const u8, output.as_mut_ptr(), output.len())
         };
@@ -235,7 +250,7 @@ impl FrameStore for IdentityFrameStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        IdentityFrameRange, IdentityFrameStoreError, checked_external_buffer, checked_frame,
+        IdentityFrameRange, IdentityFrameStoreError, checked_copy_buffer, checked_frame,
         checked_frame_range, checked_word_offset,
     };
     use crate::memory::frame::PAGE_SIZE;
@@ -321,21 +336,20 @@ mod tests {
         );
     }
 
-    // Catches copy_into/copy_out accepting a Rust reference into the store's
-    // exclusively held direct-map range, or wrapping its buffer end.
+    // Catches rejecting a kernel buffer in another allocator-owned frame, or
+    // accepting a buffer that overlaps the actual copy source/destination.
     #[test]
-    fn identity_store_rejects_buffers_that_alias_managed_ram() {
-        let managed = managed_range();
-
-        assert_eq!(checked_external_buffer(&managed, 0x3000, 0x1000), Ok(()));
-        assert_eq!(checked_external_buffer(&managed, 0x8000, 1), Ok(()));
-        assert_eq!(checked_external_buffer(&managed, 0x5000, 0), Ok(()));
+    fn identity_store_allows_disjoint_managed_buffers_and_rejects_copy_overlap() {
+        assert_eq!(checked_copy_buffer(0x4000, 0x1000, 0x6000, 0x1000), Ok(()));
+        assert_eq!(checked_copy_buffer(0x4000, 0x1000, 0x3000, 0x1000), Ok(()));
+        assert_eq!(checked_copy_buffer(0x4000, 0x1000, 0x5000, 1), Ok(()));
+        assert_eq!(checked_copy_buffer(0x4000, 0, 0x4000, 1), Ok(()));
         assert_eq!(
-            checked_external_buffer(&managed, 0x5000, 1),
-            Err(IdentityFrameStoreError::BufferOverlapsManagedRange)
+            checked_copy_buffer(0x4000, 0x1000, 0x4000, 1),
+            Err(IdentityFrameStoreError::BufferOverlapsCopyRange)
         );
         assert_eq!(
-            checked_external_buffer(&managed, usize::MAX, 2),
+            checked_copy_buffer(0x4000, 0x1000, usize::MAX, 2),
             Err(IdentityFrameStoreError::AddressOverflow)
         );
     }

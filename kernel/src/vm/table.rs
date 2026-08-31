@@ -366,6 +366,10 @@ impl<'storage, const N: usize> AddressSpace<'storage, N> {
         self.root
     }
 
+    pub(crate) const fn allocator_id(&self) -> u64 {
+        self.allocator_id
+    }
+
     pub fn translate<M: FrameStore>(
         &self,
         memory: &M,

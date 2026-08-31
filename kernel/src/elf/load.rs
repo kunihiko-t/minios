@@ -70,6 +70,10 @@ impl<'storage, const N: usize> LoadedImage<'storage, N> {
         &self.address_space
     }
 
+    pub(crate) const fn allocator_id(&self) -> u64 {
+        self.address_space.allocator_id()
+    }
+
     /// Returns every owned frame, retaining this image if the allocator rejects it.
     pub fn destroy<const WORDS: usize>(
         self,

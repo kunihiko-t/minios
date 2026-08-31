@@ -22,6 +22,9 @@ const USER_TRAP_REJECTED_MARKER: &str = "[MINIOS_TEST] user-trap: rejected";
 const USER_TRAP_OK_MARKER: &str = "[MINIOS_TEST] user-trap: ok";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
 const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
+const USER_EXIT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x03\0\0\0MK5";
+const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
+const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] = b"help\ninfo\nuptime\nmemory\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
@@ -117,6 +120,11 @@ pub enum QemuError {
         forbidden: &'static str,
         output: String,
     },
+    MissingControlFrame {
+        command: String,
+        expected: &'static str,
+        output: String,
+    },
     MissingShellOutput {
         command: String,
         expected: &'static str,
@@ -174,6 +182,15 @@ impl fmt::Display for QemuError {
             } => write!(
                 formatter,
                 "QEMU test printed the forbidden marker {forbidden}:\ncommand: {command}\n{}",
+                output.trim_end()
+            ),
+            Self::MissingControlFrame {
+                command,
+                expected,
+                output,
+            } => write!(
+                formatter,
+                "QEMU user-exit output did not contain the ordered {expected}:\ncommand: {command}\n{}",
                 output.trim_end()
             ),
             Self::MissingShellOutput {
@@ -615,7 +632,32 @@ fn verify_test_result(
             output: output.to_owned(),
         });
     }
+    if kind == TestKind::UserExit {
+        verify_user_exit_control_frames(command, output)?;
+    }
     Ok(output.to_owned())
+}
+
+fn verify_user_exit_control_frames(command: &str, output: &str) -> Result<(), QemuError> {
+    let mut remaining = output.as_bytes();
+    for (expected, frame) in [
+        ("Stdout(MK5) frame", USER_EXIT_STDOUT_FRAME),
+        ("Stderr(MK5) frame", USER_EXIT_STDERR_FRAME),
+        ("Exit(42) frame", USER_EXIT_CONTROL_FRAME),
+    ] {
+        let Some(position) = remaining
+            .windows(frame.len())
+            .position(|bytes| bytes == frame)
+        else {
+            return Err(QemuError::MissingControlFrame {
+                command: command.to_owned(),
+                expected,
+                output: output.to_owned(),
+            });
+        };
+        remaining = &remaining[position + frame.len()..];
+    }
+    Ok(())
 }
 
 fn verify_shell_result(
@@ -875,6 +917,31 @@ mod tests {
                 status: Some(1),
                 output: rejected.to_owned(),
             })
+        );
+    }
+
+    // Catches accepting the cleanup marker when the guest write calls failed
+    // and only the final Exit frame reached the UART.
+    #[test]
+    fn user_exit_requires_stdout_stderr_and_exit_control_frames() {
+        let output =
+            "OpenSBI\nMCF1\u{4}\0\0\0\u{4}\0\0\0*\0\0\0\r\n[MINIOS_TEST] user-exit: ok code=42\r\n";
+
+        assert!(
+            verify_test_result(TEST_COMMAND, TestKind::UserExit, Some(0), output).is_err(),
+            "the marker alone must not hide missing stdout/stderr frames"
+        );
+
+        let complete = concat!(
+            "OpenSBI\n",
+            "MCF1\u{2}\0\0\0\u{3}\0\0\0MK5",
+            "MCF1\u{3}\0\0\0\u{3}\0\0\0MK5",
+            "MCF1\u{4}\0\0\0\u{4}\0\0\0*\0\0\0",
+            "\r\n[MINIOS_TEST] user-exit: ok code=42\r\n"
+        );
+        assert_eq!(
+            verify_test_result(TEST_COMMAND, TestKind::UserExit, Some(0), complete),
+            Ok(complete.to_owned())
         );
     }
 
