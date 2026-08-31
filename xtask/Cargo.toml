@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+minios-abi = { path = "../abi" }
+
 [lib]
 path = "src/lib.rs"
 

@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::cargo;
+use minios_abi::control::{FRAME_HEADER_LEN, FrameHeader};
 
 const QEMU_PROGRAM: &str = "qemu-system-riscv64";
 const BOOT_MARKER: &str = "[MINIOS_TEST] boot: ok";
@@ -599,6 +600,7 @@ fn qemu_command_with_payload(kernel: &Path, bundle: &Path) -> (Command, String) 
 }
 
 /// payload検査で期待されるcontrol frame列 (Ready→stdout→stderr→Exit→cleanup)。
+#[cfg(test)]
 fn expected_payload_frames() -> Vec<u8> {
     let mut expected = Vec::new();
     expected.extend_from_slice(PAYLOAD_READY_FRAME);
@@ -621,18 +623,60 @@ fn verify_payload_result(
             output: output.to_owned(),
         });
     }
-    let expected = expected_payload_frames();
     let output_bytes = output.as_bytes();
-    if !output_bytes
-        .windows(expected.len())
-        .any(|window| window == expected)
-    {
+    if !has_exact_payload_frames(output_bytes) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
         });
     }
     Ok(output.to_owned())
+}
+
+/// Ready前のfirmware出力を許可し、Readyから出力末尾までをpayload control frameとして
+/// 完全に消費する。
+fn has_exact_payload_frames(output: &[u8]) -> bool {
+    let Some(start) = output
+        .windows(PAYLOAD_READY_FRAME.len())
+        .position(|window| window == PAYLOAD_READY_FRAME)
+    else {
+        return false;
+    };
+    let mut remaining = &output[start..];
+
+    let expected_frames = [
+        PAYLOAD_READY_FRAME,
+        PAYLOAD_STDOUT_FRAME,
+        PAYLOAD_STDERR_FRAME,
+        PAYLOAD_EXIT_FRAME,
+        PAYLOAD_DIAGNOSTIC_FRAME,
+    ];
+    let mut expected_index = 0;
+
+    while !remaining.is_empty() {
+        let Some(header_bytes) = remaining.get(..FRAME_HEADER_LEN) else {
+            return false;
+        };
+        let Ok(header) = FrameHeader::decode(header_bytes) else {
+            return false;
+        };
+        let Ok(payload_len) = usize::try_from(header.payload_len) else {
+            return false;
+        };
+        let Some(frame) = remaining.get(..FRAME_HEADER_LEN + payload_len) else {
+            return false;
+        };
+        let Some(expected) = expected_frames.get(expected_index) else {
+            return false;
+        };
+        if frame != *expected {
+            return false;
+        }
+        expected_index += 1;
+        remaining = &remaining[frame.len()..];
+    }
+
+    expected_index == expected_frames.len()
 }
 
 /// payload検査用の一時MiniBundle file。生成時に書き込み、removeで必ず消す。
@@ -1721,6 +1765,57 @@ mod tests {
         ));
     }
 
+    // Catches accepting UART text after Ready, where the payload contract
+    // requires every remaining byte to belong to a control frame.
+    #[test]
+    fn payload_verification_rejects_plain_uart_after_ready() {
+        let mut output = complete_payload_output();
+        output.push('!');
+
+        assert!(matches!(
+            verify_payload_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+    }
+
+    // Catches accepting a complete but unsupported control frame after the
+    // expected payload result.
+    #[test]
+    fn payload_verification_rejects_unknown_frame_after_ready() {
+        let mut output = complete_payload_output();
+        output.push_str("MCF1\x7f\0\0\0\0\0\0\0");
+
+        assert!(matches!(
+            verify_payload_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+    }
+
+    // Catches accepting a second Ready frame after the expected sequence.
+    #[test]
+    fn payload_verification_rejects_out_of_order_frame_after_ready() {
+        let mut output = complete_payload_output();
+        output.push_str(std::str::from_utf8(PAYLOAD_READY_FRAME).unwrap());
+
+        assert!(matches!(
+            verify_payload_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+    }
+
+    // Catches accepting a partial header that leaves unconsumed bytes after
+    // the expected frame sequence.
+    #[test]
+    fn payload_verification_rejects_truncated_frame_after_ready() {
+        let mut output = complete_payload_output();
+        output.push_str("MCF1\x02");
+
+        assert!(matches!(
+            verify_payload_result(TEST_COMMAND, Some(0), &output),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+    }
+
     #[test]
     fn drains_large_stdout_and_stderr_before_the_deadline() {
         let mut command = Command::new("sh");
@@ -1843,6 +1938,14 @@ mod tests {
             !status.success(),
             "the timed-out user-test child must be killed and reaped"
         );
+    }
+
+    fn complete_payload_output() -> String {
+        let mut output = "OpenSBI\n[ok] traps\n".to_owned();
+        for frame in expected_payload_frames() {
+            output.push(frame as char);
+        }
+        output
     }
 
     fn shell_quote_path(path: &Path) -> String {
