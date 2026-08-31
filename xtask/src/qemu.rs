@@ -262,6 +262,15 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
 
     let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
     let (command, command_line) = qemu_command(&kernel);
+    run_marker_test(kind, command, command_line, deadline)
+}
+
+fn run_marker_test(
+    kind: TestKind,
+    command: Command,
+    command_line: String,
+    deadline: Duration,
+) -> Result<String, QemuError> {
     let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
     verify_test_result(
         &command_line,
@@ -1779,6 +1788,61 @@ mod tests {
             .expect("kill must start");
         let _ = fs::remove_file(&pid_file);
         assert!(!status.success(), "timed-out child must have been reaped");
+    }
+
+    // Catches the user-trap path bypassing the shared timeout cleanup after
+    // emitting its expected rejection diagnostic.
+    #[test]
+    fn user_trap_harness_reaps_a_timed_out_negative_result() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "minios-user-trap-pid-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after Unix epoch")
+                .as_nanos()
+        ));
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "echo $$ > '{}'; printf '{}'; exec sleep 30",
+                shell_quote_path(&pid_file),
+                USER_TRAP_REJECTED_MARKER,
+            ),
+        ]);
+
+        let command_line = "'sh' '-c' 'user-trap timeout fixture'".to_owned();
+        let error = run_marker_test(
+            TestKind::UserTrap,
+            command,
+            command_line.clone(),
+            Duration::from_millis(50),
+        )
+        .expect_err("the sleeping user-trap fixture must time out");
+        let output = match error {
+            QemuError::TimedOut {
+                command, output, ..
+            } => {
+                assert_eq!(command, command_line);
+                output
+            }
+            other => panic!("expected timeout, got {other:?}"),
+        };
+
+        assert!(output.contains(USER_TRAP_REJECTED_MARKER));
+        assert!(!output.contains(USER_TRAP_OK_MARKER));
+        let pid = fs::read_to_string(&pid_file).expect("timed-out process must record its PID");
+        let status = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill must start");
+        let _ = fs::remove_file(&pid_file);
+        assert!(
+            !status.success(),
+            "the timed-out user-test child must be killed and reaped"
+        );
     }
 
     fn shell_quote_path(path: &Path) -> String {

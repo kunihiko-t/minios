@@ -13,7 +13,7 @@ const REQUIRED_SECTIONS: [&str; 7] = [
     "次の章",
 ];
 
-const REQUIRED_CHAPTERS: [&str; 14] = [
+const REQUIRED_CHAPTERS: [&str; 16] = [
     "01-introduction.md",
     "02-setup.md",
     "03-no-std-and-linking.md",
@@ -28,6 +28,8 @@ const REQUIRED_CHAPTERS: [&str; 14] = [
     "12-next-steps.md",
     "13-sv39.md",
     "14-elf-loading.md",
+    "15-user-mode.md",
+    "16-boot-payload.md",
 ];
 
 const REQUIRED_PUBLICATION_FILES: [&str; 6] = [
@@ -1499,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn guide_structure_scope_is_chapters_one_through_fourteen() {
+    fn guide_structure_scope_is_chapters_one_through_sixteen() {
         let temp = TestTree::new();
         temp.write_complete_guide();
         temp.write("docs/guide/15-not-a-milestone-chapter.md", "# Appendix\n");

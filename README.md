@@ -2,7 +2,8 @@
 
 MiniOSは、RustとRISC-V 64でOSの基礎を段階的に学ぶための小さな`no_std`カーネルです。
 QEMU `virt`上のOpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーター、Sv39のカーネルアドレス空間を備えています。
-静的なRISC-V 64 ELFを検証し、実行前のユーザーアドレス空間へ配置するloaderも備えています。
+静的なRISC-V 64 ELFを検証し、U-modeで`write`と`exit`を実行するloaderも備えています。
+MiniBundle boot payloadはQEMU loaderから予約物理windowへ渡せます。
 日本語の学習ガイドと、同じ結果を繰り返し確認できるテストハーネスも用意しています。
 
 ## 五つのコマンドで試す
@@ -52,7 +53,7 @@ shutting down
 | ゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、1ハート、128 MiB RAM |
 | コンソール | 16550互換UART | MMIOベース`0x1000_0000`、QEMUのシリアル標準入出力 |
 
-Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在の受け入れテストに含まれません。
+Windowsホスト、別のQEMUマシン、マルチハート、実機は保証しません。
 
 ## 学習ガイド
 
@@ -72,6 +73,8 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在
 12. [次に作るもの](docs/guide/12-next-steps.md)
 13. [Sv39と単一アドレス空間](docs/guide/13-sv39.md)
 14. [ELFを実行前アドレス空間へ配置する](docs/guide/14-elf-loading.md)
+15. [U-modeでELFを実行する](docs/guide/15-user-mode.md)
+16. [boot payloadを実行する](docs/guide/16-boot-payload.md)
 
 ## 設計資料
 
@@ -84,19 +87,21 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は、現在
 
 ## テスト
 
-対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|vm|elf|shell]`を使います。
+対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|shell]`を使います。
 リリース前の全検査は次のコマンドで実行します。
 
 ```sh
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの7経路を19段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの12経路を24段階で検査します。
 
 ## 現在の制約
 
-動的ヒープ、ユーザーモード、ユーザー用トラップコンテキスト、システムコール、プロセス、VirtIO、ファイルシステム、ネットワーク、マルチハート、Device Tree解析、実機ドライバーは未実装です。
-ELF loaderが作る`LoadedImage`はinactiveであり、現在のカーネルはentry pointへ遷移せず、`write`と`exit`も実行しません。
+MiniOSが実行対象にするのは、MiniBundleへ格納した静的RISC-V 64 ELFだけです。
+OCI image、network、volume、Linux binary互換、multi-tenant isolation、Windowsは保証しません。
+動的ヒープ、プロセス管理、VirtIO、ファイルシステム、network、マルチハート、Device Tree解析、実機driverは未実装です。
+`write`はstdoutとstderrだけを扱い、`exit`は一つのU-mode実行をkernelへ戻します。
 ハードウェアアドレス、10 MHzのタイムベース、128 MiBの上端はQEMU `virt`に固定しています。
 シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
 永続ストレージとセキュリティー境界は提供しません。
