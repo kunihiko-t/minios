@@ -7,17 +7,26 @@
 
 // ホストテストでは、純粋なトラップ原因の解読を`arch::riscv64`から検証する。
 // RISC-Vバイナリー側は`main.rs`の`arch`を使い、起動シンボルの二重定義を避ける。
-#[cfg(not(target_arch = "riscv64"))]
+// RV32ターゲット追加後は`not(riscv64)`がRV32のlibビルドにも一致してしまうため、
+// ホストテスト用モジュールは`test`に限定する。RISC-Vのlib側には置かない。
+#[cfg(test)]
 pub mod arch;
+#[cfg(any(test, target_arch = "riscv64"))]
 pub mod boot_payload;
+#[cfg(any(test, target_arch = "riscv64"))]
 pub mod elf;
+// `frame.rs`のビットマップとID採番はu64前提のため、RV32のlibビルドから外す。
+// RV32用アロケーターは幅汎化と合わせて別途対応する。ホストテストでは検証を続ける。
+#[cfg(any(test, target_arch = "riscv64"))]
 pub mod memory;
 pub mod sbi;
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(test)]
 pub mod shell;
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(test)]
 pub mod time;
+#[cfg(any(test, target_arch = "riscv64"))]
 pub mod user;
+#[cfg(any(test, target_arch = "riscv64"))]
 pub mod vm;
 
 #[cfg(test)]

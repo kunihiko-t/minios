@@ -19,6 +19,10 @@ impl Uart {
         }
     }
 
+    pub const fn for_target() -> Self {
+        Self::qemu_virt()
+    }
+
     pub fn write_byte(&mut self, byte: u8) {
         while self.line_status() & TRANSMIT_READY == 0 {
             core::hint::spin_loop();

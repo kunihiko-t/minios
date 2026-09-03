@@ -89,9 +89,15 @@ compile_error!("QEMU kernel test features are mutually exclusive; enable at most
 
 #[cfg(target_arch = "riscv64")]
 mod arch;
+#[cfg(target_arch = "riscv32")]
+mod arch;
 #[cfg(target_arch = "riscv64")]
 mod console;
+#[cfg(target_arch = "riscv32")]
+mod console;
 #[cfg(target_arch = "riscv64")]
+mod drivers;
+#[cfg(target_arch = "riscv32")]
 mod drivers;
 #[cfg(target_arch = "riscv64")]
 mod shell;
@@ -103,7 +109,11 @@ mod control;
 
 #[cfg(target_arch = "riscv64")]
 use core::panic::PanicInfo;
+#[cfg(target_arch = "riscv32")]
+use core::panic::PanicInfo;
 #[cfg(target_arch = "riscv64")]
+use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_arch = "riscv32")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::boot_payload::BootPayload;
@@ -147,9 +157,9 @@ use minios_kernel::{
     vm::{FrameStore, IdentityFrameStoreError, PageFlags, PhysAddr},
 };
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 const UNKNOWN_HART_ID: usize = usize::MAX;
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(UNKNOWN_HART_ID);
 
 #[cfg(target_arch = "riscv64")]
@@ -207,19 +217,30 @@ static mut USER_PROBE_TRAP_STACK: UserProbeTrapStack =
 // production payload pathの両方が使う。
 // Safety: `__run_user`の直前にrunnerが設定し、handlerだけが解参照する。
 // kernelへ戻った直後にrunnerが0へ戻す。
+// user-mode実行基盤はRV64のQEMU運用の仕組みであり、RV32実機では使わない。
+#[cfg(target_arch = "riscv64")]
 static mut USER_SYSCALL_PROBE_SPACE: usize = 0;
+#[cfg(target_arch = "riscv64")]
 static mut USER_SYSCALL_PROBE_MEMORY: usize = 0;
 
 #[cfg(target_arch = "riscv64")]
 static mut PAYLOAD_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
 
+#[cfg(target_arch = "riscv64")]
 static USER_EXIT_CODE: AtomicUsize = AtomicUsize::new(usize::MAX);
+#[cfg(target_arch = "riscv64")]
 static USER_RUN_OUTCOME: AtomicUsize = AtomicUsize::new(USER_RUN_OUTCOME_NONE);
+#[cfg(target_arch = "riscv64")]
 static USER_FATAL_SCAUSE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "riscv64")]
 static USER_FATAL_STVAL: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_NONE: usize = 0;
+#[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_EXIT: usize = 1;
+#[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_FATAL_TRAP: usize = 2;
+#[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_SINK_FAILURE: usize = 3;
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
@@ -251,6 +272,8 @@ unsafe extern "C" {
 pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     // パニック診断が起動ハートを識別できるよう、ほかの初期化より前に記録する。
     BOOT_HART_ID.store(hart_id, Ordering::Relaxed);
+    // ターゲット固有のコンソール初期化。QEMUでは何もしない。
+    console::init();
     // DTB は後のハードウェア検出で使うまで保持する OpenSBI の ABI 引数である。
     let _ = dtb;
     arch::riscv64::trap::init();
@@ -1714,6 +1737,57 @@ fn fatal_memory_error(error: FrameError) -> ! {
         arch::riscv64::sbi::ResetType::Shutdown,
         arch::riscv64::sbi::ResetReason::SystemFailure,
     )
+}
+
+#[cfg(target_arch = "riscv32")]
+// `entry.S`はスタックとBSSを整えてからこのABI境界を呼ぶ。
+// NEORV32は単一ハートのMモード起動であり、OpenSBIやDTBは存在しない。
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_main32() -> ! {
+    BOOT_HART_ID.store(0, Ordering::Relaxed);
+    console::init();
+    crate::println!("MiniOS/RV32 booting...");
+    crate::println!("hart id: 0");
+    // シェル移植までの間、受信した1バイトを送り返して生死と送受信の両方向を示す。
+    loop {
+        let byte = console::read_byte();
+        console::write_byte(byte);
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+#[panic_handler]
+fn panic(info: &PanicInfo<'_>) -> ! {
+    let hart_id = BOOT_HART_ID.load(Ordering::Relaxed);
+    match (info.location(), hart_id != UNKNOWN_HART_ID) {
+        (Some(location), true) => crate::console::emergency_print(format_args!(
+            "MiniOS panic: {}\r\nfile: {}\r\nline: {}\r\nhart id: {}\r\n",
+            info.message(),
+            location.file(),
+            location.line(),
+            hart_id
+        )),
+        (Some(location), false) => crate::console::emergency_print(format_args!(
+            "MiniOS panic: {}\r\nfile: {}\r\nline: {}\r\n",
+            info.message(),
+            location.file(),
+            location.line()
+        )),
+        (None, true) => crate::console::emergency_print(format_args!(
+            "MiniOS panic: {}\r\nhart id: {}\r\n",
+            info.message(),
+            hart_id
+        )),
+        (None, false) => {
+            crate::console::emergency_print(format_args!("MiniOS panic: {}\r\n", info.message()))
+        }
+    }
+    // NEORV32にSBIはないため、割り込み待ちで停止する。
+    loop {
+        unsafe {
+            core::arch::asm!("wfi");
+        }
+    }
 }
 
 #[cfg(target_arch = "riscv64")]
