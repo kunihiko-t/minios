@@ -99,7 +99,7 @@ mod console;
 mod drivers;
 #[cfg(target_arch = "riscv32")]
 mod drivers;
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 mod shell;
 #[cfg(target_arch = "riscv64")]
 mod time;
@@ -1748,11 +1748,7 @@ pub extern "C" fn kernel_main32() -> ! {
     console::init();
     crate::println!("MiniOS/RV32 booting...");
     crate::println!("hart id: 0");
-    // シェル移植までの間、受信した1バイトを送り返して生死と送受信の両方向を示す。
-    loop {
-        let byte = console::read_byte();
-        console::write_byte(byte);
-    }
+    shell::run32(0)
 }
 
 #[cfg(target_arch = "riscv32")]
