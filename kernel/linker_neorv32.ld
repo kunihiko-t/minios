@@ -1,5 +1,5 @@
 /* NEORV32の内蔵IMEM/DMEMへ直接配置する、RV32実機用の起動契約。 */
-/* OpenOCDのload_imageで書き込み、`pc=0`から実行する。 */
+/* IMEMへロードし、`pc=0`の起動コードが.dataをDMEMへコピーする。 */
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
@@ -23,10 +23,13 @@ SECTIONS
 
   .data : ALIGN(4)
   {
+    __data_start = .;
     *(.data .data.*)
     *(.sdata .sdata.*)
     . = ALIGN(4);
+    __data_end = .;
   } > DMEM AT > IMEM
+  __data_load = LOADADDR(.data);
 
   .bss (NOLOAD) : ALIGN(4)
   {
