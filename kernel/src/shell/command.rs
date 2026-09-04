@@ -7,6 +7,8 @@ pub enum Command<'a> {
     Memory,
     Clear,
     Shutdown,
+    #[cfg(any(test, target_arch = "riscv32"))]
+    Echo(&'a str),
     Unknown(&'a str),
 }
 
@@ -20,6 +22,10 @@ pub fn parse_command(input: &str) -> Command<'_> {
         "memory" => Command::Memory,
         "clear" => Command::Clear,
         "shutdown" => Command::Shutdown,
+        #[cfg(any(test, target_arch = "riscv32"))]
+        "echo" => Command::Echo(""),
+        #[cfg(any(test, target_arch = "riscv32"))]
+        input if input.starts_with("echo ") => Command::Echo(input[5..].trim_start_matches(' ')),
         unknown => Command::Unknown(unknown),
     }
 }
@@ -55,5 +61,20 @@ mod tests {
     fn parser_distinguishes_empty_input_from_unknown_input() {
         assert_eq!(parse_command(" \t"), Command::Empty);
         assert_eq!(parse_command("HELP"), Command::Unknown("HELP"));
+    }
+
+    #[test]
+    fn parser_treats_echo_payload_as_a_command() {
+        assert_eq!(parse_command("echo hello"), Command::Echo("hello"));
+    }
+
+    #[test]
+    fn parser_treats_bare_echo_as_a_command() {
+        assert_eq!(parse_command("echo"), Command::Echo(""));
+    }
+
+    #[test]
+    fn parser_does_not_match_echo_prefixes() {
+        assert_eq!(parse_command("echoes"), Command::Unknown("echoes"));
     }
 }
