@@ -24,6 +24,8 @@ pub mod memory;
 pub mod sbi;
 #[cfg(test)]
 pub mod shell;
+#[cfg(any(test, target_arch = "riscv32"))]
+pub mod storage;
 #[cfg(test)]
 pub mod time;
 #[cfg(not(target_arch = "riscv32"))]
