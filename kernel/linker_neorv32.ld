@@ -5,8 +5,8 @@ ENTRY(_start)
 
 MEMORY
 {
-  /* NEORV32の`MEM_INT_IMEM_SIZE`と一致させる。 */
-  IMEM (rx)  : ORIGIN = 0x00000000, LENGTH = 24288
+  /* top.vhdとNEORV32が使う実効32 KiB IMEMに合わせる。旧24288-byte要求は2のべき乗へ丸められる。 */
+  IMEM (rx)  : ORIGIN = 0x00000000, LENGTH = 32768
   /* NEORV32の`MEM_INT_DMEM_SIZE`と一致させる。 */
   DMEM (rwx) : ORIGIN = 0x80000000, LENGTH = 16192
 }

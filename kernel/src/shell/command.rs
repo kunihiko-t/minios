@@ -9,6 +9,10 @@ pub enum Command<'a> {
     Shutdown,
     #[cfg(any(test, target_arch = "riscv32"))]
     Echo(&'a str),
+    #[cfg(any(test, target_arch = "riscv32"))]
+    Ls,
+    #[cfg(any(test, target_arch = "riscv32"))]
+    Cat(&'a str),
     Unknown(&'a str),
 }
 
@@ -26,6 +30,16 @@ pub fn parse_command(input: &str) -> Command<'_> {
         "echo" => Command::Echo(""),
         #[cfg(any(test, target_arch = "riscv32"))]
         input if input.starts_with("echo ") => Command::Echo(input[5..].trim_start_matches(' ')),
+        #[cfg(any(test, target_arch = "riscv32"))]
+        "ls" => Command::Ls,
+        #[cfg(any(test, target_arch = "riscv32"))]
+        "cat" => Command::Cat(""),
+        #[cfg(any(test, target_arch = "riscv32"))]
+        input => match input.strip_prefix("cat ") {
+            Some(argument) => Command::Cat(argument.trim_start_matches(' ')),
+            None => Command::Unknown(input),
+        },
+        #[cfg(not(any(test, target_arch = "riscv32")))]
         unknown => Command::Unknown(unknown),
     }
 }
@@ -76,5 +90,23 @@ mod tests {
     #[test]
     fn parser_does_not_match_echo_prefixes() {
         assert_eq!(parse_command("echoes"), Command::Unknown("echoes"));
+    }
+
+    #[test]
+    fn parser_recognizes_rv32_storage_commands() {
+        assert_eq!(parse_command("ls"), Command::Ls);
+        assert_eq!(parse_command("cat HELLO.TXT"), Command::Cat("HELLO.TXT"));
+    }
+
+    #[test]
+    fn parser_preserves_an_empty_cat_argument_for_a_usage_error() {
+        assert_eq!(parse_command("cat"), Command::Cat(""));
+        assert_eq!(parse_command("cat    "), Command::Cat(""));
+    }
+
+    #[test]
+    fn parser_does_not_match_storage_command_prefixes() {
+        assert_eq!(parse_command("listing"), Command::Unknown("listing"));
+        assert_eq!(parse_command("catalog"), Command::Unknown("catalog"));
     }
 }
