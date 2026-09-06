@@ -77,9 +77,8 @@ impl<R: SectorReader> Fat32<R> {
             start
                 .checked_add(length)
                 .ok_or(FatError::InvalidFilesystem)?;
-            if selected.is_none() {
-                selected = Some((start, length));
-            }
+            selected = Some((start, length));
+            break;
         }
 
         let (partition_start, partition_sectors) = match selected {
@@ -142,6 +141,9 @@ fn parse_boot_sector(
     partition_start: u32,
     partition_sectors: Option<u32>,
 ) -> Result<Geometry, ParseError> {
+    if sector[3..11] == *b"EXFAT   " {
+        return Err(ParseError::Unsupported);
+    }
     if sector[510..512] != [0x55, 0xaa] {
         return Err(ParseError::InvalidFilesystem);
     }
@@ -398,6 +400,16 @@ mod tests {
     }
 
     #[test]
+    fn mounts_the_first_fat32_partition_without_inspecting_later_entries() {
+        let mut mbr = [0; 512];
+        write_partition(&mut mbr, 0, 0x0c, 2048, 70_000);
+        write_partition(&mut mbr, 1, 0xee, u32::MAX, u32::MAX);
+        mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
+        let reader = MemoryReader::with_sectors([(0, mbr), (2048, valid_boot_sector())]);
+        assert_eq!(Fat32::mount(reader).unwrap().partition_start(), 2048);
+    }
+
+    #[test]
     fn rejects_a_bpb_whose_data_range_exceeds_the_partition() {
         let reader = MemoryReader::with_mbr_volume(2048, 100, valid_boot_sector());
         assert!(matches!(
@@ -471,5 +483,15 @@ mod tests {
         let mut boot = valid_boot_sector();
         boot[510..512].copy_from_slice(&[0, 0]);
         assert!(Fat32::mount(MemoryReader::with_sector(0, boot)).is_err());
+    }
+
+    #[test]
+    fn rejects_an_exfat_oem_signature_as_unsupported() {
+        let mut boot = [0; 512];
+        boot[3..11].copy_from_slice(b"EXFAT   ");
+        assert!(matches!(
+            Fat32::mount(MemoryReader::with_sector(0, boot)),
+            Err(FatError::Unsupported)
+        ));
     }
 }
