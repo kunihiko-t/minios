@@ -408,13 +408,18 @@ fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
     }
     for index in 0..8 {
         let byte = record[index];
-        if (byte == b' ' && index < base_len) || !(0x21..=0x7e).contains(&byte) && byte != b' ' {
+        if matches!(byte, b'.' | b'/' | b'\\')
+            || (byte == b' ' && index < base_len)
+            || !(0x21..=0x7e).contains(&byte) && byte != b' '
+        {
             return None;
         }
     }
     for index in 0..3 {
         let byte = record[8 + index];
-        if (byte == b' ' && index < extension_len) || !(0x21..=0x7e).contains(&byte) && byte != b' '
+        if matches!(byte, b'.' | b'/' | b'\\')
+            || (byte == b' ' && index < extension_len)
+            || !(0x21..=0x7e).contains(&byte) && byte != b' '
         {
             return None;
         }
@@ -643,7 +648,7 @@ mod tests {
 
     use super::{DirEntry, Fat32, FatError};
     use crate::storage::SectorReader;
-    use std::{string::String, vec, vec::Vec};
+    use std::{string::String, vec::Vec};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ReadError {
@@ -730,38 +735,6 @@ mod tests {
         boot
     }
 
-    struct FixtureReader {
-        sectors: Vec<(u32, [u8; 512])>,
-    }
-
-    impl SectorReader for FixtureReader {
-        type Error = ReadError;
-
-        fn read_sector(
-            &mut self,
-            lba: u32,
-            destination: &mut [u8; 512],
-        ) -> Result<(), Self::Error> {
-            for &(sector_lba, ref sector) in &self.sectors {
-                if sector_lba == lba {
-                    destination.copy_from_slice(sector);
-                    return Ok(());
-                }
-            }
-            Err(ReadError::MissingSector(lba))
-        }
-    }
-
-    fn fixture_reader() -> FixtureReader {
-        FixtureReader {
-            sectors: vec![(0, valid_boot_sector())],
-        }
-    }
-
-    fn push_sector(reader: &mut FixtureReader, lba: u32, sector: [u8; 512]) {
-        reader.sectors.push((lba, sector));
-    }
-
     fn write_fat_entry(sector: &mut [u8; 512], cluster: u32, value: u32) {
         write_u32(sector, (cluster * 4) as usize, value);
     }
@@ -789,34 +762,34 @@ mod tests {
         fat
     }
 
-    fn mounted_directory_fixture() -> Fat32<FixtureReader> {
-        let mut reader = fixture_reader();
-        push_sector(&mut reader, 32, directory_fat());
-
+    fn mounted_directory_fixture() -> Fat32<MemoryReader<4>> {
         let mut first_directory_cluster = [0; 512];
         for index in 0..16 {
             first_directory_cluster[index * 32] = 0xe5;
         }
-        push_sector(&mut reader, 288, first_directory_cluster);
+        write_directory_entry(&mut first_directory_cluster, 1, b"LFN     TXT", 0x0f, 0, 0);
+        write_directory_entry(&mut first_directory_cluster, 2, b"LABEL      ", 0x08, 0, 0);
 
         let mut second_directory_cluster = [0; 512];
         write_directory_entry(&mut second_directory_cluster, 0, b"HELLO   TXT", 0x20, 4, 0);
         write_directory_entry(&mut second_directory_cluster, 1, b"SUBDIR     ", 0x10, 5, 0);
-        push_sector(&mut reader, 289, second_directory_cluster);
-        Fat32::mount(reader).unwrap()
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, directory_fat()),
+            (288, first_directory_cluster),
+            (289, second_directory_cluster),
+        ]))
+        .unwrap()
     }
 
-    fn mounted_multicluster_file_fixture(content: &[u8]) -> Fat32<FixtureReader> {
-        let mut reader = fixture_reader();
+    fn mounted_multicluster_file_fixture(content: &[u8]) -> Fat32<MemoryReader<5>> {
         let mut fat = [0; 512];
         write_fat_entry(&mut fat, 2, 0x0fff_ffff);
         write_fat_entry(&mut fat, 4, 5);
         write_fat_entry(&mut fat, 5, 0x0fff_ffff);
-        push_sector(&mut reader, 32, fat);
 
         let mut root = [0; 512];
         write_directory_entry(&mut root, 0, b"HELLO   TXT", 0x20, 4, content.len() as u32);
-        push_sector(&mut reader, 288, root);
 
         assert!(content.len() <= 1024);
         let first_len = if content.len() < 512 {
@@ -826,39 +799,62 @@ mod tests {
         };
         let mut data = [0; 512];
         data[..first_len].copy_from_slice(&content[..first_len]);
-        push_sector(&mut reader, 290, data);
         let mut next_data = [0xa5; 512];
         if content.len() > first_len {
             next_data[..content.len() - first_len].copy_from_slice(&content[first_len..]);
         }
-        push_sector(&mut reader, 291, next_data);
-        Fat32::mount(reader).unwrap()
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, fat),
+            (288, root),
+            (290, data),
+            (291, next_data),
+        ]))
+        .unwrap()
     }
 
-    fn mounted_empty_file_fixture() -> Fat32<FixtureReader> {
-        let mut reader = fixture_reader();
+    fn mounted_empty_file_fixture() -> Fat32<MemoryReader<3>> {
         let mut fat = [0; 512];
         write_fat_entry(&mut fat, 2, 0x0fff_ffff);
-        push_sector(&mut reader, 32, fat);
 
         let mut root = [0; 512];
         write_directory_entry(&mut root, 0, b"EMPTY   TXT", 0x20, 0, 0);
-        push_sector(&mut reader, 288, root);
-        Fat32::mount(reader).unwrap()
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, fat),
+            (288, root),
+        ]))
+        .unwrap()
     }
 
-    fn mounted_cyclic_file_fixture() -> Fat32<FixtureReader> {
-        let mut reader = fixture_reader();
+    fn mounted_cyclic_file_fixture() -> Fat32<MemoryReader<4>> {
         let mut fat = [0; 512];
         write_fat_entry(&mut fat, 2, 0x0fff_ffff);
         write_fat_entry(&mut fat, 4, 4);
-        push_sector(&mut reader, 32, fat);
 
         let mut root = [0; 512];
         write_directory_entry(&mut root, 0, b"LOOP    BIN", 0x20, 4, u32::MAX);
-        push_sector(&mut reader, 288, root);
-        push_sector(&mut reader, 290, [0x5a; 512]);
-        Fat32::mount(reader).unwrap()
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, fat),
+            (288, root),
+            (290, [0x5a; 512]),
+        ]))
+        .unwrap()
+    }
+
+    fn mounted_malformed_name_fixture() -> Fat32<MemoryReader<3>> {
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+        let mut root = [0; 512];
+        write_directory_entry(&mut root, 0, b"BAD.NAME   ", 0x20, 4, 0);
+        write_directory_entry(&mut root, 1, b"GOOD    TXT", 0x20, 4, 0);
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, fat),
+            (288, root),
+        ]))
+        .unwrap()
     }
 
     #[test]
@@ -912,6 +908,16 @@ mod tests {
     }
 
     #[test]
+    fn root_listing_ignores_dots_inside_raw_short_name_fields() {
+        let mut volume = mounted_malformed_name_fixture();
+        let mut names = Vec::new();
+        volume
+            .for_each_root_entry(|entry| names.push(String::from(entry.name())))
+            .unwrap();
+        assert_eq!(names, ["GOOD.TXT"]);
+    }
+
+    #[test]
     fn file_lookup_rejects_missing_directory_and_invalid_names() {
         let mut volume = mounted_directory_fixture();
         assert_eq!(
@@ -952,16 +958,18 @@ mod tests {
     #[test]
     fn file_streaming_rejects_free_bad_reserved_and_out_of_range_clusters() {
         for value in [0, 1, 0x0fff_fff0, 0x0fff_fff7, 0x0fff_fff8, 69_714] {
-            let mut reader = fixture_reader();
             let mut fat = [0; 512];
             write_fat_entry(&mut fat, 2, 0x0fff_ffff);
             write_fat_entry(&mut fat, 4, value);
-            push_sector(&mut reader, 32, fat);
             let mut root = [0; 512];
             write_directory_entry(&mut root, 0, b"BAD     BIN", 0x20, 4, 513);
-            push_sector(&mut reader, 288, root);
-            push_sector(&mut reader, 290, [0x22; 512]);
-            let mut volume = Fat32::mount(reader).unwrap();
+            let mut volume = Fat32::mount(MemoryReader::with_sectors([
+                (0, valid_boot_sector()),
+                (32, fat),
+                (288, root),
+                (290, [0x22; 512]),
+            ]))
+            .unwrap();
             assert_eq!(
                 volume.read_root_file("BAD.BIN", |_| {}),
                 Err(FatError::CorruptChain),
