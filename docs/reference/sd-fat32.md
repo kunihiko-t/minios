@@ -149,8 +149,14 @@ Development follows red-green-refactor. Host tests cover:
 - `ls` and `cat` command parsing without changing RV64 command behavior.
 
 The build gate is the existing host test suite plus a locked RV32 release
-build. The resulting ELF must fit the current 24,288-byte IMEM and
-16,192-byte DMEM regions without linker-script changes.
+build. The resulting ELF must fit the effective 32 KiB (32,768-byte) IMEM
+and the unchanged 16,192-byte DMEM contract in
+`kernel/linker_neorv32.ld`. The FPGA top level and linker now both declare
+32,768 bytes. This is the power-of-two address range implemented by NEORV32;
+the former 24,288-byte non-power-of-two request was rounded up to 32 KiB.
+Existing place-and-route reports show this address range without an additional
+BSRAM cost. The explicit 32 KiB contract therefore matches the hardware
+address range while leaving DMEM unchanged.
 
 The hardware acceptance test uses a FAT32 card containing a known root file.
 After the existing MiniOS image starts:

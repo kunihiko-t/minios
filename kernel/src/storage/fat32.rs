@@ -246,10 +246,10 @@ impl<R: SectorReader> Fat32<R> {
                     if scratch[offset] == 0 {
                         return Ok(());
                     }
-                    if let Some(entry) = parse_dir_entry(&scratch[offset..offset + 32]) {
-                        if visit(&entry) {
-                            return Ok(());
-                        }
+                    if let Some(entry) = parse_dir_entry(&scratch[offset..offset + 32])
+                        && visit(&entry)
+                    {
+                        return Ok(());
                     }
                 }
                 sector_in_cluster += 1;
@@ -406,8 +406,7 @@ fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
     if base_len == 0 {
         return None;
     }
-    for index in 0..8 {
-        let byte = record[index];
+    for (index, &byte) in record[..8].iter().enumerate() {
         if matches!(byte, b'.' | b'/' | b'\\')
             || (byte == b' ' && index < base_len)
             || !(0x21..=0x7e).contains(&byte) && byte != b' '
@@ -415,8 +414,7 @@ fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
             return None;
         }
     }
-    for index in 0..3 {
-        let byte = record[8 + index];
+    for (index, &byte) in record[8..11].iter().enumerate() {
         if matches!(byte, b'.' | b'/' | b'\\')
             || (byte == b' ' && index < extension_len)
             || !(0x21..=0x7e).contains(&byte) && byte != b' '
@@ -427,15 +425,15 @@ fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
 
     let mut name = [0; 12];
     let mut name_len = 0;
-    for index in 0..base_len {
-        name[name_len] = uppercase_ascii(record[index]);
+    for &byte in &record[..base_len] {
+        name[name_len] = uppercase_ascii(byte);
         name_len += 1;
     }
     if extension_len != 0 {
         name[name_len] = b'.';
         name_len += 1;
-        for index in 0..extension_len {
-            name[name_len] = uppercase_ascii(record[8 + index]);
+        for &byte in &record[8..8 + extension_len] {
+            name[name_len] = uppercase_ascii(byte);
             name_len += 1;
         }
     }
@@ -546,10 +544,10 @@ fn parse_boot_sector(
     if volume_sectors == 0 {
         return Err(ParseError::InvalidFilesystem);
     }
-    if let Some(partition_sectors) = partition_sectors {
-        if volume_sectors > partition_sectors {
-            return Err(ParseError::InvalidFilesystem);
-        }
+    if let Some(partition_sectors) = partition_sectors
+        && volume_sectors > partition_sectors
+    {
+        return Err(ParseError::InvalidFilesystem);
     }
 
     let fat_sectors = read_u32(sector, 36);

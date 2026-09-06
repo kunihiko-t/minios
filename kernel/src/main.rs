@@ -99,6 +99,10 @@ mod console;
 mod drivers;
 #[cfg(target_arch = "riscv32")]
 mod drivers;
+#[cfg(target_arch = "riscv32")]
+mod storage {
+    pub use minios_kernel::storage::{fat32, sd};
+}
 #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 mod shell;
 #[cfg(target_arch = "riscv64")]
