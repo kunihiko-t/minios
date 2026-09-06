@@ -5,6 +5,33 @@ pub enum FatError<E> {
     Read(E),
     Unsupported,
     InvalidFilesystem,
+    NotFound,
+    IsDirectory,
+    InvalidName,
+    CorruptChain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirEntry {
+    name: [u8; 12],
+    name_len: u8,
+    first_cluster: u32,
+    size: u32,
+    directory: bool,
+}
+
+impl DirEntry {
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len as usize]).expect("validated FAT name")
+    }
+
+    pub const fn size(&self) -> u32 {
+        self.size
+    }
+
+    pub const fn is_directory(&self) -> bool {
+        self.directory
+    }
 }
 
 // Task 3 consumes the retained reader and geometry for FAT traversal.
@@ -108,6 +135,206 @@ impl<R: SectorReader> Fat32<R> {
             data_cluster_count: geometry.data_cluster_count,
         }
     }
+
+    pub fn for_each_root_entry(
+        &mut self,
+        mut visit: impl FnMut(&DirEntry),
+    ) -> Result<(), FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        self.walk_root(&mut scratch, |entry| {
+            visit(entry);
+            false
+        })
+    }
+
+    pub fn read_root_file(
+        &mut self,
+        name: &str,
+        mut write: impl FnMut(&[u8]),
+    ) -> Result<(), FatError<R::Error>> {
+        let wanted = normalize_input_name(name).ok_or(FatError::InvalidName)?;
+        let mut scratch = [0; 512];
+        let entry = self
+            .find_root_entry(&wanted, &mut scratch)?
+            .ok_or(FatError::NotFound)?;
+        if entry.directory {
+            return Err(FatError::IsDirectory);
+        }
+        if entry.size == 0 {
+            return Ok(());
+        }
+        if !self.is_data_cluster(entry.first_cluster) {
+            return Err(FatError::CorruptChain);
+        }
+
+        let mut remaining = entry.size;
+        let mut cluster = entry.first_cluster;
+        let mut clusters_read = 0;
+        while remaining != 0 {
+            if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
+                return Err(FatError::CorruptChain);
+            }
+
+            let mut sector_in_cluster = 0;
+            while sector_in_cluster < self.sectors_per_cluster && remaining != 0 {
+                let lba = self.data_sector_lba(cluster, sector_in_cluster as u32)?;
+                self.reader
+                    .read_sector(lba, &mut scratch)
+                    .map_err(FatError::Read)?;
+                let bytes = if remaining < 512 {
+                    remaining as usize
+                } else {
+                    512
+                };
+                write(&scratch[..bytes]);
+                remaining -= bytes as u32;
+                sector_in_cluster += 1;
+            }
+            if remaining == 0 {
+                return Ok(());
+            }
+
+            clusters_read += 1;
+            cluster = match self.next_cluster(cluster, &mut scratch)? {
+                Some(next) => next,
+                None => return Err(FatError::CorruptChain),
+            };
+        }
+        Ok(())
+    }
+
+    fn find_root_entry(
+        &mut self,
+        wanted: &[u8; 11],
+        scratch: &mut [u8; 512],
+    ) -> Result<Option<DirEntry>, FatError<R::Error>> {
+        let mut found = None;
+        self.walk_root(scratch, |entry| {
+            if entry_short_name(entry) == *wanted {
+                found = Some(*entry);
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(found)
+    }
+
+    fn walk_root<F>(
+        &mut self,
+        scratch: &mut [u8; 512],
+        mut visit: F,
+    ) -> Result<(), FatError<R::Error>>
+    where
+        F: FnMut(&DirEntry) -> bool,
+    {
+        let mut cluster = self.root_cluster;
+        let mut clusters_read = 0;
+        loop {
+            if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
+                return Err(FatError::CorruptChain);
+            }
+
+            let mut sector_in_cluster = 0;
+            while sector_in_cluster < self.sectors_per_cluster {
+                let lba = self.data_sector_lba(cluster, sector_in_cluster as u32)?;
+                self.reader
+                    .read_sector(lba, scratch)
+                    .map_err(FatError::Read)?;
+                for record in 0..16 {
+                    let offset = record * 32;
+                    if scratch[offset] == 0 {
+                        return Ok(());
+                    }
+                    if let Some(entry) = parse_dir_entry(&scratch[offset..offset + 32]) {
+                        if visit(&entry) {
+                            return Ok(());
+                        }
+                    }
+                }
+                sector_in_cluster += 1;
+            }
+
+            clusters_read += 1;
+            cluster = match self.next_cluster(cluster, scratch)? {
+                Some(next) => next,
+                None => return Ok(()),
+            };
+        }
+    }
+
+    fn is_data_cluster(&self, cluster: u32) -> bool {
+        match self.data_cluster_count.checked_add(2) {
+            Some(limit) => cluster >= 2 && cluster < limit,
+            None => false,
+        }
+    }
+
+    fn data_sector_lba(
+        &self,
+        cluster: u32,
+        sector_in_cluster: u32,
+    ) -> Result<u32, FatError<R::Error>> {
+        if !self.is_data_cluster(cluster) || sector_in_cluster >= self.sectors_per_cluster as u32 {
+            return Err(FatError::CorruptChain);
+        }
+        let cluster_offset = cluster
+            .checked_sub(2)
+            .and_then(|value| value.checked_mul(self.sectors_per_cluster as u32))
+            .and_then(|value| value.checked_add(sector_in_cluster))
+            .ok_or(FatError::InvalidFilesystem)?;
+        let lba = self
+            .data_start
+            .checked_add(cluster_offset)
+            .ok_or(FatError::InvalidFilesystem)?;
+        let volume_end = self
+            .partition_start
+            .checked_add(self.volume_sectors)
+            .ok_or(FatError::InvalidFilesystem)?;
+        if lba >= volume_end {
+            return Err(FatError::InvalidFilesystem);
+        }
+        Ok(lba)
+    }
+
+    fn next_cluster(
+        &mut self,
+        cluster: u32,
+        scratch: &mut [u8; 512],
+    ) -> Result<Option<u32>, FatError<R::Error>> {
+        let entry_offset = cluster.checked_mul(4).ok_or(FatError::CorruptChain)?;
+        let fat_sector_offset = entry_offset / 512;
+        let byte_offset = (entry_offset % 512) as usize;
+        let lba = self
+            .fat_start
+            .checked_add(fat_sector_offset)
+            .ok_or(FatError::InvalidFilesystem)?;
+        let fat_end = self
+            .fat_start
+            .checked_add(self.fat_sectors)
+            .ok_or(FatError::InvalidFilesystem)?;
+        let volume_end = self
+            .partition_start
+            .checked_add(self.volume_sectors)
+            .ok_or(FatError::InvalidFilesystem)?;
+        if lba >= fat_end || lba >= volume_end {
+            return Err(FatError::InvalidFilesystem);
+        }
+        self.reader
+            .read_sector(lba, scratch)
+            .map_err(FatError::Read)?;
+        let value = read_u32(scratch, byte_offset) & 0x0fff_ffff;
+        if value >= 0x0fff_fff8 {
+            return Ok(None);
+        }
+        if value < 2 || (0x0fff_fff0..0x0fff_fff8).contains(&value) {
+            return Err(FatError::CorruptChain);
+        }
+        if !self.is_data_cluster(value) {
+            return Err(FatError::CorruptChain);
+        }
+        Ok(Some(value))
+    }
 }
 
 impl ParseError {
@@ -117,6 +344,127 @@ impl ParseError {
             Self::InvalidFilesystem => FatError::InvalidFilesystem,
         }
     }
+}
+
+fn uppercase_ascii(byte: u8) -> u8 {
+    if byte.is_ascii_lowercase() {
+        byte - b'a' + b'A'
+    } else {
+        byte
+    }
+}
+
+fn normalize_input_name(name: &str) -> Option<[u8; 11]> {
+    let bytes = name.as_bytes();
+    let mut dot = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'.' {
+            if dot.is_some() {
+                return None;
+            }
+            dot = Some(index);
+        } else if !(0x21..=0x7e).contains(&byte) || byte == b'/' || byte == b'\\' {
+            return None;
+        }
+    }
+
+    let base_len = dot.unwrap_or(bytes.len());
+    let extension_len = dot.map_or(0, |index| bytes.len() - index - 1);
+    if base_len == 0 || base_len > 8 || extension_len > 3 {
+        return None;
+    }
+
+    let mut normalized = [b' '; 11];
+    for index in 0..base_len {
+        normalized[index] = uppercase_ascii(bytes[index]);
+    }
+    if let Some(dot) = dot {
+        for index in 0..extension_len {
+            normalized[8 + index] = uppercase_ascii(bytes[dot + 1 + index]);
+        }
+    }
+    Some(normalized)
+}
+
+fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
+    if record[0] == 0 || record[0] == 0xe5 {
+        return None;
+    }
+    let attributes = record[11];
+    if attributes == 0x0f || attributes & 0x08 != 0 {
+        return None;
+    }
+
+    let mut base_len = 8;
+    while base_len > 0 && record[base_len - 1] == b' ' {
+        base_len -= 1;
+    }
+    let mut extension_len = 3;
+    while extension_len > 0 && record[8 + extension_len - 1] == b' ' {
+        extension_len -= 1;
+    }
+    if base_len == 0 {
+        return None;
+    }
+    for index in 0..8 {
+        let byte = record[index];
+        if (byte == b' ' && index < base_len) || !(0x21..=0x7e).contains(&byte) && byte != b' ' {
+            return None;
+        }
+    }
+    for index in 0..3 {
+        let byte = record[8 + index];
+        if (byte == b' ' && index < extension_len) || !(0x21..=0x7e).contains(&byte) && byte != b' '
+        {
+            return None;
+        }
+    }
+
+    let mut name = [0; 12];
+    let mut name_len = 0;
+    for index in 0..base_len {
+        name[name_len] = uppercase_ascii(record[index]);
+        name_len += 1;
+    }
+    if extension_len != 0 {
+        name[name_len] = b'.';
+        name_len += 1;
+        for index in 0..extension_len {
+            name[name_len] = uppercase_ascii(record[8 + index]);
+            name_len += 1;
+        }
+    }
+
+    let high = u16::from_le_bytes([record[20], record[21]]) as u32;
+    let low = u16::from_le_bytes([record[26], record[27]]) as u32;
+    Some(DirEntry {
+        name,
+        name_len: name_len as u8,
+        first_cluster: (high << 16) | low,
+        size: u32::from_le_bytes([record[28], record[29], record[30], record[31]]),
+        directory: attributes & 0x10 != 0,
+    })
+}
+
+fn entry_short_name(entry: &DirEntry) -> [u8; 11] {
+    let mut normalized = [b' '; 11];
+    let mut source = 0;
+    let mut destination = 0;
+    while source < entry.name_len as usize && entry.name[source] != b'.' {
+        normalized[destination] = entry.name[source];
+        source += 1;
+        destination += 1;
+    }
+    if source < entry.name_len as usize {
+        source += 1;
+        destination = 8;
+        while source < entry.name_len as usize {
+            normalized[destination] = entry.name[source];
+            source += 1;
+            destination += 1;
+        }
+    }
+    normalized
 }
 
 fn is_extended_partition(partition_type: u8) -> bool {
@@ -293,8 +641,9 @@ impl<R> Fat32<R> {
 mod tests {
     extern crate std;
 
-    use super::{Fat32, FatError};
+    use super::{DirEntry, Fat32, FatError};
     use crate::storage::SectorReader;
+    use std::{string::String, vec, vec::Vec};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ReadError {
@@ -379,6 +728,246 @@ mod tests {
         write_u32(&mut boot, 44, 2);
         boot[510..512].copy_from_slice(&[0x55, 0xaa]);
         boot
+    }
+
+    struct FixtureReader {
+        sectors: Vec<(u32, [u8; 512])>,
+    }
+
+    impl SectorReader for FixtureReader {
+        type Error = ReadError;
+
+        fn read_sector(
+            &mut self,
+            lba: u32,
+            destination: &mut [u8; 512],
+        ) -> Result<(), Self::Error> {
+            for &(sector_lba, ref sector) in &self.sectors {
+                if sector_lba == lba {
+                    destination.copy_from_slice(sector);
+                    return Ok(());
+                }
+            }
+            Err(ReadError::MissingSector(lba))
+        }
+    }
+
+    fn fixture_reader() -> FixtureReader {
+        FixtureReader {
+            sectors: vec![(0, valid_boot_sector())],
+        }
+    }
+
+    fn push_sector(reader: &mut FixtureReader, lba: u32, sector: [u8; 512]) {
+        reader.sectors.push((lba, sector));
+    }
+
+    fn write_fat_entry(sector: &mut [u8; 512], cluster: u32, value: u32) {
+        write_u32(sector, (cluster * 4) as usize, value);
+    }
+
+    fn write_directory_entry(
+        sector: &mut [u8; 512],
+        index: usize,
+        name: &[u8; 11],
+        attributes: u8,
+        first_cluster: u32,
+        size: u32,
+    ) {
+        let offset = index * 32;
+        sector[offset..offset + 11].copy_from_slice(name);
+        sector[offset + 11] = attributes;
+        write_u16(sector, offset + 20, (first_cluster >> 16) as u16);
+        write_u16(sector, offset + 26, first_cluster as u16);
+        write_u32(sector, offset + 28, size);
+    }
+
+    fn directory_fat() -> [u8; 512] {
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 3);
+        write_fat_entry(&mut fat, 3, 0x0fff_ffff);
+        fat
+    }
+
+    fn mounted_directory_fixture() -> Fat32<FixtureReader> {
+        let mut reader = fixture_reader();
+        push_sector(&mut reader, 32, directory_fat());
+
+        let mut first_directory_cluster = [0; 512];
+        for index in 0..16 {
+            first_directory_cluster[index * 32] = 0xe5;
+        }
+        push_sector(&mut reader, 288, first_directory_cluster);
+
+        let mut second_directory_cluster = [0; 512];
+        write_directory_entry(&mut second_directory_cluster, 0, b"HELLO   TXT", 0x20, 4, 0);
+        write_directory_entry(&mut second_directory_cluster, 1, b"SUBDIR     ", 0x10, 5, 0);
+        push_sector(&mut reader, 289, second_directory_cluster);
+        Fat32::mount(reader).unwrap()
+    }
+
+    fn mounted_multicluster_file_fixture(content: &[u8]) -> Fat32<FixtureReader> {
+        let mut reader = fixture_reader();
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+        write_fat_entry(&mut fat, 4, 5);
+        write_fat_entry(&mut fat, 5, 0x0fff_ffff);
+        push_sector(&mut reader, 32, fat);
+
+        let mut root = [0; 512];
+        write_directory_entry(&mut root, 0, b"HELLO   TXT", 0x20, 4, content.len() as u32);
+        push_sector(&mut reader, 288, root);
+
+        assert!(content.len() <= 1024);
+        let first_len = if content.len() < 512 {
+            content.len()
+        } else {
+            512
+        };
+        let mut data = [0; 512];
+        data[..first_len].copy_from_slice(&content[..first_len]);
+        push_sector(&mut reader, 290, data);
+        let mut next_data = [0xa5; 512];
+        if content.len() > first_len {
+            next_data[..content.len() - first_len].copy_from_slice(&content[first_len..]);
+        }
+        push_sector(&mut reader, 291, next_data);
+        Fat32::mount(reader).unwrap()
+    }
+
+    fn mounted_empty_file_fixture() -> Fat32<FixtureReader> {
+        let mut reader = fixture_reader();
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+        push_sector(&mut reader, 32, fat);
+
+        let mut root = [0; 512];
+        write_directory_entry(&mut root, 0, b"EMPTY   TXT", 0x20, 0, 0);
+        push_sector(&mut reader, 288, root);
+        Fat32::mount(reader).unwrap()
+    }
+
+    fn mounted_cyclic_file_fixture() -> Fat32<FixtureReader> {
+        let mut reader = fixture_reader();
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+        write_fat_entry(&mut fat, 4, 4);
+        push_sector(&mut reader, 32, fat);
+
+        let mut root = [0; 512];
+        write_directory_entry(&mut root, 0, b"LOOP    BIN", 0x20, 4, u32::MAX);
+        push_sector(&mut reader, 288, root);
+        push_sector(&mut reader, 290, [0x5a; 512]);
+        Fat32::mount(reader).unwrap()
+    }
+
+    #[test]
+    fn root_listing_filters_metadata_and_crosses_a_cluster_boundary() {
+        let mut volume = mounted_directory_fixture();
+        let mut names = Vec::new();
+        volume
+            .for_each_root_entry(|entry| names.push(String::from(entry.name())))
+            .unwrap();
+        assert_eq!(names, ["HELLO.TXT", "SUBDIR"]);
+    }
+
+    #[test]
+    fn file_lookup_is_ascii_case_insensitive_and_streams_exact_size() {
+        let mut volume = mounted_multicluster_file_fixture(b"hello from sd\n");
+        let mut output = Vec::new();
+        volume
+            .read_root_file("hello.txt", |bytes| output.extend_from_slice(bytes))
+            .unwrap();
+        assert_eq!(output, b"hello from sd\n");
+    }
+
+    #[test]
+    fn empty_file_reads_no_data_cluster() {
+        let mut volume = mounted_empty_file_fixture();
+        let mut called = false;
+        volume
+            .read_root_file("EMPTY.TXT", |_| called = true)
+            .unwrap();
+        assert!(!called);
+    }
+
+    #[test]
+    fn cyclic_chain_is_rejected_before_the_traversal_bound_is_exceeded() {
+        let mut volume = mounted_cyclic_file_fixture();
+        assert_eq!(
+            volume.read_root_file("LOOP.BIN", |_| {}),
+            Err(FatError::CorruptChain)
+        );
+    }
+
+    #[test]
+    fn root_listing_stops_at_the_directory_end_marker() {
+        let mut volume = mounted_multicluster_file_fixture(b"contents");
+        let mut entries = Vec::<DirEntry>::new();
+        volume
+            .for_each_root_entry(|entry| entries.push(*entry))
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name(), "HELLO.TXT");
+    }
+
+    #[test]
+    fn file_lookup_rejects_missing_directory_and_invalid_names() {
+        let mut volume = mounted_directory_fixture();
+        assert_eq!(
+            volume.read_root_file("MISSING.TXT", |_| {}),
+            Err(FatError::NotFound)
+        );
+        assert_eq!(
+            volume.read_root_file("SUBDIR", |_| {}),
+            Err(FatError::IsDirectory)
+        );
+        for name in [
+            "",
+            ".TXT",
+            "TOO-LONG9.TXT",
+            "A/B.TXT",
+            "A\\\\B.TXT",
+            "A..TXT",
+        ] {
+            assert_eq!(
+                volume.read_root_file(name, |_| {}),
+                Err(FatError::InvalidName),
+                "{name} unexpectedly accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn file_streaming_emits_only_the_declared_final_partial_sector() {
+        let mut volume = mounted_multicluster_file_fixture(&[0x11; 513]);
+        let mut output = Vec::new();
+        volume
+            .read_root_file("HELLO.TXT", |bytes| output.extend_from_slice(bytes))
+            .unwrap();
+        assert_eq!(output.len(), 513);
+        assert_eq!(output[512], 0x11);
+    }
+
+    #[test]
+    fn file_streaming_rejects_free_bad_reserved_and_out_of_range_clusters() {
+        for value in [0, 1, 0x0fff_fff0, 0x0fff_fff7, 0x0fff_fff8, 69_714] {
+            let mut reader = fixture_reader();
+            let mut fat = [0; 512];
+            write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+            write_fat_entry(&mut fat, 4, value);
+            push_sector(&mut reader, 32, fat);
+            let mut root = [0; 512];
+            write_directory_entry(&mut root, 0, b"BAD     BIN", 0x20, 4, 513);
+            push_sector(&mut reader, 288, root);
+            push_sector(&mut reader, 290, [0x22; 512]);
+            let mut volume = Fat32::mount(reader).unwrap();
+            assert_eq!(
+                volume.read_root_file("BAD.BIN", |_| {}),
+                Err(FatError::CorruptChain),
+                "FAT value {value:#x} unexpectedly accepted"
+            );
+        }
     }
 
     #[test]
