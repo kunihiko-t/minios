@@ -4,11 +4,11 @@
 
 `cargo xtask`をローカル開発とCIの共通入口にする理由を学びます。
 読み終えると、ホスト単体テストとRISC-Vゲスト統合テストの違い、QEMUのマーカーモードと対話モード、時間切れになったプロセスの回収、対話記録の読み方を説明できるようになります。
-`cargo xtask check`が実行する24段階の順序も確認します。
+`cargo xtask check`が実行する26段階の順序も確認します。
 
 ## 背景
 
-カーネル本体は`riscv64gc-unknown-none-elf`向けの`no_std`バイナリーです。
+カーネル本体はRV64GCとRV32IMのベアメタルターゲット向けに作る`no_std`バイナリーです。
 一方、`xtask`は開発機のOS上で動く通常のRustプログラムで、CargoとQEMUを子プロセスとして起動します。
 この章でいう**ホスト**は`xtask`を実行するmacOSまたはLinux、**ゲスト**はQEMUのRISC-V仮想機内で動くMiniOSです。
 プロセスの終了ステータス、標準入力、標準出力、標準エラー、制限時間も使います。
@@ -103,9 +103,9 @@ QEMU起動前にビルドが失敗した場合も、Cargoコマンドにはテ�
 失敗した段階の見出しと、最後に見えた初期化行やマーカーを照合すると、ビルド失敗、ゲスト内の明示的な失敗、停止を区別できます。
 Cargoの子プロセスが失敗した場合も、実行コマンド、終了ステータス、標準出力、標準エラーを表示します。
 
-### `check`が実行する24段階
+### `check`が実行する26段階
 
-`cargo xtask check`は、次の24段階をこの順に実行し、最初の失敗で停止します。
+`cargo xtask check`は、次の26段階をこの順に実行し、最初の失敗で停止します。
 書式検査の直後に教材のリンクと章構造を調べ、その後でコンパイラーを動かします。
 静的検査より前にQEMUを起動しないことと、検査していないバイナリーをゲストテストへ渡さないことが、この順序を固定する理由です。
 
@@ -118,26 +118,28 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 6. cargo clippy -p minios-abi --all-targets --locked -- -D warnings
 7. cargo clippy -p minios-kernel --lib --locked -- -D warnings
 8. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked -- -D warnings
-9. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked
-10. cargo test -p minios-abi --locked
-11. cargo test -p minios-kernel --lib --locked
-12. cargo test -p xtask --locked
-13. QEMU boot test
-14. QEMU trap test
-15. QEMU timer test
-16. QEMU memory test
-17. QEMU VM test
-18. QEMU ELF test
-19. QEMU user-entry test
-20. QEMU user-trap test
-21. QEMU user-syscall test
-22. QEMU user-exit test
-23. QEMU payload test
-24. QEMU shell test
+9. cargo clippy -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked -- -D warnings
+10. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked
+11. cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked
+12. cargo test -p minios-abi --locked
+13. cargo test -p minios-kernel --lib --locked
+14. cargo test -p xtask --locked
+15. QEMU boot test
+16. QEMU trap test
+17. QEMU timer test
+18. QEMU memory test
+19. QEMU VM test
+20. QEMU ELF test
+21. QEMU user-entry test
+22. QEMU user-trap test
+23. QEMU user-syscall test
+24. QEMU user-exit test
+25. QEMU payload test
+26. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 24 phases`を表示します。
+全段階に成功すると`summary: PASSED all 26 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -171,12 +173,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/24] cargo fmt --all -- --check
-phase 1/24 passed (elapsed: ...s)
+[1/26] cargo fmt --all -- --check
+phase 1/26 passed (elapsed: ...s)
 ...
-[24/24] QEMU shell test
-phase 24/24 passed (elapsed: ...s)
-summary: PASSED all 24 phases (elapsed: ...s)
+[26/26] QEMU shell test
+phase 26/26 passed (elapsed: ...s)
+summary: PASSED all 26 phases (elapsed: ...s)
 ```
 
 一つの経路だけを繰り返す場合は、たとえば`cargo xtask test trap`を使います。
@@ -184,7 +186,7 @@ summary: PASSED all 24 phases (elapsed: ...s)
 
 ### Linux CIとローカル検証の対応
 
-GitHub Actionsは`ubuntu-24.04`へ`qemu-system-misc`を導入し、Rust 1.98.0、`riscv64gc-unknown-none-elf`ターゲット、rustfmt、Clippyを固定します。
+GitHub Actionsは`ubuntu-24.04`へ`qemu-system-misc`を導入し、Rust 1.98.0、RV64GCとRV32IMのベアメタルターゲット、rustfmt、Clippyを固定します。
 キャッシュするのはCargoのレジストリーとGitデータ、ワークスペースの`target`だけです。
 その後に実行するプロジェクト固有のコマンドは、ローカルと同じ`cargo xtask setup`と`cargo xtask check`だけです。
 CI専用の検証スクリプトを持たないため、開発者が手元で通した入口とCIの判定がずれにくくなります。

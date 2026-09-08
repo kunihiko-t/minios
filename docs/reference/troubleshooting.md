@@ -13,10 +13,10 @@
 
 ## RISC-Vターゲットがない
 
-- **症状**：`can't find crate for core`、または`Rust target riscv64gc-unknown-none-elf is not installed`と表示される。
+- **症状**：`can't find crate for core`、またはRISC-Vターゲットが導入されていないというエラーが表示される。
 - **診断コマンド**：`rustup target list --installed --toolchain 1.98.0`
 - **考えられる原因**：固定したツールチェーンに、ベアメタルRISC-V用のターゲット部品が入っていない。
-- **修正方法**：`rustup target add riscv64gc-unknown-none-elf --toolchain 1.98.0`を実行し、`cargo xtask setup`を再実行する。
+- **修正方法**：`rustup target add riscv64gc-unknown-none-elf riscv32im-unknown-none-elf --toolchain 1.98.0`を実行し、`cargo xtask check`を再実行する。
 
 ## QEMUがない、または古い
 
@@ -38,6 +38,14 @@
 - **診断コマンド**：`cargo xtask test boot`
 - **考えられる原因**：カーネルの入口へ到達していない、スタックかBSSの初期化が壊れている、UARTのベースアドレス`0x1000_0000`かLine Status Registerのビットを誤っている。
 - **修正方法**：記録内の`Domain0 Next Address`が`0x8020_0000`か確認し、`entry.S`の`sp`、BSSループ、UARTの送信可能ビット5、volatileな書き込みの順に調べる。
+
+## NEORV32のUART出力がない
+
+- **症状**：NEORV32へRV32カーネルを読み込んでも`MiniOS/RV32 booting...`が表示されない。
+- **診断コマンド**：`cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked`
+- **考えられる原因**：ロードイメージをIMEMへ置いていない、`pc=0`から開始していない、合成時のIMEMまたはDMEM容量がリンカースクリプトと異なる、UARTの基準クロックか端末のボーレートが一致していない。
+- **修正方法**：IMEM 24,288バイト、DMEM 16,192バイト、96 MHz、19,200 baudという現在の前提をFPGA構成と照合する。
+  起動コードはIMEMに続く`.data`初期値をDMEMへコピーするため、書き込み形式がロードイメージ全体を保持していることも確認する。
 
 ## 起動直後にトラップする
 

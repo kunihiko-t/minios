@@ -2,7 +2,7 @@
 
 ## 学習目標
 
-MiniOSのビルドに必要なRust 1.98.0、`riscv64gc-unknown-none-elf`ターゲット、QEMU 8.2.0以上を`cargo xtask setup`で検査します。
+MiniOSのビルドに必要なRust 1.98.0、RISC-Vのベアメタルターゲット、QEMU 8.2.0以上を確認します。
 不足しているものがあったときの直し方も説明できるようになります。
 
 ## 背景
@@ -18,6 +18,9 @@ QEMUのコマンド名と導入するパッケージ名も、macOSとLinuxで異
 - `rustc --version`：バージョン番号が接尾辞のない安定版Rust 1.98.0と完全に一致すること
 - `rustup target list --installed`：ベアメタル用のゲストターゲットが導入されていること
 - `qemu-system-riscv64 --version`：QEMU 8.2.0以上であること
+
+`rust-toolchain.toml`は、QEMU向けの`riscv64gc-unknown-none-elf`とNEORV32向けの`riscv32im-unknown-none-elf`を導入します。
+`cargo xtask setup`はQEMUで使うRV64ターゲットを診断し、`cargo xtask check`は両方のターゲットを実際にコンパイルします。
 
 Apple Silicon搭載macOSではQEMU 11.1.0で検証しました。
 Ubuntu 24.04が提供するQEMU 8.2系をCIでの互換性の下限とし、接尾辞付きのパッケージバージョンも解析します。
@@ -54,6 +57,7 @@ QEMU: 11.1.0
 
 ```sh
 rustup target add riscv64gc-unknown-none-elf --toolchain 1.98.0
+rustup target add riscv32im-unknown-none-elf --toolchain 1.98.0
 ```
 
 ### QEMUがない

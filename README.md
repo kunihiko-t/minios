@@ -1,9 +1,11 @@
 # MiniOS
 
-MiniOSは、RustとRISC-V 64でOSの基礎を段階的に学ぶための小さな`no_std`カーネルです。
-QEMU `virt`上のOpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーター、Sv39のカーネルアドレス空間を備えています。
+MiniOSは、RustとRISC-VでOSの基礎を段階的に学ぶための小さな`no_std`カーネルです。
+主教材はQEMU `virt`上のRISC-V 64環境です。
+OpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーター、Sv39のカーネルアドレス空間を備えています。
 静的なRISC-V 64 ELFを検証し、U-modeで`write`と`exit`を実行するloaderも備えています。
 MiniBundle boot payloadはQEMU loaderから予約物理windowへ渡せます。
+NEORV32向けには、RISC-V 32のM-modeで起動してUARTシェルを動かす小さな実機経路があります。
 日本語の学習ガイドと、同じ結果を繰り返し確認できるテストハーネスも用意しています。
 
 ## 五つのコマンドで試す
@@ -49,11 +51,29 @@ shutting down
 | 区分 | 対応範囲 | 検証条件と制約 |
 | --- | --- | --- |
 | ホスト | Apple Silicon搭載macOS、Ubuntu 24.04 | macOSはQEMU 11.1.0、UbuntuはGitHub ActionsとQEMU 8.2系で検証 |
-| Rust | 安定版1.98.0 | rustfmt、Clippy、`riscv64gc-unknown-none-elf`を固定 |
-| ゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、1ハート、128 MiB RAM |
-| コンソール | 16550互換UART | MMIOベース`0x1000_0000`、QEMUのシリアル標準入出力 |
+| Rust | 安定版1.98.0 | rustfmt、Clippy、RV64GCとRV32IMのベアメタルターゲットを固定 |
+| QEMUゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、1ハート、128 MiB RAM |
+| NEORV32 | RISC-V RV32IM | M-mode、内蔵IMEM 24,288バイト、内蔵DMEM 16,192バイト |
+| QEMUコンソール | 16550互換UART | MMIOベース`0x1000_0000`、シリアル標準入出力 |
+| NEORV32コンソール | UART0 | MMIOベース`0xfff5_0000`、96 MHz、19,200 baud |
 
-Windowsホスト、別のQEMUマシン、マルチハート、実機は保証しません。
+Windowsホスト、別のQEMUマシン、マルチハート、NEORV32以外の実機は保証しません。
+
+## NEORV32向けRV32ビルド
+
+NEORV32用カーネルは、次のコマンドでreleaseビルドします。
+
+```sh
+cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked
+```
+
+出力は`target/riscv32im-unknown-none-elf/release/minios-kernel`です。
+このELFは、`pc=0`からM-modeで始まり、IMEMに続けて格納した`.data`の初期値をDMEMへコピーしてからBSSをゼロ化します。
+実機へ書き込む形式と手順は、NEORV32を組み込んだFPGA構成に合わせて選んでください。
+
+起動後のRV32シェルは`help`、`info`、`echo`を実行できます。
+RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`command unavailable on RV32`を返します。
+`cargo xtask check`はRV32のClippyとreleaseビルドまで検査しますが、実機UARTの動作確認は開発者が行います。
 
 ## 学習ガイド
 
@@ -94,13 +114,13 @@ Windowsホスト、別のQEMUマシン、マルチハート、実機は保証し
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、Clippy、クロスビルド、ホストテスト、QEMUの12経路を24段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの12経路を26段階で検査します。
 
 ## 現在の制約
 
 MiniOSが実行対象にするのは、MiniBundleへ格納した静的RISC-V 64 ELFだけです。
 OCI image、network、volume、Linux binary互換、multi-tenant isolation、Windowsは保証しません。
-動的ヒープ、プロセス管理、VirtIO、ファイルシステム、network、マルチハート、Device Tree解析、実機driverは未実装です。
+動的ヒープ、プロセス管理、VirtIO、ファイルシステム、network、マルチハート、Device Tree解析、NEORV32以外の実機driverは未実装です。
 `write`はstdoutとstderrだけを扱い、`exit`は一つのU-mode実行をkernelへ戻します。
 ハードウェアアドレス、10 MHzのタイムベース、128 MiBの上端はQEMU `virt`に固定しています。
 シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。

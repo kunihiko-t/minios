@@ -1,7 +1,7 @@
 # 発展ロードマップ
 
 この文書は、実装済みの範囲、次の受け入れ単位、その後の方向を区別します。
-現在のrelease gateは、host testの後に12個のQEMU経路を含む24段階を実行します。
+現在のrelease gateは、RV64とRV32のクロスビルド、host test、12個のQEMU経路を含む26段階を実行します。
 
 ## 実装済み
 
@@ -26,11 +26,15 @@ MiniBundle boot payloadも完了しています。
 予約windowのheaderを先に検証してからmanifestとELF rangeをparseし、使用pageだけをS-mode read-onlyでmapします。
 `cargo xtask test payload`はQEMU loader、Ready、stdout、stderr、Exit、回収diagnosticを確認します。
 
+NEORV32向けRV32IMカーネルも起動できます。
+M-modeの入口がIMEMに置かれた`.data`初期値をDMEMへコピーし、BSSをゼロ化してからUART0と対話シェルを起動します。
+`cargo xtask check`は、この経路をrelease設定でClippyとクロスビルドに通します。
+
 ## 次
 
 Device TreeはRAM、UART、timebaseの固定値をmachine記述へ置き換えるときに導入します。
 汎用heapは固定容量の単一address spaceを越え、可変個のkernel objectとprocessを管理するときに導入します。
-その後にscheduler、VirtIO block、file system、network、multi-hart、実機対応を進めます。
+その後にscheduler、VirtIO block、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
 
 OCI image、Linux binary互換、multi-tenant isolationはこの実装の目標に含めません。
 

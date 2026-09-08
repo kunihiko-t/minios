@@ -27,6 +27,10 @@ OpenSBIから受け取ったハートIDは、`run(hart_id, ...)`からコマン�
 `uptime`は`uptime_millis()`でミリ秒を読み、別に`time::ticks()`を読んで次の行へ表示します。
 二つの読み取りの間にもタイマー割り込みが入る可能性があるため、値の組を同じ瞬間の観測とは見なさず、それぞれが単調に増えることだけを利用します。
 
+RV32側も同じ`LineBuffer`と`parse_command`を使います。
+NEORV32にはSBIタイマー、物理ページアロケーター、端末を消去する規約がないため、実行できるコマンドを`help`、`info`、`echo`に絞っています。
+CRLFを送る端末では、CRでコマンドを確定した直後のLFを一度だけ読み飛ばし、空のコマンドが続けて実行されることを防ぎます。
+
 ## 実行と確認
 
 ```text
@@ -52,6 +56,19 @@ unknown command: unknown; try 'help'
 稼働時間、ティック数、ページ数は、実行時点とカーネルイメージの大きさによって変わります。
 APIの規約は数値形式と行の順序であり、上の数値そのものではありません。
 `info`のハートIDは、現在の`-smp 1`を使う受け入れテストでは0です。
+
+NEORV32では次の対話を確認できます。
+
+```text
+MiniOS/RV32 booting...
+hart id: 0
+minios> help
+help      Show available commands
+info      Show system information
+echo      Echo text
+minios> echo hello
+hello
+```
 
 ## よくある失敗
 
