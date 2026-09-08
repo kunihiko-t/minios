@@ -63,7 +63,9 @@ enum Phase {
     ClippyAbi,
     ClippyKernelLib,
     ClippyKernelBin,
+    ClippyKernelRv32Bin,
     BuildKernel,
+    BuildKernelRv32,
     AbiUnitTests,
     KernelUnitTests,
     XtaskUnitTests,
@@ -118,6 +120,20 @@ impl Phase {
                 "-D",
                 "warnings",
             ]),
+            Self::ClippyKernelRv32Bin => Some(&[
+                "clippy",
+                "-p",
+                "minios-kernel",
+                "--bin",
+                "minios-kernel",
+                "--target",
+                "riscv32im-unknown-none-elf",
+                "--release",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ]),
             Self::BuildKernel => Some(&[
                 "build",
                 "-p",
@@ -126,6 +142,17 @@ impl Phase {
                 "minios-kernel",
                 "--target",
                 "riscv64gc-unknown-none-elf",
+                "--locked",
+            ]),
+            Self::BuildKernelRv32 => Some(&[
+                "build",
+                "-p",
+                "minios-kernel",
+                "--bin",
+                "minios-kernel",
+                "--target",
+                "riscv32im-unknown-none-elf",
+                "--release",
                 "--locked",
             ]),
             Self::AbiUnitTests => Some(&["test", "-p", "minios-abi", "--locked"]),
@@ -189,7 +216,9 @@ fn check_phases() -> Vec<Phase> {
         Phase::ClippyAbi,
         Phase::ClippyKernelLib,
         Phase::ClippyKernelBin,
+        Phase::ClippyKernelRv32Bin,
         Phase::BuildKernel,
+        Phase::BuildKernelRv32,
         Phase::AbiUnitTests,
         Phase::KernelUnitTests,
         Phase::XtaskUnitTests,
@@ -389,7 +418,9 @@ mod tests {
             Phase::ClippyAbi,
             Phase::ClippyKernelLib,
             Phase::ClippyKernelBin,
+            Phase::ClippyKernelRv32Bin,
             Phase::BuildKernel,
+            Phase::BuildKernelRv32,
             Phase::AbiUnitTests,
             Phase::KernelUnitTests,
             Phase::XtaskUnitTests,
@@ -419,6 +450,22 @@ mod tests {
         assert!(position(Phase::AbiUnitTests) < position(Phase::KernelUnitTests));
     }
 
+    #[test]
+    fn check_plan_verifies_the_neorv32_release_binary() {
+        let commands: Vec<_> = check_phases().into_iter().map(Phase::command).collect();
+
+        assert!(commands.iter().any(|command| {
+            command.contains("clippy")
+                && command.contains("--target riscv32im-unknown-none-elf")
+                && command.contains("--release")
+        }));
+        assert!(commands.iter().any(|command| {
+            command.starts_with("cargo build")
+                && command.contains("--target riscv32im-unknown-none-elf")
+                && command.contains("--release")
+        }));
+    }
+
     // Catches omitting a user-runtime acceptance phase, reordering the
     // user-runtime sequence, or printing a phase total that disagrees with
     // the plan that `cargo xtask check` actually runs.
@@ -438,7 +485,7 @@ mod tests {
         ];
 
         assert_eq!(&plan[host_tests_end + 7..host_tests_end + 12], expected);
-        assert_eq!(plan.len(), 24);
+        assert_eq!(plan.len(), 26);
     }
 
     #[test]
@@ -590,6 +637,37 @@ mod tests {
                     "minios-kernel",
                     "--target",
                     "riscv64gc-unknown-none-elf",
+                    "--locked",
+                ],
+            ),
+            (
+                Phase::ClippyKernelRv32Bin,
+                vec![
+                    "clippy",
+                    "-p",
+                    "minios-kernel",
+                    "--bin",
+                    "minios-kernel",
+                    "--target",
+                    "riscv32im-unknown-none-elf",
+                    "--release",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            (
+                Phase::BuildKernelRv32,
+                vec![
+                    "build",
+                    "-p",
+                    "minios-kernel",
+                    "--bin",
+                    "minios-kernel",
+                    "--target",
+                    "riscv32im-unknown-none-elf",
+                    "--release",
                     "--locked",
                 ],
             ),

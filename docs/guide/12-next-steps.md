@@ -28,13 +28,16 @@ MiniContainerの最初の実行単位に必要なのは、QEMU `virt`上で一�
 3. **`exit` system call**：終了codeをExit frameで通知し、user address spaceとkernel trap stackの所有frameを回収します。
 4. **MiniBundle payload統合**：予約物理windowからMiniBundle内のELFを二段階で検証し、使用pageだけをS-mode read-onlyでmapします。
 
+NEORV32向けには、RV32IMのM-mode起動、IMEMからDMEMへの`.data`コピー、UART0、`help`、`info`、`echo`を持つ対話シェルまでを実装しています。
+この実機経路は、QEMU側のSv39やU-modeを前提にせず、共通のコンソールと入力処理を別のハードウェアへ接続します。
+
 Device Treeと汎用ヒープは、QEMU `virt`の固定値を外す段階と、固定容量の単一アドレス空間を越える段階で導入します。
-その後にprocessとscheduler、VirtIO、file system、network、multi-hart、実機対応を進めます。
+その後にprocessとscheduler、VirtIO、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
 各段階の完了条件は[発展ロードマップ](../reference/roadmap.md)にあります。
 
 ## 実行と確認
 
-実装後の全検査には、24段階のrelease gateを実行します。
+実装後の全検査には、26段階のrelease gateを実行します。
 
 ```sh
 cargo xtask check
@@ -42,6 +45,7 @@ cargo xtask check
 
 U-mode遷移にはentryと特権levelを観測するQEMU markerがあり、`write`には正常なbufferと不正なuser pointer、`exit`には終了codeと全所有frameの回収を確認する経路があります。
 `vm`と`elf`経路も残し、activeなカーネル空間と実行前`LoadedImage`の前提が壊れていないことを確認します。
+同じ検査はNEORV32向けRV32IMカーネルをrelease設定でClippyとクロスビルドに通します。
 
 ## よくある失敗
 

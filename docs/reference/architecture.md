@@ -2,6 +2,7 @@
 
 MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ込め、純粋なロジックをホストでテストできるライブラリーへ分けています。
 静的RISC-V 64 ELFをMiniBundle boot payloadから検証し、U-modeで`write`と`exit`を実行して所有frameを回収します。
+NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行する別の小さな経路です。
 依存方向はシェルとカーネルの入口から型の付いたAPIへ向かいます。
 上位モジュールがCSR、SBIのレジスター、UARTのoffset、PTEのbit列を直接操作することはありません。
 
@@ -14,8 +15,10 @@ MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ�
 
 - `kernel/linker.ld`：`_start`、ページ境界へそろえたELFセクション、BSS、64 KiBの起動用スタック、`__kernel_end`を定義します。
 - `kernel/src/arch/riscv64/entry.S`：OpenSBIの`a0/a1`を保持し、スタックとBSSを準備して`kernel_main`へ渡します。
+- `kernel/linker_neorv32.ld`：NEORV32の内蔵IMEMとDMEMへRV32のセクションを分け、`.data`の格納元と実行先を定義します。
+- `kernel/src/arch/riscv32/entry.S`：スタックを設定し、`.data`をIMEMからDMEMへコピーしてBSSをゼロ化した後、`kernel_main32`を呼びます。
 - `kernel/src/main.rs`：ハートID、トラップ、物理フレームアロケーター、カーネルアドレス空間、Sv39、タイマー、U-mode test、boot payload、シェルを順に接続します。
-  下位モジュールの実装詳細は、型の付いた関数を通して呼び出します。
+  RV32ではUARTを初期化し、対話シェルへ直接進みます。
 
 ### `arch/riscv64`
 
@@ -32,8 +35,9 @@ MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ�
 
 - `drivers/uart.rs`：QEMU `virt`の16550互換UARTについて、`write_byte`、`read_byte`、`has_byte`、`fmt::Write`だけを公開します。
   文字列の扱いとcommand処理は持ちません。
+- `drivers/neorv32_uart.rs`：NEORV32のUART0について、ボーレート設定、送信FIFO待ち、受信確認を提供します。
 - `console.rs`：書式付き出力macroの実装、待機する1 byte入力、1 byte出力、lockを使わない緊急出力を提供します。
-  機器のregister配置は上位モジュールから見えません。
+  ターゲットに応じたUARTを選ぶため、機器のregister配置は上位モジュールから見えません。
 
 ### 時刻
 
@@ -92,8 +96,8 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 - `shell/line.rs`：容量が固定された印字可能ASCII buffer、Backspace、入力超過状態の保持、状態の初期化を純粋なロジックとして提供します。
 - `shell/command.rs`：前後の空白を除いた入力をcommand列挙型へ分類するだけで、UARTとglobal状態へ作用しません。
 - `shell/mod.rs`：UARTのpollingとecho、prompt、commandの振り分けを担当します。
-  timerの読み取り用APIと、一つだけ存在するallocatorへの参照を使います。
-  `shutdown`だけは型の付いたSBI reset境界へ渡します。
+  RV64ではtimerの読み取り用APIと一つだけ存在するallocatorへの参照を使い、`shutdown`をSBI reset境界へ渡します。
+  RV32では`help`、`info`、`echo`だけを実行し、CRLFのLFを一度だけ読み飛ばします。
 
 ### ホストでテストできるライブラリー
 
@@ -111,7 +115,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   `user-exit`と`payload`経路はstdout、stderr、Exit、回収をcontrol frameで観測します。
 - `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第16章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
-- `lib.rs`：公開commandを24段階の計画へ変換し、host testの後にuser runtimeとpayloadのQEMU testを実行します。
+- `lib.rs`：公開commandを26段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
 
 ## 起動からシェルまで
 
@@ -127,5 +131,15 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 payload bootでは`kernel_main`がMiniBundleを二段階で検証し、ELFをU-modeへ遷移させます。
 U-modeの`ecall`は`sscratch`によるstack交換を通り、`write`または`exit`を処理してからkernelへ戻ります。
+
+## NEORV32の起動からシェルまで
+
+1. FPGAのブート機構が、カーネルのロードイメージを内蔵IMEMへ配置して`pc=0`から実行します。
+2. RV32の`_start`がDMEM上端へスタックを置き、`.data`をIMEMからDMEMへコピーしてBSSをゼロ化します。
+3. `kernel_main32`が96 MHzと19,200 baudの前提でUART0を初期化し、起動メッセージを出します。
+4. 固定長の入力バッファーを使うシェルが`help`、`info`、`echo`を処理します。
+
+この経路はOpenSBI、Sv39、タイマー、物理ページ管理、U-modeを使いません。
+RV64の仕組みをそのまま縮小した構成ではなく、UARTとシェルの境界を実機へ移植するための入口です。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

@@ -9,7 +9,8 @@ MiniOSの到達点と学習範囲を把握します。
 
 通常のRustプログラムは、プロセス、仮想メモリー、標準入出力などをOSから提供してもらいます。
 カーネルを作るときは、その提供元を自分で用意します。
-MiniOSは対象をRISC-V 64、QEMU `virt`、OpenSBI、1ハート、128 MiB RAMに固定し、一つずつ観察できる規模に保っています。
+MiniOSの主教材では、対象をRISC-V 64、QEMU `virt`、OpenSBI、1ハート、128 MiB RAMに固定し、一つずつ観察できる規模に保っています。
+同じコンソールとシェルの境界を使い、NEORV32上でRISC-V 32のM-mode起動も試せます。
 Rustの基本構文、Gitの基本操作、CPUが命令を順に実行することを知っていれば読み始められます。
 
 ## 実装
@@ -25,9 +26,10 @@ Rustの基本構文、Gitの基本操作、CPUが命令を順に実行するこ�
 - U-mode遷移、user trap context、`write`と`exit`のsystem call、実行用frameの回収
 - 予約済みMiniBundleを検証し、boot payloadをU-modeで実行する経路
 - ヒープを使わない固定長入力と六つのコマンドを持つ対話シェル
+- NEORV32のIMEMとDMEMへ配置するRV32IMカーネルと、三つのコマンドを持つUARTシェル
 - ホストテスト、RISC-Vクロスビルド、QEMUテストを統合する`cargo xtask`
 
-動的ヒープ、scheduler、ファイルシステム、ネットワーク、マルチハート、実機対応は、現在の実装には含めません。
+動的ヒープ、scheduler、ファイルシステム、ネットワーク、マルチハート、NEORV32以外の実機対応は、現在の実装には含めません。
 これらは[第12章](12-next-steps.md)の発展課題として扱います。
 
 ソースコードを読む入口も確認しておきましょう。
@@ -48,7 +50,7 @@ MiniOS development commands:
   cargo xtask setup
   cargo xtask build
   cargo xtask run
-  cargo xtask test [all|boot|trap|timer|memory|shell]
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|shell]
   cargo xtask check
 ```
 
