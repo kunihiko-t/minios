@@ -143,6 +143,7 @@ use minios_kernel::vm::AddressSpace;
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::{
     AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, PhysPageNum,
+    VirtAddr as PayloadVirtAddr,
 };
 #[cfg(all(
     target_arch = "riscv64",
@@ -1539,8 +1540,33 @@ fn run_boot_payload<const KERNEL_N: usize>(
         Ok(image) => image,
         Err(error) => fatal_payload_error(format_args!("MiniOS payload: load, {error:?}\r\n")),
     };
-    // imageはUserRunへmoveされるため、entryとstack topは先にcontextへ固定する。
-    let mut context = UserContext::new(image.entry(), image.user_stack_top());
+    // imageはUserRunへmoveされるため、entryとargv blockは先にcontextへ固定する。
+    // manifestのnameとarg=を初期user stackへ積み、a0=argc / a1=argvで起動する。
+    let mut argv: [&str; minios_abi::manifest::ARG_MAX_COUNT + 1] = [""; 17];
+    argv[0] = payload.manifest().name();
+    let mut argv_len = 1usize;
+    for argument in payload.manifest().args() {
+        argv[argv_len] = argument;
+        argv_len += 1;
+    }
+    let initial = match minios_kernel::user::stack::write_initial_argv(
+        image.address_space(),
+        memory,
+        argv[0],
+        &argv[1..argv_len],
+    ) {
+        Ok(initial) => initial,
+        Err(error) => fatal_payload_error(format_args!("MiniOS payload: argv, {error:?}\r\n")),
+    };
+    let entry = image.entry();
+    let stack_pointer = match PayloadVirtAddr::try_new(initial.stack_pointer as u64) {
+        Ok(address) => address,
+        Err(_) => fatal_payload_error(format_args!(
+            "MiniOS payload: argv stack pointer is not a valid Sv39 address\r\n"
+        )),
+    };
+    let mut context =
+        UserContext::with_arguments(entry, stack_pointer, initial.argc, initial.argv_address);
     let kernel_root = PhysPageNum::from_start(kernel_space.root().as_u64())
         .expect("kernel root page number is valid");
     let mut run = match UserRun::new(image, frames, memory, kernel_root) {

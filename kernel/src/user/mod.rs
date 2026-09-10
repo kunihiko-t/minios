@@ -3,6 +3,7 @@
 pub mod context;
 pub mod memory;
 pub mod run;
+pub mod stack;
 pub mod syscall;
 pub mod trap;
 
