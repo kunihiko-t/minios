@@ -39,6 +39,27 @@ impl UserContext {
         .with_user_stack(stack_top)
     }
 
+    /// argv blockを載せた初期contextを組む。
+    ///
+    /// `a0=argc`、`a1=argv`、`sp=stack_pointer`は、[`crate::user::stack`]が
+    /// 構築したblockの位置と一致しなければならない。
+    pub fn with_arguments(
+        entry: VirtAddr,
+        stack_pointer: VirtAddr,
+        argc: usize,
+        argv_address: usize,
+    ) -> Self {
+        Self::new(entry, stack_pointer)
+            .with_raw_arguments(argc, argv_address)
+            .with_user_stack(stack_pointer)
+    }
+
+    fn with_raw_arguments(mut self, argc: usize, argv_address: usize) -> Self {
+        self.registers[10] = argc;
+        self.registers[11] = argv_address;
+        self
+    }
+
     fn with_user_stack(mut self, stack_top: VirtAddr) -> Self {
         self.registers[2] = usize::try_from(stack_top.as_u64()).expect("Sv39 addresses fit usize");
         self
