@@ -629,19 +629,14 @@ const PAYLOAD_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
-fn expected_payload_args_frames() -> Vec<Vec<u8>> {
-    [
-        PAYLOAD_READY_FRAME,
-        ARGS_STDOUT_HELLO_FRAME,
-        ARGS_STDOUT_ALPHA_FRAME,
-        ARGS_STDOUT_BRAVO_FRAME,
-        PAYLOAD_EXIT_FRAME,
-        PAYLOAD_DIAGNOSTIC_FRAME,
-    ]
-    .into_iter()
-    .map(Vec::from)
-    .collect()
-}
+const PAYLOAD_ARGS_EXPECTED_FRAMES: [&[u8]; 6] = [
+    PAYLOAD_READY_FRAME,
+    ARGS_STDOUT_HELLO_FRAME,
+    ARGS_STDOUT_ALPHA_FRAME,
+    ARGS_STDOUT_BRAVO_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
 
 fn verify_payload_args_result(
     command: &str,
@@ -655,9 +650,7 @@ fn verify_payload_args_result(
             output: output.to_owned(),
         });
     }
-    let frames = expected_payload_args_frames();
-    let refs: Vec<&[u8]> = frames.iter().map(|frame| frame.as_slice()).collect();
-    if !has_exact_payload_frames(output.as_bytes(), &refs) {
+    if !has_exact_payload_frames(output.as_bytes(), &PAYLOAD_ARGS_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -911,24 +904,23 @@ fn payload_args_elf_bytes() -> Vec<u8> {
     let ecall = || 0x0000_0073u32;
 
     // 命令index: 0..2 init、3..9 loop body、10 bne、11..13 done、14 安全loop。
-    let mut code: Vec<u32> = Vec::new();
-    code.push(addi(S0, A0, 0));
-    code.push(addi(S1, A1, 0));
-    code.push(branch(0b000, S0, X0, (11 - 2) * 4));
-    for _ in 0..1 {
-        code.push(ld(A1, S1, 0));
-        code.push(addi(A0, X0, 1));
-        code.push(addi(A2, X0, 5));
-        code.push(addi(A7, X0, 1));
-        code.push(ecall());
-        code.push(addi(S1, S1, 8));
-        code.push(addi(S0, S0, -1));
-    }
-    code.push(branch(0b001, S0, X0, (3 - 10) * 4));
-    code.push(addi(A0, X0, 42));
-    code.push(addi(A7, X0, 2));
-    code.push(ecall());
-    code.push(0x0000_006f);
+    let code = [
+        addi(S0, A0, 0),
+        addi(S1, A1, 0),
+        branch(0b000, S0, X0, (11 - 2) * 4),
+        ld(A1, S1, 0),
+        addi(A0, X0, 1),
+        addi(A2, X0, 5),
+        addi(A7, X0, 1),
+        ecall(),
+        addi(S1, S1, 8),
+        addi(S0, S0, -1),
+        branch(0b001, S0, X0, (3 - 10) * 4),
+        addi(A0, X0, 42),
+        addi(A7, X0, 2),
+        ecall(),
+        0x0000_006f,
+    ];
 
     let code_bytes: Vec<u8> = code.iter().flat_map(|word| word.to_le_bytes()).collect();
     let elf_len = 0x1000 + code_bytes.len();
@@ -1967,15 +1959,16 @@ mod tests {
     #[test]
     fn payload_args_verification_requires_each_argument_frame_in_order() {
         let mut output = "OpenSBI\n[ok] traps\n".to_owned();
-        for frame in &expected_payload_args_frames() {
+        for frame in PAYLOAD_ARGS_EXPECTED_FRAMES {
             output.push_str(&String::from_utf8_lossy(frame));
         }
         assert!(verify_payload_args_result(TEST_COMMAND, Some(0), &output).is_ok());
 
         let mut reordered = "boot\n".to_owned();
-        let frames = expected_payload_args_frames();
         for index in [0usize, 2, 1, 3, 4, 5] {
-            reordered.push_str(&String::from_utf8_lossy(&frames[index]));
+            reordered.push_str(&String::from_utf8_lossy(
+                PAYLOAD_ARGS_EXPECTED_FRAMES[index],
+            ));
         }
         assert!(matches!(
             verify_payload_args_result(TEST_COMMAND, Some(0), &reordered),

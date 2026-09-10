@@ -34,9 +34,9 @@ pub struct InitialStack {
 
 /// program nameと引数をuser stack上限へ置き、`argc/argv`の位置を返す。
 ///
-/// layout (低位→高位): `argc`、argv pointer列、NULL終端、空のenvp、空のauxv、
-/// 各文字列 (NUL終端)。spは16 byteへ整列する。書き込みはpage単位で権限を
-/// 検証しながら行われ、stack領域を下回るblockは拒否される。
+/// layout (低位→高位): `argc`、argv pointer列、NULL終端、空のenvp、
+/// `AT_NULL` (typeとvalueの二語)、各文字列 (NUL終端)。spは16 byteへ整列する。
+/// 書き込みはpage単位で権限を検証しながら行われ、stack領域を下回るblockは拒否される。
 pub fn write_initial_argv<const N: usize, M: FrameStore>(
     space: &AddressSpace<'_, N>,
     memory: &mut M,
@@ -71,9 +71,9 @@ pub fn write_initial_argv<const N: usize, M: FrameStore>(
     }
     let strings_bottom = cursor;
 
-    // pointer block: argc + argv列 + NULL終端 + 空envp + 空auxv。
+    // pointer block: argc + argv列 + NULL終端 + 空envp + AT_NULL (type, value)。
     let pointer_bytes = total
-        .checked_add(3)
+        .checked_add(4)
         .and_then(|words| words.checked_mul(8))
         .and_then(|bytes| bytes.checked_add(8))
         .ok_or(InitialStackError::AddressOverflow)?;
@@ -101,7 +101,8 @@ pub fn write_initial_argv<const N: usize, M: FrameStore>(
             &(*address as u64).to_le_bytes(),
         )?;
     }
-    for word in 0..3 {
+    // argv NULL終端、空のenvp、AT_NULLのtypeとvalueの四語。
+    for word in 0..4 {
         copy_to_user(
             space,
             memory,
@@ -395,7 +396,8 @@ mod tests {
         }
         assert_eq!(read_word(space, &memory, argv + 3 * 8), 0, "argv NULL");
         assert_eq!(read_word(space, &memory, argv + 4 * 8), 0, "empty envp");
-        assert_eq!(read_word(space, &memory, argv + 5 * 8), 0, "empty auxv");
+        assert_eq!(read_word(space, &memory, argv + 5 * 8), 0, "AT_NULL type");
+        assert_eq!(read_word(space, &memory, argv + 6 * 8), 0, "AT_NULL value");
 
         let context = UserContext::with_arguments(
             VirtAddr::try_new(0x0010_0000).unwrap(),
