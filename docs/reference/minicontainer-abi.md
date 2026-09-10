@@ -116,6 +116,23 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | `-14` | `EFAULT` | 不正なpointerまたは読み取り不能な範囲 |
 | `-22` | `EINVAL` | 4 KiBを超える出力長 |
 
+## 初期スタック ABI v1
+
+MiniOSは、MiniBundleのmanifestにある`name`と`arg=`行をguestの初期スタックへ配置してから起動します。
+この配置はMiniOSとguestが共有する契約です。
+
+起動時のregisterとスタックは次のとおりです。
+
+| 項目 | 値 |
+| --- | --- |
+| `a0` | `argc`。program nameを含む引数の個数 |
+| `a1` | `argv`配列のユーザー仮想アドレス |
+| `sp` | `argc`が置かれたアドレス。16バイト整列 |
+
+スタック上位から低位へは、NUL終端の文字列、`AT_NULL`（typeとvalueの二語とも0）、空の`envp`（0）、`argv`のNULL終端（0）、`argv[0..argc]`のpointer列、`argc`の順に並びます。
+`argv[0]`はmanifestの`name`を指し、`argv[1..argc]`は`arg=`行の順序どおりの文字列を指します。
+guestは書き換え前のスタックを読み取り専用の初期データとして扱い、以降のスタック使用は`sp`より下位へ行います。
+
 ## 互換性規約
 
 v1のBootHeader decoderは`abi_major=1`かつ`abi_minor=0`だけを受理します。

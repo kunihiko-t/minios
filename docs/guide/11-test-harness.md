@@ -4,7 +4,7 @@
 
 `cargo xtask`をローカル開発とCIの共通入口にする理由を学びます。
 読み終えると、ホスト単体テストとRISC-Vゲスト統合テストの違い、QEMUのマーカーモードと対話モード、時間切れになったプロセスの回収、対話記録の読み方を説明できるようになります。
-`cargo xtask check`が実行する26段階の順序も確認します。
+`cargo xtask check`が実行する27段階の順序も確認します。
 
 ## 背景
 
@@ -59,7 +59,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 13. QEMU payloadテスト
 14. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、payload、対話シェルという依存関係の順にゲストの12経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、payload、payload-args、対話シェルという依存関係の順にゲストの13経路を確認します。
 
 ### QEMUの二つの検証モード
 
@@ -103,9 +103,9 @@ QEMU起動前にビルドが失敗した場合も、Cargoコマンドにはテ�
 失敗した段階の見出しと、最後に見えた初期化行やマーカーを照合すると、ビルド失敗、ゲスト内の明示的な失敗、停止を区別できます。
 Cargoの子プロセスが失敗した場合も、実行コマンド、終了ステータス、標準出力、標準エラーを表示します。
 
-### `check`が実行する26段階
+### `check`が実行する27段階
 
-`cargo xtask check`は、次の26段階をこの順に実行し、最初の失敗で停止します。
+`cargo xtask check`は、次の27段階をこの順に実行し、最初の失敗で停止します。
 書式検査の直後に教材のリンクと章構造を調べ、その後でコンパイラーを動かします。
 静的検査より前にQEMUを起動しないことと、検査していないバイナリーをゲストテストへ渡さないことが、この順序を固定する理由です。
 
@@ -135,11 +135,12 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 23. QEMU user-syscall test
 24. QEMU user-exit test
 25. QEMU payload test
-26. QEMU shell test
+26. QEMU payload-args test
+27. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 26 phases`を表示します。
+全段階に成功すると`summary: PASSED all 27 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -178,7 +179,7 @@ phase 1/26 passed (elapsed: ...s)
 ...
 [26/26] QEMU shell test
 phase 26/26 passed (elapsed: ...s)
-summary: PASSED all 26 phases (elapsed: ...s)
+summary: PASSED all 27 phases (elapsed: ...s)
 ```
 
 一つの経路だけを繰り返す場合は、たとえば`cargo xtask test trap`を使います。

@@ -107,14 +107,14 @@ RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`comman
 
 ## テスト
 
-対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|shell]`を使います。
+対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]`を使います。
 リリース前の全検査は次のコマンドで実行します。
 
 ```sh
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの12経路を26段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの13経路を27段階で検査します。
 
 ## 現在の制約
 
