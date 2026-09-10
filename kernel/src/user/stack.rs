@@ -184,7 +184,7 @@ fn copy_to_user<const N: usize, M: FrameStore>(
 mod tests {
     extern crate std;
 
-    use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
+    use std::{boxed::Box, collections::BTreeMap, vec::Vec};
 
     use super::{InitialStackError, write_initial_argv};
     use crate::{

@@ -207,7 +207,7 @@ impl fmt::Display for QemuError {
             ),
             Self::PayloadFrames { command, output } => write!(
                 formatter,
-                "QEMU payload run did not emit the expected Ready/stdout/stderr/Exit/cleanup frame sequence:\ncommand: {command}\n{}",
+                "QEMU payload run did not emit the expected control-frame sequence:\ncommand: {command}\n{}",
                 output.trim_end()
             ),
             Self::MissingControlFrame {
@@ -1978,6 +1978,20 @@ mod tests {
             verify_payload_args_result(TEST_COMMAND, Some(1), &output),
             Err(QemuError::Failed { .. })
         ));
+    }
+
+    // payload-argsにはstderr frameがないため、二つのpayload検査で共有する
+    // 診断がstderrを必須と誤記しないことを確かめる。
+    #[test]
+    fn payload_frame_error_describes_both_payload_test_variants() {
+        let error = QemuError::PayloadFrames {
+            command: TEST_COMMAND.to_owned(),
+            output: "boot output".to_owned(),
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("expected control-frame sequence"));
+        assert!(!message.contains("stdout/stderr"));
     }
 
     // Catches a payload run that misses any of the five control frames or

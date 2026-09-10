@@ -25,6 +25,8 @@ U-mode実行も完了しています。
 MiniBundle boot payloadも完了しています。
 予約windowのheaderを先に検証してからmanifestとELF rangeをparseし、使用pageだけをS-mode read-onlyでmapします。
 `cargo xtask test payload`はQEMU loader、Ready、stdout、stderr、Exit、回収diagnosticを確認します。
+manifestの`name`と`arg=`は初期user stackへ配置され、guestは`a0=argc`と`a1=argv`から読み取れます。
+`cargo xtask test payload-args`は、この引数がmanifestの順序どおりguestへ届くことを確認します。
 
 NEORV32向けRV32IMカーネルも起動できます。
 M-modeの入口がIMEMに置かれた`.data`初期値をDMEMへコピーし、BSSをゼロ化してからUART0と対話シェルを起動します。

@@ -49,9 +49,7 @@ impl UserContext {
         argc: usize,
         argv_address: usize,
     ) -> Self {
-        Self::new(entry, stack_pointer)
-            .with_raw_arguments(argc, argv_address)
-            .with_user_stack(stack_pointer)
+        Self::new(entry, stack_pointer).with_raw_arguments(argc, argv_address)
     }
 
     fn with_raw_arguments(mut self, argc: usize, argv_address: usize) -> Self {
