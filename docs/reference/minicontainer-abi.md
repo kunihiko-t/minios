@@ -129,8 +129,8 @@ MiniOSは、MiniBundleのmanifestにある`name`と`arg=`行をguestの初期ス
 | `a1` | `argv`配列のユーザー仮想アドレス |
 | `sp` | `argc`が置かれたアドレス。16バイト整列 |
 
-スタック上位から低位へは、NUL終端の文字列、`AT_NULL`（typeとvalueの二語とも0）、空の`envp`（0）、`argv`のNULL終端（0）、`argv[0..argc]`のpointer列、`argc`の順に並びます。
-`argv[0]`はmanifestの`name`を指し、`argv[1..argc]`は`arg=`行の順序どおりの文字列を指します。
+スタック上位から低位へは、NUL終端の文字列、`AT_NULL`（typeとvalueの二語とも0）、空の`envp`（0）、`argv`のNULL終端（0）、`argv[0]`から`argv[argc - 1]`までのpointer列、`argc`の順に並びます。
+`argv[0]`はmanifestの`name`を指し、`argv[1]`以降は`arg=`行の順序どおりの文字列を指します。
 guestは書き換え前のスタックを読み取り専用の初期データとして扱い、以降のスタック使用は`sp`より下位へ行います。
 
 ## 互換性規約

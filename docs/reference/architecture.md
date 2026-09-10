@@ -108,11 +108,11 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payloadを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-argsを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
 - `qemu.rs`：QEMU `virt`の引数、MiniBundle loader、marker mode、制限時間、並行した出力の読み取り、childのkillとwait、記録の検証を担当します。
-  `user-exit`と`payload`経路はstdout、stderr、Exit、回収をcontrol frameで観測します。
+  `user-exit`、`payload`、`payload-args`経路はstdout、必要な場合はstderr、Exit、回収をcontrol frameで観測します。
 - `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第16章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
 - `lib.rs`：公開commandを27段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。

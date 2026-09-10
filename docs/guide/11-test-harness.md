@@ -26,7 +26,7 @@ Cargoは`cargo xtask ...`を、ワークスペース内の`xtask`バイナリー
 cargo xtask setup
 cargo xtask build
 cargo xtask run
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]
 cargo xtask check
 ```
 
@@ -57,11 +57,12 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 11. QEMU user-syscallテスト
 12. QEMU user-exitテスト
 13. QEMU payloadテスト
-14. QEMUシェルテスト
+14. QEMU payload-argsテスト
+15. QEMUシェルテスト
 
 速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、payload、payload-args、対話シェルという依存関係の順にゲストの13経路を確認します。
 
-### QEMUの二つの検証モード
+### QEMUの三つの検証モード
 
 起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscallのテストは**マーカーモード**です。
 テストごとのCargo機能を有効にしてカーネルをビルドし、UARTの記録、終了ステータス0、次の完全一致するマーカーを要求します。
@@ -81,6 +82,11 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 マーカーがなければ、終了ステータスが0でも成功とは見なしません。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
+
+`user-exit`、`payload`、`payload-args`は**control frameモード**です。
+MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
+`payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
+この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
 
 シェルテストは**対話モード**です。
 通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`not-a-command`、`shutdown`を標準入力へ送ります。
@@ -174,11 +180,11 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/26] cargo fmt --all -- --check
-phase 1/26 passed (elapsed: ...s)
+[1/27] cargo fmt --all -- --check
+phase 1/27 passed (elapsed: ...s)
 ...
-[26/26] QEMU shell test
-phase 26/26 passed (elapsed: ...s)
+[27/27] QEMU shell test
+phase 27/27 passed (elapsed: ...s)
 summary: PASSED all 27 phases (elapsed: ...s)
 ```
 

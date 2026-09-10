@@ -50,7 +50,7 @@ MiniOS development commands:
   cargo xtask setup
   cargo xtask build
   cargo xtask run
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|shell]
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]
   cargo xtask check
 ```
 
