@@ -98,6 +98,10 @@ pub enum DocsError {
         path: PathBuf,
         required: &'static str,
     },
+    InvalidHarnessExample {
+        path: PathBuf,
+        expected_phase_count: usize,
+    },
 }
 
 impl DocsError {
@@ -112,7 +116,8 @@ impl DocsError {
             Self::MissingPublicationFile { path }
             | Self::ForbiddenPublicationPath { path }
             | Self::MissingPublicationText { path, .. }
-            | Self::InvalidPublicationPolicy { path, .. } => path,
+            | Self::InvalidPublicationPolicy { path, .. }
+            | Self::InvalidHarnessExample { path, .. } => path,
         }
     }
 
@@ -180,6 +185,14 @@ impl fmt::Display for DocsError {
             Self::InvalidPublicationPolicy { path, required } => write!(
                 formatter,
                 "{}: missing required publication policy {required}",
+                path.display()
+            ),
+            Self::InvalidHarnessExample {
+                path,
+                expected_phase_count,
+            } => write!(
+                formatter,
+                "{}: cargo xtask check example must show {expected_phase_count} phases",
                 path.display()
             ),
         }
@@ -290,6 +303,74 @@ pub fn check_guide_structure(root: &Path) -> Result<(), DocsError> {
     Ok(())
 }
 
+/// 教材の実行例が、`cargo xtask check`の実際の段階数と一致するか調べる。
+pub fn check_harness_example(root: &Path, expected_phase_count: usize) -> Result<(), DocsError> {
+    let path = Path::new("docs/guide/11-test-harness.md");
+    let contents = read_text(root, path)?;
+    let expected = [
+        "$ cargo xtask check".to_owned(),
+        format!("[1/{expected_phase_count}] cargo fmt --all -- --check"),
+        format!("phase 1/{expected_phase_count} passed (elapsed: ...s)"),
+        "...".to_owned(),
+        format!("[{expected_phase_count}/{expected_phase_count}] QEMU shell test"),
+        format!("phase {expected_phase_count}/{expected_phase_count} passed (elapsed: ...s)"),
+        format!("summary: PASSED all {expected_phase_count} phases (elapsed: ...s)"),
+    ];
+
+    if console_blocks(&contents).any(|block| block == expected) {
+        return Ok(());
+    }
+
+    Err(DocsError::InvalidHarnessExample {
+        path: path.to_owned(),
+        expected_phase_count,
+    })
+}
+
+fn console_blocks(contents: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+    // 本文の数字ではなく、読者が実行結果として読むconsoleブロックだけを比較する。
+    let mut blocks = Vec::new();
+    let mut fence = None;
+    let mut console_block = None;
+
+    for line in contents.lines() {
+        let opens_console = fence.is_none() && is_console_fence(line);
+        if update_fence(line, &mut fence) {
+            if opens_console {
+                console_block = Some(Vec::new());
+            } else if fence.is_none()
+                && let Some(block) = console_block.take()
+            {
+                blocks.push(block);
+            }
+            continue;
+        }
+        if let Some(block) = &mut console_block {
+            block.push(line.to_owned());
+        }
+    }
+
+    blocks.into_iter()
+}
+
+fn is_console_fence(line: &str) -> bool {
+    let Some(content) = commonmark_content(line) else {
+        return false;
+    };
+    let Some(marker) = content.as_bytes().first().copied() else {
+        return false;
+    };
+    if marker != b'`' && marker != b'~' {
+        return false;
+    }
+    let marker_length = content
+        .as_bytes()
+        .iter()
+        .take_while(|candidate| **candidate == marker)
+        .count();
+    marker_length >= 3 && content[marker_length..].trim() == "console"
+}
+
 pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
     let forbidden = PathBuf::from("docs/superpowers");
     if fs::symlink_metadata(root.join(&forbidden)).is_ok() {
@@ -349,6 +430,9 @@ pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
 
 fn validate_ci_policy(contents: &str) -> Result<(), &'static str> {
     let directives = yaml_directives(contents);
+    if !has_required_ci_triggers(&directives) {
+        return Err("pull requests and pushes to main only");
+    }
     let Some(jobs_index) = directives.iter().position(|directive| {
         directive.indent == 0 && directive.key == "jobs" && directive.value.is_empty()
     }) else {
@@ -431,6 +515,59 @@ fn validate_ci_policy(contents: &str) -> Result<(), &'static str> {
         return Err("active pinned checkout, Rust toolchain, and Cargo cache actions");
     }
     Ok(())
+}
+
+fn has_required_ci_triggers(directives: &[YamlDirective<'_>]) -> bool {
+    // PRブランチへのpushとpull_requestで同じコミットを二重実行しない構成に固定する。
+    let Some(on_index) = directives.iter().position(|directive| {
+        directive.indent == 0 && directive.key == "on" && directive.value.is_empty()
+    }) else {
+        return false;
+    };
+    let on_indent = directives[on_index].indent;
+    let trigger_block = directives
+        .iter()
+        .skip(on_index + 1)
+        .take_while(|directive| directive.indent > on_indent)
+        .copied()
+        .collect::<Vec<_>>();
+
+    let has_pull_request = trigger_block.iter().any(|directive| {
+        directive.indent == on_indent + 2
+            && directive.key == "pull_request"
+            && directive.value.is_empty()
+    });
+    let Some(push_index) = trigger_block.iter().position(|directive| {
+        directive.indent == on_indent + 2 && directive.key == "push" && directive.value.is_empty()
+    }) else {
+        return false;
+    };
+    let push_indent = trigger_block[push_index].indent;
+    let pushes_main_only = trigger_block
+        .iter()
+        .skip(push_index + 1)
+        .take_while(|directive| directive.indent > push_indent)
+        .any(|directive| {
+            directive.indent == push_indent + 2
+                && directive.key == "branches"
+                && inline_yaml_list(directive.value) == ["main"]
+        });
+
+    has_pull_request && pushes_main_only
+}
+
+fn inline_yaml_list(value: &str) -> Vec<&str> {
+    let Some(items) = value
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        return Vec::new();
+    };
+    items
+        .split(',')
+        .map(|item| item.trim().trim_matches(['\'', '"']))
+        .filter(|item| !item.is_empty())
+        .collect()
 }
 
 fn validate_dependabot_policy(contents: &str) -> Result<(), &'static str> {
@@ -906,7 +1043,7 @@ mod tests {
         );
         temp.write(
             ".github/workflows/ci.yml",
-            "name: CI\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
+            "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
         );
         temp.write(
             ".github/dependabot.yml",
@@ -944,6 +1081,23 @@ mod tests {
         let error = check_publication_files(temp.path()).unwrap_err();
 
         assert_eq!(error.path(), Path::new(".github/workflows/ci.yml"));
+    }
+
+    #[test]
+    fn publication_policy_rejects_pushes_from_every_branch() {
+        let temp = complete_publication_tree();
+        temp.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non:\n  push:\n  pull_request:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
+        );
+
+        assert_eq!(
+            check_publication_files(temp.path()),
+            Err(DocsError::InvalidPublicationPolicy {
+                path: PathBuf::from(".github/workflows/ci.yml"),
+                required: "pull requests and pushes to main only",
+            })
+        );
     }
 
     #[test]
@@ -1025,7 +1179,7 @@ mod tests {
         let temp = complete_publication_tree();
         temp.write(
             ".github/workflows/ci.yml",
-            "name: CI\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      # uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: actions/checkout@v7\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
+            "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      # uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: actions/checkout@v7\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\n",
         );
 
         assert_eq!(
@@ -1059,7 +1213,7 @@ mod tests {
         let temp = complete_publication_tree();
         temp.write(
             ".github/workflows/ci.yml",
-            "name: CI\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\nuses: actions/cache@v4\n",
+            "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772\n      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6\nuses: actions/cache@v4\n",
         );
 
         assert_eq!(
@@ -1586,5 +1740,33 @@ mod tests {
         temp.write("docs/guide/01-introduction.md", &chapter);
 
         assert_eq!(check_guide_structure(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn harness_example_rejects_a_phase_total_that_differs_from_the_plan() {
+        let temp = TestTree::new();
+        temp.write(
+            "docs/guide/11-test-harness.md",
+            "```console\n$ cargo xtask check\n[1/27] cargo fmt --all -- --check\nphase 1/27 passed (elapsed: ...s)\n...\n[27/27] QEMU shell test\nphase 27/27 passed (elapsed: ...s)\nsummary: PASSED all 27 phases (elapsed: ...s)\n```\n",
+        );
+
+        assert_eq!(
+            check_harness_example(temp.path(), 28),
+            Err(DocsError::InvalidHarnessExample {
+                path: PathBuf::from("docs/guide/11-test-harness.md"),
+                expected_phase_count: 28,
+            })
+        );
+    }
+
+    #[test]
+    fn harness_example_accepts_the_plan_phase_total() {
+        let temp = TestTree::new();
+        temp.write(
+            "docs/guide/11-test-harness.md",
+            "```console\n$ cargo xtask check\n[1/28] cargo fmt --all -- --check\nphase 1/28 passed (elapsed: ...s)\n...\n[28/28] QEMU shell test\nphase 28/28 passed (elapsed: ...s)\nsummary: PASSED all 28 phases (elapsed: ...s)\n```\n",
+        );
+
+        assert_eq!(check_harness_example(temp.path(), 28), Ok(()));
     }
 }
