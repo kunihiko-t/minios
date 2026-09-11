@@ -62,6 +62,7 @@ enum Phase {
     DocsPublicationFiles,
     ClippyXtask,
     ClippyAbi,
+    ClippyGuest,
     ClippyKernelLib,
     ClippyKernelBin,
     ClippyKernelRv32Bin,
@@ -93,6 +94,18 @@ impl Phase {
                 "-p",
                 "minios-abi",
                 "--all-targets",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+            Self::ClippyGuest => Some(&[
+                "clippy",
+                "-p",
+                "minios-guest",
+                "--target",
+                "riscv64gc-unknown-none-elf",
+                "--release",
                 "--locked",
                 "--",
                 "-D",
@@ -217,6 +230,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::DocsPublicationFiles,
         Phase::ClippyXtask,
         Phase::ClippyAbi,
+        Phase::ClippyGuest,
         Phase::ClippyKernelLib,
         Phase::ClippyKernelBin,
         Phase::ClippyKernelRv32Bin,
@@ -424,6 +438,7 @@ mod tests {
             Phase::DocsPublicationFiles,
             Phase::ClippyXtask,
             Phase::ClippyAbi,
+            Phase::ClippyGuest,
             Phase::ClippyKernelLib,
             Phase::ClippyKernelBin,
             Phase::ClippyKernelRv32Bin,
@@ -495,7 +510,7 @@ mod tests {
         ];
 
         assert_eq!(&plan[host_tests_end + 7..host_tests_end + 13], expected);
-        assert_eq!(plan.len(), 27);
+        assert_eq!(plan.len(), 28);
     }
 
     #[test]
@@ -610,6 +625,21 @@ mod tests {
                     "-p",
                     "minios-abi",
                     "--all-targets",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            (
+                Phase::ClippyGuest,
+                vec![
+                    "clippy",
+                    "-p",
+                    "minios-guest",
+                    "--target",
+                    "riscv64gc-unknown-none-elf",
+                    "--release",
                     "--locked",
                     "--",
                     "-D",

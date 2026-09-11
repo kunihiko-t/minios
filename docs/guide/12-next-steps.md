@@ -37,7 +37,7 @@ Device Treeと汎用ヒープは、QEMU `virt`の固定値を外す段階と、�
 
 ## 実行と確認
 
-実装後の全検査には、27段階のrelease gateを実行します。
+実装後の全検査には、28段階のrelease gateを実行します。
 
 ```sh
 cargo xtask check
