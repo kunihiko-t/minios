@@ -15,7 +15,7 @@
 8. [Supervisorタイマー割り込み](08-timer-interrupts.md)：SBIのデッドラインと100 Hzのティックを説明する。
 9. [物理メモリーとページ管理](09-physical-memory.md)：ビットマップの所有権と統計値の不変条件を検証する。
 10. [UART対話シェル](10-shell.md)：入力長の制限とコマンドの作用を分離する。
-11. [テストハーネスの仕組み](11-test-harness.md)：ホスト、RV32とRV64のクロスビルド、QEMU、CIを同じ27段階で検証する。
+11. [テストハーネスの仕組み](11-test-harness.md)：ホスト、RV32とRV64のクロスビルド、QEMU、CIを同じ28段階で検証する。
 12. [次に作るもの](12-next-steps.md)：完了した順序変更と、その後の拡張を依存関係で説明する。
 13. [Sv39と単一アドレス空間](13-sv39.md)：三段page walk、PTE権限、activeなカーネル写像を検証する。
 14. [ELFを実行前アドレス空間へ配置する](14-elf-loading.md)：検証済みELFからinactiveな`LoadedImage`を構築して回収する。

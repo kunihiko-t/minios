@@ -4,7 +4,7 @@
 
 `cargo xtask`をローカル開発とCIの共通入口にする理由を学びます。
 読み終えると、ホスト単体テストとRISC-Vゲスト統合テストの違い、QEMUのマーカーモードと対話モード、時間切れになったプロセスの回収、対話記録の読み方を説明できるようになります。
-`cargo xtask check`が実行する27段階の順序も確認します。
+`cargo xtask check`が実行する28段階の順序も確認します。
 
 ## 背景
 
@@ -109,9 +109,9 @@ QEMU起動前にビルドが失敗した場合も、Cargoコマンドにはテ�
 失敗した段階の見出しと、最後に見えた初期化行やマーカーを照合すると、ビルド失敗、ゲスト内の明示的な失敗、停止を区別できます。
 Cargoの子プロセスが失敗した場合も、実行コマンド、終了ステータス、標準出力、標準エラーを表示します。
 
-### `check`が実行する27段階
+### `check`が実行する28段階
 
-`cargo xtask check`は、次の27段階をこの順に実行し、最初の失敗で停止します。
+`cargo xtask check`は、次の28段階をこの順に実行し、最初の失敗で停止します。
 書式検査の直後に教材のリンクと章構造を調べ、その後でコンパイラーを動かします。
 静的検査より前にQEMUを起動しないことと、検査していないバイナリーをゲストテストへ渡さないことが、この順序を固定する理由です。
 
@@ -122,31 +122,32 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 4. check public publication files
 5. cargo clippy -p xtask --all-targets --locked -- -D warnings
 6. cargo clippy -p minios-abi --all-targets --locked -- -D warnings
-7. cargo clippy -p minios-kernel --lib --locked -- -D warnings
-8. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked -- -D warnings
-9. cargo clippy -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked -- -D warnings
-10. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked
-11. cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked
-12. cargo test -p minios-abi --locked
-13. cargo test -p minios-kernel --lib --locked
-14. cargo test -p xtask --locked
-15. QEMU boot test
-16. QEMU trap test
-17. QEMU timer test
-18. QEMU memory test
-19. QEMU VM test
-20. QEMU ELF test
-21. QEMU user-entry test
-22. QEMU user-trap test
-23. QEMU user-syscall test
-24. QEMU user-exit test
-25. QEMU payload test
-26. QEMU payload-args test
-27. QEMU shell test
+7. cargo clippy -p minios-guest --target riscv64gc-unknown-none-elf --release --locked -- -D warnings
+8. cargo clippy -p minios-kernel --lib --locked -- -D warnings
+9. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked -- -D warnings
+10. cargo clippy -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked -- -D warnings
+11. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked
+12. cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked
+13. cargo test -p minios-abi --locked
+14. cargo test -p minios-kernel --lib --locked
+15. cargo test -p xtask --locked
+16. QEMU boot test
+17. QEMU trap test
+18. QEMU timer test
+19. QEMU memory test
+20. QEMU VM test
+21. QEMU ELF test
+22. QEMU user-entry test
+23. QEMU user-trap test
+24. QEMU user-syscall test
+25. QEMU user-exit test
+26. QEMU payload test
+27. QEMU payload-args test
+28. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 27 phases`を表示します。
+全段階に成功すると`summary: PASSED all 28 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -185,7 +186,7 @@ phase 1/27 passed (elapsed: ...s)
 ...
 [27/27] QEMU shell test
 phase 27/27 passed (elapsed: ...s)
-summary: PASSED all 27 phases (elapsed: ...s)
+summary: PASSED all 28 phases (elapsed: ...s)
 ```
 
 一つの経路だけを繰り返す場合は、たとえば`cargo xtask test trap`を使います。

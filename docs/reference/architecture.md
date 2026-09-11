@@ -115,7 +115,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   `user-exit`、`payload`、`payload-args`経路はstdout、必要な場合はstderr、Exit、回収をcontrol frameで観測します。
 - `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第16章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
-- `lib.rs`：公開commandを27段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
+- `lib.rs`：公開commandを28段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
 
 ## 起動からシェルまで
 
