@@ -190,12 +190,17 @@ phase 28/28 passed (elapsed: ...s)
 summary: PASSED all 28 phases (elapsed: ...s)
 ```
 
+この実行例の段階数は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。
+検査段階を追加または削除したときは、教材の古い実行例を残したままにできません。
+
 一つの経路だけを繰り返す場合は、たとえば`cargo xtask test trap`を使います。
 最終確認では`cargo xtask check`へ戻り、ホストとゲストの全経路を検査してください。
 
 ### Linux CIとローカル検証の対応
 
 GitHub Actionsは`ubuntu-24.04`へ`qemu-system-misc`を導入し、Rust 1.98.0、RV64GCとRV32IMのベアメタルターゲット、rustfmt、Clippyを固定します。
+CIはpull requestの作成・更新時と、`main`へのpush時に実行します。
+リポジトリ内のPRブランチへpushしてもpull request側の実行だけが始まるため、同じコミットを二重に検査しません。
 キャッシュするのはCargoのレジストリーとGitデータ、ワークスペースの`target`だけです。
 その後に実行するプロジェクト固有のコマンドは、ローカルと同じ`cargo xtask setup`と`cargo xtask check`だけです。
 CI専用の検証スクリプトを持たないため、開発者が手元で通した入口とCIの判定がずれにくくなります。

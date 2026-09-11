@@ -334,6 +334,7 @@ fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
         }
         Phase::DocsGuideStructure => {
             docs::check_guide_structure(&workspace)?;
+            docs::check_harness_example(&workspace, check_phases().len())?;
             return Ok(String::new());
         }
         Phase::DocsPublicationFiles => {
