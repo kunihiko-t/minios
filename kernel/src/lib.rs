@@ -11,22 +11,24 @@
 // ホストテスト用モジュールは`test`に限定する。RISC-Vのlib側には置かない。
 #[cfg(test)]
 pub mod arch;
-#[cfg(any(test, target_arch = "riscv64"))]
+#[cfg(not(target_arch = "riscv32"))]
 pub mod boot_payload;
-#[cfg(any(test, target_arch = "riscv64"))]
+// guest契約の定数 (USER_START等) をxtaskのhost検査からも参照できるように、
+// RV32 lib build以外は常時compileする。中身は純粋な検証logicである。
+#[cfg(not(target_arch = "riscv32"))]
 pub mod elf;
 // `frame.rs`のビットマップとID採番はu64前提のため、RV32のlibビルドから外す。
 // RV32用アロケーターは幅汎化と合わせて別途対応する。ホストテストでは検証を続ける。
-#[cfg(any(test, target_arch = "riscv64"))]
+#[cfg(not(target_arch = "riscv32"))]
 pub mod memory;
 pub mod sbi;
 #[cfg(test)]
 pub mod shell;
 #[cfg(test)]
 pub mod time;
-#[cfg(any(test, target_arch = "riscv64"))]
+#[cfg(not(target_arch = "riscv32"))]
 pub mod user;
-#[cfg(any(test, target_arch = "riscv64"))]
+#[cfg(not(target_arch = "riscv32"))]
 pub mod vm;
 
 #[cfg(test)]

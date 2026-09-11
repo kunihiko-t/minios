@@ -1,6 +1,7 @@
 pub mod cargo;
 pub mod cli;
 pub mod docs;
+pub mod guest;
 pub mod qemu;
 pub mod tools;
 
