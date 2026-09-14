@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --package xtask --locked --"
+
+# RV32IMカーネルはNEORV32の内蔵32 KiB IMEMへ収めるため、サイズ最適化で
+# buildする。QEMU向けRV64とhostのbuildには影響しない。超過時はlink時に
+# 失敗するため、IMEM予算は`cargo xtask check`のRV32 buildで強制される。
+[target.riscv32im-unknown-none-elf]
+rustflags = ["-C", "opt-level=z"]
