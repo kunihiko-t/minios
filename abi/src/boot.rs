@@ -1,6 +1,6 @@
 pub const BOOT_MAGIC: [u8; 8] = *b"MINICTR\0";
 pub const BOOT_ABI_MAJOR: u16 = 1;
-pub const BOOT_ABI_MINOR: u16 = 0;
+pub const BOOT_ABI_MINOR: u16 = 1;
 pub const BOOT_HEADER_LEN: usize = 96;
 pub const BUNDLE_MAX_LEN: u64 = 8 * 1024 * 1024;
 
@@ -47,7 +47,9 @@ impl BootHeader {
         if read_u16(bytes, 8)? != BOOT_ABI_MAJOR {
             return Err(BootHeaderError::UnsupportedMajor);
         }
-        if read_u16(bytes, 10)? != BOOT_ABI_MINOR {
+        // minorは自身以下のbundleを受理し、既存hostの1.0 bundleと共存する。
+        // hostはReadyのminorでStdin対応を判定する。
+        if read_u16(bytes, 10)? > BOOT_ABI_MINOR {
             return Err(BootHeaderError::UnsupportedMinor);
         }
         if read_u16(bytes, 12)? != BOOT_HEADER_LEN as u16 {
@@ -232,6 +234,25 @@ mod tests {
     }
 
     #[test]
+    fn accepts_minor_versions_up_to_the_current_release() {
+        let mut current = canonical_bytes();
+        current[10..12].copy_from_slice(&BOOT_ABI_MINOR.to_le_bytes());
+
+        assert_eq!(
+            BootHeader::decode(&canonical_bytes()).map(|header| header.total_len),
+            Ok(120)
+        );
+        assert_eq!(
+            BootHeader::decode(&current).map(|header| header.total_len),
+            Ok(120)
+        );
+        assert_eq!(
+            canonical_header().encode()[10..12],
+            BOOT_ABI_MINOR.to_le_bytes()
+        );
+    }
+
+    #[test]
     fn encodes_canonical_v1_header() {
         let header = BootHeader {
             total_len: 120,
@@ -248,7 +269,7 @@ mod tests {
         assert_eq!(
             &bytes[..56],
             &[
-                b'M', b'I', b'N', b'I', b'C', b'T', b'R', 0, 1, 0, 0, 0, 96, 0, 0, 0, 120, 0, 0, 0,
+                b'M', b'I', b'N', b'I', b'C', b'T', b'R', 0, 1, 0, 1, 0, 96, 0, 0, 0, 120, 0, 0, 0,
                 0, 0, 0, 0, 96, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 104, 0, 0, 0, 0, 0, 0,
                 0, 16, 0, 0, 0, 0, 0, 0, 0,
             ],
@@ -300,7 +321,7 @@ mod tests {
         unsupported_major[8..10].copy_from_slice(&2_u16.to_le_bytes());
 
         let mut unsupported_minor = canonical_bytes();
-        unsupported_minor[10..12].copy_from_slice(&1_u16.to_le_bytes());
+        unsupported_minor[10..12].copy_from_slice(&(BOOT_ABI_MINOR + 1).to_le_bytes());
 
         let mut wrong_header_len = canonical_bytes();
         wrong_header_len[12..14].copy_from_slice(&95_u16.to_le_bytes());

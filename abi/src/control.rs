@@ -15,6 +15,7 @@ pub enum FrameKind {
     Exit = 4,
     GuestError = 5,
     Diagnostic = 6,
+    Stdin = 7,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub enum ControlError {
     NonZeroReserved,
     PayloadTooLarge,
     WrongFixedPayloadLength,
+    StdinFrameTooLarge,
 }
 
 impl FrameHeader {
@@ -58,6 +60,11 @@ impl FrameHeader {
         {
             return Err(ControlError::WrongFixedPayloadLength);
         }
+        // Stdinはkernel staging（read上限と同じ4 KiB）へ一度に載る長さだけ受理する。
+        // 長さ0はEOFであり、ここでは拒否しない。
+        if matches!(kind, FrameKind::Stdin) && payload_len > crate::syscall::MAX_READ_LEN as u32 {
+            return Err(ControlError::StdinFrameTooLarge);
+        }
 
         Ok(Self { kind, payload_len })
     }
@@ -80,6 +87,7 @@ impl FrameKind {
             4 => Some(Self::Exit),
             5 => Some(Self::GuestError),
             6 => Some(Self::Diagnostic),
+            7 => Some(Self::Stdin),
             _ => None,
         }
     }
@@ -132,7 +140,7 @@ mod tests {
     #[test]
     fn rejects_unknown_kind() {
         let mut bytes = valid_header_bytes();
-        bytes[4] = 7;
+        bytes[4] = 8;
 
         assert_eq!(FrameHeader::decode(&bytes), Err(ControlError::UnknownKind));
     }
@@ -222,7 +230,7 @@ mod tests {
             kind: FrameKind::Ready,
             payload_len: READY_PAYLOAD_LEN as u32,
         };
-        assert_eq!(ready_payload, [1, 0, 0, 0]);
+        assert_eq!(ready_payload, [1, 0, 1, 0]);
         assert_eq!(
             FrameHeader::decode(&ready_header.encode()),
             Ok(ready_header)
@@ -235,5 +243,29 @@ mod tests {
         };
         assert_eq!(exit_payload, [42, 0, 0, 0]);
         assert_eq!(FrameHeader::decode(&exit_header.encode()), Ok(exit_header));
+    }
+
+    #[test]
+    fn stdin_round_trips_and_accepts_zero_length_eof() {
+        for payload_len in [0, 1, crate::syscall::MAX_READ_LEN as u32] {
+            let header = FrameHeader {
+                kind: FrameKind::Stdin,
+                payload_len,
+            };
+
+            assert_eq!(FrameHeader::decode(&header.encode()), Ok(header));
+        }
+    }
+
+    #[test]
+    fn rejects_stdin_larger_than_the_read_limit() {
+        let mut bytes = valid_header_bytes();
+        bytes[4] = FrameKind::Stdin as u8;
+        bytes[8..12].copy_from_slice(&(crate::syscall::MAX_READ_LEN as u32 + 1).to_le_bytes());
+
+        assert_eq!(
+            FrameHeader::decode(&bytes),
+            Err(ControlError::StdinFrameTooLarge)
+        );
     }
 }
