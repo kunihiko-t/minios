@@ -3,10 +3,7 @@
 //! `cargo xtask bundle`はguest binaryのbuildとbundle fileの書き出しを
 //! 一つの開発commandにまとめ、配置とdigestはABI decoderと同じ規約で作る。
 
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-};
+use std::{fmt, path::PathBuf};
 
 use minios_abi::boot::{BOOT_HEADER_LEN, BUNDLE_MAX_LEN, BootHeader, ByteRange};
 use minios_abi::manifest::{Manifest, ManifestError};
@@ -208,16 +205,9 @@ pub fn build_bundle(manifest: &[u8], elf: &[u8]) -> Result<BuiltBundle, BundleEr
 }
 
 fn default_bundle_path() -> PathBuf {
-    workspace_root()
+    crate::workspace_root()
         .join("target")
         .join(DEFAULT_BUNDLE_FILE_NAME)
-}
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask must be in the workspace root")
-        .to_path_buf()
 }
 
 /// SHA-256 (FIPS 180-4)。外部crateを追加せずにbundle digestを計算するための

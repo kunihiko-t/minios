@@ -54,7 +54,7 @@ pub fn build_kernel_for_test(feature: &str) -> Result<PathBuf, CargoError> {
 }
 
 fn build_kernel_with_feature(feature: Option<&str>) -> Result<PathBuf, CargoError> {
-    let workspace = workspace_root();
+    let workspace = crate::workspace_root();
     let args = kernel_build_args(feature);
 
     run(&args)?;
@@ -81,7 +81,7 @@ fn kernel_build_args(feature: Option<&str>) -> Vec<&str> {
 pub fn run(args: &[&str]) -> Result<String, CargoError> {
     let command_name = format!("cargo {}", args.join(" "));
     let mut command = Command::new("cargo");
-    command.current_dir(workspace_root()).args(args);
+    command.current_dir(crate::workspace_root()).args(args);
     let output = command.output().map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => CargoError::Spawn {
             command: command_name.clone(),
@@ -111,14 +111,7 @@ pub fn kernel_binary_path(workspace: &Path) -> PathBuf {
         .join(KERNEL_BINARY)
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask must be in the workspace root")
-        .to_owned()
-}
-
-fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
+pub(crate) fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut output = String::from_utf8_lossy(stdout).into_owned();
     output.push_str(&String::from_utf8_lossy(stderr));
     output
@@ -240,7 +233,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
         )
         .expect("must write linker fixture");
 
-        let linker = workspace_root().join("kernel/linker.ld");
+        let linker = crate::workspace_root().join("kernel/linker.ld");
         let output = Command::new("rustc")
             .args([
                 source.as_os_str(),
