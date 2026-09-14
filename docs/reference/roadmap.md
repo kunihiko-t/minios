@@ -36,6 +36,8 @@ Rustユーザープログラムの節目も完了しています。
 NEORV32向けRV32IMカーネルも起動できます。
 M-modeの入口がIMEMに置かれた`.data`初期値をDMEMへコピーし、BSSをゼロ化してからUART0と対話シェルを起動します。
 `cargo xtask check`は、この経路をrelease設定でClippyとクロスビルドに通します。
+NEORV32実機経路はkernel shellまでに限定し、U-mode guestは対象外とします。
+検討記録は[NEORV32でアプリケーションを動かす方式の検討](neorv32-applications.md)にあります。
 
 ## 次
 
