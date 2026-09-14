@@ -28,6 +28,11 @@ MiniBundle boot payloadも完了しています。
 manifestの`name`と`arg=`は初期user stackへ配置され、guestは`a0=argc`と`a1=argv`から読み取れます。
 `cargo xtask test payload-args`は、この引数がmanifestの順序どおりguestへ届くことを確認します。
 
+Rustユーザープログラムの節目も完了しています。
+`guest/` crateは`no_std`のRustプログラムを静的RV64 ELFへbuildし、`cargo xtask bundle`がmanifestとdigest付きMiniBundleを決定的に生成します。
+`cargo xtask test payload-args`はbuild済みguestをQEMU loaderへ渡し、program nameと二つの引数のstdout出力、終了code42、回収diagnosticをframe順序で検証します。
+手書きargv ELF fixtureはRust guestへ置き換え、stderr経路を担うMK6 fixtureは残しています。
+
 NEORV32向けRV32IMカーネルも起動できます。
 M-modeの入口がIMEMに置かれた`.data`初期値をDMEMへコピーし、BSSをゼロ化してからUART0と対話シェルを起動します。
 `cargo xtask check`は、この経路をrelease設定でClippyとクロスビルドに通します。
@@ -41,3 +46,4 @@ Device TreeはRAM、UART、timebaseの固定値をmachine記述へ置き換え�
 OCI image、Linux binary互換、multi-tenant isolationはこの実装の目標に含めません。
 
 [U-modeの学習章](../guide/15-user-mode.md)と[payloadの学習章](../guide/16-boot-payload.md)は実行と回収の境界を説明します。
+[Rust guestの学習章](../guide/17-rust-guest.md)はユーザープログラムのbuild、MiniBundle生成、QEMU実行を説明します。

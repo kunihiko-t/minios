@@ -95,6 +95,7 @@ RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`comman
 14. [ELFを実行前アドレス空間へ配置する](docs/guide/14-elf-loading.md)
 15. [U-modeでELFを実行する](docs/guide/15-user-mode.md)
 16. [boot payloadを実行する](docs/guide/16-boot-payload.md)
+17. [Rustでユーザープログラムを書く](docs/guide/17-rust-guest.md)
 
 ## 設計資料
 

@@ -20,12 +20,13 @@
 Cargoは`cargo xtask ...`を、ワークスペース内の`xtask`バイナリーへ渡せます。
 この小さなホスト用プログラムへ、環境診断、クロスビルド、QEMUの起動、検証順序を集約しています。
 別のタスク実行ツールや、OSごとのシェルスクリプトは必要ありません。
-公開しているコマンドは次の五系統です。
+公開しているコマンドは次の六系統です。
 
 ```text
 cargo xtask setup
 cargo xtask build
 cargo xtask run
+cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
 cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]
 cargo xtask check
 ```
@@ -156,7 +157,7 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 - `xtask/src/lib.rs`：段階の順序、最初の失敗で止まる実行管理、結果の要約
 - `xtask/src/cargo.rs`：Cargoの子プロセスと、コマンド、終了ステータス、出力の診断
 - `xtask/src/qemu.rs`：QEMUの引数、マーカーと対話の検証、制限時間、プロセスの終了と回収、対話記録
-- `xtask/src/docs.rs`：ローカルのMarkdownリンクと第1章から第16章までの必須構造
+- `xtask/src/docs.rs`：ローカルのMarkdownリンクと第1章から第17章までの必須構造
 - `kernel/src/main.rs`：テスト用機能ごとのマーカーとシェルの起動
 - `.github/workflows/ci.yml`：Linux上で同じ`setup`と`check`を呼ぶCI
 

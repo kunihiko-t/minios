@@ -13,7 +13,7 @@ const REQUIRED_SECTIONS: [&str; 7] = [
     "次の章",
 ];
 
-const REQUIRED_CHAPTERS: [&str; 16] = [
+const REQUIRED_CHAPTERS: [&str; 17] = [
     "01-introduction.md",
     "02-setup.md",
     "03-no-std-and-linking.md",
@@ -30,6 +30,7 @@ const REQUIRED_CHAPTERS: [&str; 16] = [
     "14-elf-loading.md",
     "15-user-mode.md",
     "16-boot-payload.md",
+    "17-rust-guest.md",
 ];
 
 const REQUIRED_PUBLICATION_FILES: [&str; 6] = [

@@ -50,12 +50,13 @@ MiniOS development commands:
   cargo xtask setup
   cargo xtask build
   cargo xtask run
+  cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
   cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]
   cargo xtask check
 ```
 
 この操作では、終了ステータス1が正しい結果です。
-コマンドが省略されたという診断と、これから使う五つの入口が表示されれば、ホスト側の教材を実行できています。
+コマンドが省略されたという診断と、これから使う六つの入口が表示されれば、ホスト側の教材を実行できています。
 
 ## よくある失敗
 
