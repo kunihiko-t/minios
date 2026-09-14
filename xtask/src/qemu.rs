@@ -122,6 +122,10 @@ pub enum QemuError {
         status: Option<i32>,
         output: String,
     },
+    Bundle {
+        stage: &'static str,
+        error: String,
+    },
     TimedOut {
         command: String,
         deadline: Duration,
@@ -176,6 +180,11 @@ impl fmt::Display for QemuError {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "unknown".to_owned()),
                 output.trim_end()
+            ),
+            Self::Bundle { stage, error } => write!(
+                formatter,
+                "could not build the QEMU test bundle ({stage}):\n{}",
+                error.trim_end()
             ),
             Self::TimedOut {
                 command,
@@ -730,7 +739,8 @@ impl PayloadBundle {
     }
 
     fn create_args() -> Result<Self, QemuError> {
-        Self::create_with(payload_args_bundle_bytes())
+        let elf = built_guest_elf_bytes()?;
+        Self::create_with(payload_args_bundle_bytes(&elf)?)
     }
 
     fn create_with(bytes: Vec<u8>) -> Result<Self, QemuError> {
@@ -769,12 +779,32 @@ fn payload_bundle_bytes() -> Vec<u8> {
     bundle_bytes(b"version=1\nname=hello\n", &payload_elf_bytes())
 }
 
-/// payload-args検査用bundle: manifestの`arg=`行がkernelのargv collectorへ渡る。
-fn payload_args_bundle_bytes() -> Vec<u8> {
-    bundle_bytes(
-        b"version=1\nname=hello\narg=alpha\narg=bravo\n",
-        &payload_args_elf_bytes(),
-    )
+/// build済みRust guestのELF bytesを読み込む。
+/// QEMU実行path専用であり、unit testは共有の`guest_bytes`を使う。
+/// 並行testが別々にcargoを起動すると成果物の再linkと読み取りが競合するため、
+/// test process内のcargo起動は`guest_bytes`の一度だけに絞る。
+fn built_guest_elf_bytes() -> Result<Vec<u8>, QemuError> {
+    let elf_path = crate::guest::build_guest().map_err(|error| QemuError::Bundle {
+        stage: "guest build",
+        error: error.to_string(),
+    })?;
+    std::fs::read(&elf_path).map_err(|error| QemuError::Bundle {
+        stage: "guest ELF read",
+        error: format!("{}: {error}", elf_path.display()),
+    })
+}
+
+/// payload-args検査用bundle: Rust guestのELFと`arg=`付きmanifestを
+/// 正規のMiniBundleへ組み立てる。guestはargvを順にstdoutへ出してexit(42)する。
+/// 手書きのargv loop ELFはRust guestと役割が重複するため、この経路では使わない。
+fn payload_args_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=hello\narg=alpha\narg=bravo\n";
+    crate::bundle::build_bundle(MANIFEST, elf)
+        .map(|bundle| bundle.bytes().to_vec())
+        .map_err(|error| QemuError::Bundle {
+            stage: "bundle layout",
+            error: error.to_string(),
+        })
 }
 
 fn bundle_bytes(manifest: &[u8], elf: &[u8]) -> Vec<u8> {
@@ -846,81 +876,6 @@ fn payload_elf_bytes() -> Vec<u8> {
     code.push(ecall());
     // 到達しない安全ループ
     code.push(0x0000_006f);
-
-    let code_bytes: Vec<u8> = code.iter().flat_map(|word| word.to_le_bytes()).collect();
-    let elf_len = 0x1000 + code_bytes.len();
-    let mut bytes = vec![0u8; elf_len];
-    bytes[0..4].copy_from_slice(b"\x7fELF");
-    bytes[4] = 2;
-    bytes[5] = 1;
-    bytes[6] = 1;
-    bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
-    bytes[18..20].copy_from_slice(&243u16.to_le_bytes());
-    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
-    bytes[24..32].copy_from_slice(&0x0010_0000u64.to_le_bytes());
-    bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
-    bytes[52..54].copy_from_slice(&64u16.to_le_bytes());
-    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
-    bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
-    let header = 64;
-    bytes[header..header + 4].copy_from_slice(&1u32.to_le_bytes());
-    bytes[header + 4..header + 8].copy_from_slice(&5u32.to_le_bytes());
-    bytes[header + 8..header + 16].copy_from_slice(&0x1000u64.to_le_bytes());
-    bytes[header + 16..header + 24].copy_from_slice(&0x0010_0000u64.to_le_bytes());
-    bytes[header + 32..header + 40].copy_from_slice(&(code_bytes.len() as u64).to_le_bytes());
-    bytes[header + 40..header + 48].copy_from_slice(&0x1000u64.to_le_bytes());
-    bytes[header + 48..header + 56].copy_from_slice(&0x1000u64.to_le_bytes());
-    bytes[0x1000..].copy_from_slice(&code_bytes);
-    bytes
-}
-
-/// payload-args検査ELF: a0=argcとa1=argvを読み、各引数 (5 byte) をstdoutへ
-/// writeしてからexit(42)する。argcが0のときは即座にexitする。
-fn payload_args_elf_bytes() -> Vec<u8> {
-    const X0: u32 = 0;
-    const S0: u32 = 8;
-    const S1: u32 = 9;
-    const A0: u32 = 10;
-    const A1: u32 = 11;
-    const A2: u32 = 12;
-    const A7: u32 = 17;
-    let addi = |rd: u32, rs1: u32, imm: i16| {
-        (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (rd << 7) | 0x0013
-    };
-    let ld = |rd: u32, rs1: u32, imm: i16| {
-        (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0b011 << 12) | (rd << 7) | 0x0003
-    };
-    let branch = |funct3: u32, rs1: u32, rs2: u32, offset: i32| {
-        let value = offset as u32;
-        (((value >> 12) & 0x1) << 31)
-            | (((value >> 5) & 0x3f) << 25)
-            | (rs2 << 20)
-            | (rs1 << 15)
-            | (funct3 << 12)
-            | (((value >> 1) & 0xf) << 8)
-            | (((value >> 11) & 0x1) << 7)
-            | 0x0063
-    };
-    let ecall = || 0x0000_0073u32;
-
-    // 命令index: 0..2 init、3..9 loop body、10 bne、11..13 done、14 安全loop。
-    let code = [
-        addi(S0, A0, 0),
-        addi(S1, A1, 0),
-        branch(0b000, S0, X0, (11 - 2) * 4),
-        ld(A1, S1, 0),
-        addi(A0, X0, 1),
-        addi(A2, X0, 5),
-        addi(A7, X0, 1),
-        ecall(),
-        addi(S1, S1, 8),
-        addi(S0, S0, -1),
-        branch(0b001, S0, X0, (3 - 10) * 4),
-        addi(A0, X0, 42),
-        addi(A7, X0, 2),
-        ecall(),
-        0x0000_006f,
-    ];
 
     let code_bytes: Vec<u8> = code.iter().flat_map(|word| word.to_le_bytes()).collect();
     let elf_len = 0x1000 + code_bytes.len();
@@ -1694,6 +1649,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bundle_error_reports_the_stage_and_cause() {
+        let error = QemuError::Bundle {
+            stage: "guest build",
+            error: "guest build failed with status 101".to_owned(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "could not build the QEMU test bundle (guest build):\nguest build failed with status 101"
+        );
+    }
+
     fn complete_shell_output() -> String {
         [
             "minios> help",
@@ -1787,66 +1755,21 @@ mod tests {
         assert!(command_line.contains("loader,file=/tmp/hello.mcb"));
     }
 
-    // Catches an args bundle drifting from the canonical manifest layout the
-    // kernel argv collector parses (name first, then arg= lines).
+    // Catches an args bundle that stops embedding the built Rust guest, or
+    // drifts from the canonical manifest layout the kernel argv collector
+    // parses (name first, then arg= lines).
     #[test]
-    fn payload_args_bundle_carries_the_manifest_arguments() {
-        let bundle = payload_args_bundle_bytes();
+    fn payload_args_bundle_carries_the_built_guest_and_manifest_arguments() {
+        let bundle = payload_args_bundle_bytes(crate::guest::guest_bytes())
+            .expect("guest bundle must build");
         let manifest_len = u64::from_le_bytes(bundle[32..40].try_into().unwrap()) as usize;
         assert_eq!(
             &bundle[96..96 + manifest_len],
             b"version=1\nname=hello\narg=alpha\narg=bravo\n"
         );
-        // ELF segmentは同じ契約 (1 segment R+X, entry 0x0010_0000) を使う。
+        // ELF payloadはbuild済みRust guestそのものである。
         let elf_offset = u64::from_le_bytes(bundle[40..48].try_into().unwrap()) as usize;
-        assert!(bundle[elf_offset..].starts_with(b"\x7fELF"));
-    }
-
-    // Catches branch offsets that no longer land the argc loop on the exit
-    // path, which would hang the guest until the harness timeout.
-    #[test]
-    fn payload_args_elf_loop_branches_land_on_the_expected_instructions() {
-        let elf = payload_args_elf_bytes();
-        assert_eq!(elf, payload_args_elf_bytes());
-        let code = &elf[0x1000..];
-        let word =
-            |index: usize| u32::from_le_bytes(code[index * 4..index * 4 + 4].try_into().unwrap());
-        // 15命令: init 2 + beq 1 + loop body 7 + bne 1 + done 3 + 安全loop 1
-        assert_eq!(code.len(), 15 * 4);
-        assert_eq!(word(14), 0x0000_006f, "safety self-loop tail");
-
-        // beq s0, x0, +36 (doneへ)
-        let beq = word(2);
-        assert_eq!(beq & 0x7f, 0x63);
-        assert_eq!((beq >> 12) & 0x7, 0b000);
-        assert_eq!((beq >> 15) & 0x1f, 8, "rs1 = s0");
-        assert_eq!((beq >> 20) & 0x1f, 0, "rs2 = x0");
-        let beq_bits = (((beq >> 31) & 0x1) << 12)
-            | (((beq >> 7) & 0x1) << 11)
-            | (((beq >> 25) & 0x3f) << 5)
-            | (((beq >> 8) & 0xf) << 1);
-        let beq_offset = ((beq_bits << 19) as i32) >> 19;
-        assert_eq!(beq_offset, (11 - 2) * 4);
-
-        // bne s0, x0, -28 (loop先頭へ)
-        let bne = word(10);
-        assert_eq!(bne & 0x7f, 0x63);
-        assert_eq!((bne >> 12) & 0x7, 0b001);
-        assert_eq!((bne >> 15) & 0x1f, 8, "rs1 = s0");
-        let bne_bits = (((bne >> 31) & 0x1) << 12)
-            | (((bne >> 7) & 0x1) << 11)
-            | (((bne >> 25) & 0x3f) << 5)
-            | (((bne >> 8) & 0xf) << 1);
-        let bne_offset = ((bne_bits << 19) as i32) >> 19;
-        assert_eq!(bne_offset, (3 - 10) * 4);
-
-        // ld a1, 0(s1)
-        let ld = word(3);
-        assert_eq!(ld & 0x7f, 0x03);
-        assert_eq!((ld >> 12) & 0x7, 0b011);
-        assert_eq!((ld >> 7) & 0x1f, 11, "rd = a1");
-        assert_eq!((ld >> 15) & 0x1f, 9, "rs1 = s1");
-        assert_eq!((ld >> 20) as i32 as i16, 0, "imm = 0");
+        assert_eq!(&bundle[elf_offset..], crate::guest::guest_bytes());
     }
 
     // Catches an args run that drops an argument frame, reorders them, or
