@@ -1,98 +1,81 @@
-# MiniOS NEORV32 read-only FAT32 design
+# NEORV32 read-only FAT32設計
 
-## Status
+## 状態
 
-This specification defines the first storage milestone for MiniOS on the
-Tang Nano 20K. MiniOS continues to boot from its existing image. After boot,
-the RV32 shell can inspect files on the board's built-in microSD slot.
+この仕様は、Tang Nano 20K上でのMiniOS最初のstorage節目を定義します。
+MiniOSは既存imageからbootし続けます。boot後、RV32 shellは基板内蔵のmicroSD slot上のfileを参照できます。
 
-## Goal
+## 目標
 
-Add two RV32 shell commands:
+RV32 shell commandを二つ追加します。
 
-- `ls` lists entries in the FAT32 root directory.
-- `cat NAME.EXT` writes one regular root-directory file to the console.
+- `ls`はFAT32 root directoryのentryを一覧表示します。
+- `cat NAME.EXT`はroot directory直下の通常file一つをconsoleへ出力します。
 
-The implementation must preserve the existing UART shell and must fit in the
-NEORV32 internal memories defined by `kernel/linker_neorv32.ld`.
+実装は既存UART shellを保ち、`kernel/linker_neorv32.ld`が定義するNEORV32内蔵memoryに収めます。
 
-## Architecture
+## 構成
 
-The implementation has three small layers inside the MiniOS repository:
+実装はMiniOSリポジトリ内の小さい三層です。
 
-1. A NEORV32 GPIO-SPI bus drives the Tang Nano 20K microSD pins.
-2. An SD protocol module initializes an SDHC or SDXC card and reads a
-   512-byte sector with CMD17 and CRC16 verification.
-3. A read-only FAT32 module parses the partition, boot sector, FAT and root
-   directory through a sector-reader interface that can also be supplied by
-   host tests.
+1. NEORV32のGPIO-SPI busがTang Nano 20KのmicroSD pinを駆動します。
+2. SD protocol moduleがSDHCまたはSDXC cardを初期化し、CMD17とCRC16検証で512 byte sectorを読み取ります。
+3. read-only FAT32 moduleが、host testでも差し替え可能なsector reader interface越しにpartition、boot sector、FAT、root directoryをparseします。
 
-The shell owns one SD/FAT32 session and invokes it synchronously. No heap,
-background task, cache, VFS or third-party crate is introduced.
+shellは一つのSD/FAT32 sessionを所有し、同期的に呼び出します。
+heap、background task、cache、VFS、third-party crateは導入しません。
 
-The FPGA repository remains responsible for HDL, pin constraints and the
-bitstream. MiniOS does not depend on FPGA-repository source files or scripts.
-The existing FPGA `sd_probe` remains a standalone hardware diagnostic; its
-proven protocol behavior is adapted into MiniOS and covered by MiniOS tests.
+FPGAリポジトリはHDL、pin制約、bitstreamを担い続けます。
+MiniOSはFPGAリポジトリのsource fileやscriptに依存しません。
+既存FPGAの`sd_probe`は独立のhardware診断のまま残し、その実証済みprotocol動作をMiniOSへ移植してMiniOSのtestで覆います。
 
-## Hardware contract
+## hardware契約
 
-The already-tested GPIO mapping is fixed for this milestone:
+実証済みGPIO mappingは、この節目では固定です。
 
 | GPIO | SD signal | Tang Nano 20K pin |
 | --- | --- | --- |
 | 0 | CLK | 83 |
 | 1 | CMD/MOSI | 82 |
-| 2 | logical active-high select, inverted by the FPGA to DAT3/CS | 81 |
+| 2 | 論理正のselect。FPGAが反転してDAT3/CSへ | 81 |
 | 3 | DAT0/MISO | 84 |
 
-DAT1 and DAT2 are unused in SPI mode. Reset and every error path must leave
-the card deselected, CLK low and MOSI high. Initialization runs at no more
-than 375 kHz with the 96 MHz CPU clock.
+SPI modeではDAT1とDAT2を使いません。
+reset時とすべてのerror pathは、cardをdeselectし、CLKをlow、MOSIをhighのまま残します。
+初期化は96 MHz CPU clockで375 kHz以下で動作します。
 
-The SD layer supports only SDHC and SDXC block addressing. It sends only
-CMD0, CMD8, CMD55/ACMD41, CMD58 and CMD17. It does not implement media write,
-erase or format commands.
+SD層はSDHCとSDXCのblock addressingだけを扱います。
+送るcommandはCMD0、CMD8、CMD55/ACMD41、CMD58、CMD17だけです。
+mediaへの書込、消去、format commandは実装しません。
 
-## Storage layout
+## 配置
 
-Every logical sector is exactly 512 bytes. The FAT32 volume is found by one
-of these rules:
+論理sectorはすべて正確に512 byteです。FAT32 volumeは次のどちらかで見つけます。
 
-1. If LBA 0 is a valid FAT32 boot sector, mount it as a superfloppy.
-2. Otherwise require an MBR with signature `55aa`, scan its four primary
-   entries in order, and mount the first non-empty type `0x0b` or `0x0c`
-   partition.
+1. LBA 0が有効なFAT32 boot sectorなら、superfloppyとしてmountします。
+2. そうでなければ`55aa`署名付きMBRを要求し、四つのprimary entryを順に走査して、最初の非空`0x0b`または`0x0c` partitionをmountします。
 
-GPT, extended partitions, protective MBRs, FAT12, FAT16 and exFAT are
-unsupported. A 64 GB card may therefore need to be reformatted as FAT32
-outside MiniOS after its existing contents have been checked.
+GPT、拡張partition、protective MBR、FAT12、FAT16、exFATは対象外です。
+64 GB級cardは、既存内容の確認後にMiniOSの外でFAT32にformatし直す必要があります。
 
-The FAT32 parser validates all values before address arithmetic. At minimum
-it requires 512-byte sectors, a power-of-two sectors-per-cluster value in the
-FAT32 range, a nonzero reserved-sector count, one or two FATs, a nonzero
-FAT32 FAT size, a zero FAT16 root-entry count and FAT size, a root cluster of
-at least 2, and data/FAT ranges that remain inside the selected volume.
-Arithmetic uses checked operations. Invalid or cyclic cluster chains fail
-instead of reading outside the volume; traversal is bounded by the computed
-data-cluster count.
+FAT32 parserはaddress計算の前にすべての値を検証します。
+最低限、512 byte sector、FAT32範囲内の2のべき乗sectors-per-cluster、非0のreserved sector数、一つまたは二つのFAT、非0のFAT32 FAT size、0のFAT16 root entry数とFAT size、2以上のroot cluster、選択volume内に収まるdataとFAT範囲を要求します。
+演算はchecked演算です。不正または循環するcluster chainはvolume外読み取りの代わりに失敗します。走査は算出したdata cluster数で打ち切ります。
 
-## File behavior
+## file動作
 
-The first version supports the FAT32 root directory and 8.3 short names
-only. It ignores deleted entries, long-file-name entries and volume labels.
-`ls` prints each regular file or directory with its normalized short name;
-regular files also include their byte length.
+初版はFAT32 root directoryと8.3 short nameだけを扱います。
+削除済みentry、long file name entry、volume labelは無視します。
+`ls`は通常fileまたはdirectoryを正規化short nameで表示し、通常fileにはbyte長も付けます。
 
-`cat` performs an ASCII case-insensitive short-name lookup in the root. It
-accepts exactly one path-free 8.3 name, rejects directories, and streams at
-most the directory entry's declared file size through a single 512-byte
-buffer. An empty file succeeds without reading a data cluster. Subdirectory
-traversal and long-name lookup are unsupported.
+`cat`はroot内でASCII大文字小文字不問のshort name lookupを行います。
+pathなし8.3名を正確に一つ受け付け、directoryを拒否し、directory entryの宣言file sizeを上限に単一512 byte bufferでstream出力します。
+空fileはdata clusterを読まずに成功します。
+subdirectory走査とlong name lookupは対象外です。
 
-## Interfaces
+## interface
 
-The SD protocol keeps the existing testable byte-bus boundary:
+SD protocolは既存のtest可能なbyte bus境界を保ちます。
 
 ```rust
 trait Bus {
@@ -102,7 +85,7 @@ trait Bus {
 }
 ```
 
-The FAT32 parser depends on one sector boundary:
+FAT32 parserは一つのsector境界に依存します。
 
 ```rust
 trait SectorReader {
@@ -115,63 +98,60 @@ trait SectorReader {
 }
 ```
 
-The production implementation is a NEORV32 GPIO SD reader. The traits exist
-only to isolate host tests from MMIO; they are not general device or VFS
-frameworks.
+本番実装はNEORV32 GPIO SD readerです。
+traitはhost testをMMIOから隔離するためだけにあり、汎用deviceやVFSの枠組みではありません。
 
-## Errors and console output
+## errorとconsole出力
 
-SD and FAT32 errors are typed internally. The shell maps them to short,
-stable messages prefixed with `sd:`. Required user-visible cases are:
+SDとFAT32のerrorは内部では型付きです。
+shellは`sd:`接頭辞付きの短い安定messageへ写像します。必須の利用者可視caseは次のとおりです。
 
-- card initialization or sector read failure;
-- unsupported or invalid partition/filesystem;
-- root entry not found;
-- requested entry is a directory;
-- invalid `cat` argument.
+- card初期化またはsector読み取りの失敗。
+- 未対応または不正なpartitionとfilesystem。
+- root entryなし。
+- 要求entryがdirectory。
+- 不正な`cat`引数。
 
-An error returns to the `minios> ` prompt and releases chip select. No error
-may panic the kernel or issue a write command to the card.
+error時は`minios> ` promptへ戻り、chip selectを解放します。
+errorでkernelをpanicさせず、cardへ書込commandを送りません。
 
-## Tests
+## test
 
-Development follows red-green-refactor. Host tests cover:
+開発はred-green-refactorで進めます。host testは次を覆います。
 
-- the proven SD initialization frames, block address, CRC16, timeout and
-  chip-select cleanup behavior;
-- superfloppy detection and ordered MBR primary-partition selection;
-- rejection of unsupported layouts and malformed or overflowing BPB values;
-- root-directory iteration across sector and cluster boundaries;
-- deleted, LFN and volume-label filtering;
-- 8.3 name normalization and case-insensitive lookup;
-- empty, one-sector and multi-cluster file streaming;
-- bad, out-of-range and cyclic cluster chains;
-- `ls` and `cat` command parsing without changing RV64 command behavior.
+- 実証済みSD初期化frame、block address、CRC16、timeout、chip select cleanup動作。
+- superfloppy検出と順序どおりのMBR primary partition選択。
+- 未対応配置と不正または桁あふれBPB値の拒否。
+- sectorとcluster境界をまたぐroot directory反復。
+- 削除済み、LFN、volume labelのfiltering。
+- 8.3名の正規化と大文字小文字不問lookup。
+- 空、一 sector、複数 clusterのfile streaming。
+- 不正、範囲外、循環のcluster chain。
+- RV64 command動作を変えない`ls`と`cat`のcommand parse。
 
-The build gate is the existing host test suite plus a locked RV32 release
-build. The resulting ELF must fit the effective 32 KiB (32,768-byte) IMEM
-and the unchanged 16,192-byte DMEM contract in
-`kernel/linker_neorv32.ld`. The FPGA top level and linker now both declare
-32,768 bytes. This is the power-of-two address range implemented by NEORV32;
-the former 24,288-byte non-power-of-two request was rounded up to 32 KiB.
-Existing place-and-route reports show this address range without an additional
-BSRAM cost. The explicit 32 KiB contract therefore matches the hardware
-address range while leaving DMEM unchanged.
+build gateは既存host test群に加え、locked RV32 release buildです。
+成果物ELFは`kernel/linker_neorv32.ld`の実効32 KiB（32,768 byte）IMEMと不変の16,192 byte DMEM契約に収めます。
+FPGA top levelとlinkerはどちらも32,768 byteを宣言します。
+これはNEORV32が実装する2のべき乗address範囲であり、旧来の2のべき乗でない24,288 byte要求は32 KiBへ丸められます。
+既存place-and-route報告は追加BSRAM costなしにこのaddress範囲を示します。
+明示の32 KiB契約はhardware address範囲と一致し、DMEMは不変です。
 
-The hardware acceptance test uses a FAT32 card containing a known root file.
-After the existing MiniOS image starts:
+RV32 buildは`.cargo/config.toml`で`opt-level=z`（riscv32im専用）のため、QEMU向けRV64とhostのbuildには影響しません。
+実測`.text`は29,832 byteで残り2,936 byteです。超過時はlink時に失敗し、`cargo xtask check`のRV32 buildが予算を強制します。
 
-1. `ls` prints the known short name and correct size.
-2. `cat` with either upper- or lower-case spelling prints the exact contents.
-3. `cat` of a missing name prints the stable not-found error.
-4. The shell remains responsive after each success and failure.
+hardware受け入れtestは既知root file入りFAT32 cardを使います。
+既存MiniOS imageの起動後に次を確認します。
 
-## Out of scope
+1. `ls`が既知short nameと正しいsizeを表示する。
+2. 大文字小文字どちらの綴りでも`cat`が正確な内容を表示する。
+3. 存在しない名の`cat`が安定のnot-found errorを表示する。
+4. 成功と失敗の後もshellが応答し続ける。
 
-- Booting MiniOS or another program from SD.
-- SD write, erase, format, file creation or file update.
-- exFAT, FAT12, FAT16, GPT and extended partitions.
-- Long file names and subdirectory traversal.
-- A VFS, block cache, asynchronous I/O or hardware SPI redesign.
-- Moving the FPGA/OpenOCD build and load workflow into `xtask`; that is a
-  separate follow-up after the storage path works on hardware.
+## 対象外
+
+- SDからのMiniOS起動や他program起動。
+- SD書込、消去、format、file作成や更新。
+- exFAT、FAT12、FAT16、GPT、拡張partition。
+- long file nameとsubdirectory走査。
+- VFS、block cache、非同期I/O、hardware SPI再設計。
+- FPGAとOpenOCDのbuild・load workflowの`xtask`化。storage pathのhardware動作後の別follow-upとする。

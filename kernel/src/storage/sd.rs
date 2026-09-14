@@ -1,5 +1,7 @@
 use super::SectorReader;
 
+// SDHC/SDXC専用のread-only SPI driver。CMD17によるsector読み取りだけを
+// 行い、書込・消去・format系commandは一切送らない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SdError {
     Transport,
@@ -36,6 +38,8 @@ fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
+// error時もcardをdeselectしてclockを送り、busをidle状態へ戻す。
+// 選択されたまま放置すると次commandの応答が壊れる。
 fn cleanup<B: Bus>(bus: &mut B) -> Result<(), SdError> {
     let select = bus.select(false);
     let transfer = bus.transfer(0xff).map(|_| ());
@@ -176,6 +180,7 @@ fn inner_read<B: Bus>(bus: &mut B, lba: u32, destination: &mut [u8; 512]) -> Res
     let high = bus.transfer(0xff)?;
     let low = bus.transfer(0xff)?;
     let card_crc = ((high as u16) << 8) | low as u16;
+    // GPIO bit-bangはnoiseに弱いため、data本体のCRC16を必ず照合する。
     if crc16(destination) != card_crc {
         return Err(SdError::Crc);
     }

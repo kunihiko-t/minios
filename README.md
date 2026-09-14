@@ -53,7 +53,7 @@ shutting down
 | ホスト | Apple Silicon搭載macOS、Ubuntu 24.04 | macOSはQEMU 11.1.0、UbuntuはGitHub ActionsとQEMU 8.2系で検証 |
 | Rust | 安定版1.98.0 | rustfmt、Clippy、RV64GCとRV32IMのベアメタルターゲットを固定 |
 | QEMUゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、1ハート、128 MiB RAM |
-| NEORV32 | RISC-V RV32IM | M-mode、内蔵IMEM 24,288バイト、内蔵DMEM 16,192バイト |
+| NEORV32 | RISC-V RV32IM | M-mode、内蔵IMEM 32,768バイト、内蔵DMEM 16,192バイト |
 | QEMUコンソール | 16550互換UART | MMIOベース`0x1000_0000`、シリアル標準入出力 |
 | NEORV32コンソール | UART0 | MMIOベース`0xfff5_0000`、96 MHz、19,200 baud |
 
@@ -103,6 +103,7 @@ RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`comman
 - [QEMU `virt`のメモリーマップ](docs/reference/memory-map.md)
 - [MiniContainer Guest ABI](docs/reference/minicontainer-abi.md)
 - [NEORV32でアプリケーションを動かす方式の検討](docs/reference/neorv32-applications.md)
+- [NEORV32 read-only FAT32設計](docs/reference/sd-fat32.md)
 - [用語集](docs/reference/glossary.md)
 - [問題の切り分け方](docs/reference/troubleshooting.md)
 - [発展ロードマップ](docs/reference/roadmap.md)

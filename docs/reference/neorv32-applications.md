@@ -11,14 +11,14 @@ M3のRust guestはRV64とQEMU `virt`専用であり、この文書はFPGA実機�
 
 採用理由は次の五つです。
 
-1. IMEM残量が2,184 byteしかなく、案Bの新規コード（trap入口、context、dispatch、PMP設定、argv配置、配置器）が収まらない見込みです。
-2. 実機へguestを届ける配送路（QEMU `-device loader`相当）がなく、UART受信か静的埋め込みの新設が必要です。
-3. FPGA実行の自動試験路がなく、trapとPMPの正否をCIで検証できません。
-4. M3はNEORV32でのguest実行を対象外と定めています。
-5. U-mode、system call、分離の教育目標はQEMU RV64で自動試験付きに達成済みです。
+1. 実機へguestを届ける配送路（QEMU `-device loader`相当）がなく、UART受信か静的埋め込みの新設が必要です。
+2. FPGA実行の自動試験路がなく、trapとPMPの正否をCIで検証できません。
+3. M3はNEORV32でのguest実行を対象外と定めています。
+4. U-mode、system call、分離の教育目標はQEMU RV64で自動試験付きに達成済みです。
+5. IMEM残量11,836 byteに案Bが収まる見込みでも、storage実装（約9 KiB）との同居では予算が逼迫します。
 
-案Aは分離を教えられず、IMEM拡張なしでは数百byte級しか載りません。
-案Bの再訪条件は、IMEMの32 KiB化（FPGA再合成）、guest配送路、simまたは実機の試験路が揃うことです。
+案Aは分離を教えられません。
+案Bの再訪条件のうちIMEM 32 KiB化は満たされました。残りはguest配送路と、simまたは実機の試験路です。
 
 ## 前提と制約（実測）
 
@@ -26,9 +26,10 @@ RV32IMカーネル（release）の実測値です。
 
 | 領域 | 全体 | 使用 | 残量 |
 | --- | ---: | ---: | ---: |
-| IMEM | 24,288 byte | `.text` 22,100 byte＋`.data`初期値4 byte | 2,184 byte |
+| IMEM | 32,768 byte | `.text` 20,928 byte＋`.data`初期値4 byte | 11,836 byte |
 | DMEM | 16,192 byte | `.data` 4 byte、`.bss` 0 byte、boot stack 4,096 byte | 約12,092 byte |
 
+`.text`はRV32向け`opt-level=z`での実測です。旧来の24,288 byte指定はNEORV32が2のべき乗へ丸めるため、実効32 KiBを契約にしています。
 参考として、RV64 guestの`.text`は140 byteです。file全体の5,592 byteの大半はsymbolであり、load対象ではありません。
 
 このリポジトリにNEORV32のVHDL構成は含まれません。
@@ -59,10 +60,10 @@ PMPのmode（TORとNAPOT）は版により対応が異なるため、利用版�
 
 ### IMEMとDMEMへの収容可否
 
-案Bの新規コードはRV64対応部の規模から数KBの見積もりであり、現IMEM残量2,184 byteに収まらない見込みです。
+案Bの新規コードはRV64対応部の規模から数KBの見積もりであり、現IMEM残量11,836 byteには収まる見込みです。
 確定には試作計測が必要です。
 DMEMは数KB級のguestとstackであれば約12,092 byteの残量に収まります。
-IMEMが拘束条件であり、拡張（再合成）かkernel縮小（`opt-level="z"`、LTO、機能削減）が前提になります。
+ただしstorage実装（約9 KiB）との同居ではIMEM残量が約3 KiBまで減るため、両立には試作計測と予算管理が前提になります。
 
 ### 案Aと案Bの差
 
@@ -70,7 +71,7 @@ IMEMが拘束条件であり、拡張（再合成）かkernel縮小（`opt-level
 | --- | --- | --- |
 | 分離 | なし（全M-mode） | PMPリージョンによる分離 |
 | loaderとtrap | 不要（関数呼び出し） | M-mode trap、dispatch、配置器が新規 |
-| FPGA変更 | 不要 | U有効、PMP有効、IMEM拡張の再合成 |
+| FPGA変更 | 不要 | U有効とPMP有効の再合成（IMEM 32 KiBは充足済み） |
 | guest配送 | FPGA image再build | UART受信か静的埋め込みの新設 |
 | 試験 | 実機shell確認の延長 | 実機UART手動のみ。CI自動化なし |
 | 教材価値 | 結合とlink配置 | 特権分離とPMP。QEMU章と重複大 |
@@ -90,20 +91,20 @@ U-mode、system call、分離はQEMU RV64の自動試験付き教材で教え、
 - `CPU_EXTENSION_RISCV_U = true`
 - `PMP_NUM_REGIONS >= 4`（guest RX、guest RW、kernel拒否、周辺拒否の目安。利用版の上限とmodeを確認する）
 - `PMP_MIN_GRANULARITY = 4`
-- `MEM_INT_IMEM_SIZE >= 32768`（再合成）
+- `MEM_INT_IMEM_SIZE >= 32768`（現行32,768 byteで充足済み）
 - `MEM_INT_DMEM_SIZE`は据え置き可、UART0は据え置き
 - 初手は現bitstreamのgenerics確認
 
 ### memory map案
 
-現状は[`linker_neorv32.ld`](../../kernel/linker_neorv32.ld)のIMEM 24,288 byteとDMEM 16,192 byteです。
-IMEM 32 KiB化を例にした案Bの配置案は次のとおりです。
+現状は[`linker_neorv32.ld`](../../kernel/linker_neorv32.ld)のIMEM 32,768 byteとDMEM 16,192 byteです。
+案Bの配置案は次のとおりです。
 
 | 領域 | 用途 | 目安 |
 | --- | --- | --- |
-| IMEM | kernel `.text`と`.rodata` | 22,100 byte（実測） |
+| IMEM | kernel `.text`と`.rodata` | 20,928 byte（`-Oz`実測） |
 | IMEM | trap入口、dispatch、PMP設定、argv配置、配置器 | 約3,000 byte（試作計測で確定） |
-| IMEM | guest配置 | 残り約7,600 byte |
+| IMEM | guest配置 | 残り約8,800 byte |
 | DMEM | kernel `.data`と`.bss` | 4 byte（実測） |
 | DMEM | guest argvとstack | 数KB |
 | DMEM | boot stack | 4,096 byte |
