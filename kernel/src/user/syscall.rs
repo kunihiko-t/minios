@@ -1,12 +1,18 @@
-//! `write`、`exit`、未知のsystem callを純粋なdispatch結果へ変換する。
+//! `write`、`read`、`exit`、未知のsystem callを純粋なdispatch結果へ変換する。
 
 use crate::{
-    user::{context::UserContext, memory::copy_from_user},
+    user::{
+        context::UserContext,
+        memory::{check_user_writable_range, copy_from_user},
+    },
     vm::{AddressSpace, FrameStore},
 };
 use minios_abi::{
     control::FrameKind,
-    syscall::{EBADF, EFAULT, EINVAL, ENOSYS, MAX_WRITE_LEN, STDERR, STDOUT, SyscallNumber},
+    syscall::{
+        EBADF, EFAULT, EINVAL, ENOSYS, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT,
+        SyscallNumber,
+    },
 };
 
 /// syscall結果の受け先。kernelはUARTへframeを載せ、host testは記録する。
@@ -16,31 +22,53 @@ pub trait ControlSink {
     fn frame(&mut self, kind: FrameKind, payload: &[u8]) -> Result<(), Self::Error>;
 }
 
+/// stdin byteの供給元。kernelはUARTのStdin frameから引き、host testは用意した列を返す。
+pub trait ControlSource {
+    type Error;
+
+    /// 次の入力を`output`へ移す。戻り値はbyte数であり、0はEOFである。
+    fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error>;
+}
+
 /// 1個のsystem callを処理した後の継続種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyscallFlow<E> {
+pub enum SyscallFlow<E, SE = E> {
     /// guest実行へ戻る。戻り値は`context`の`a0`へ書き込み済みである。
     Resume,
     /// guestが`exit`を要求した。codeは`a0`の下位32bitである。
     Exit(u32),
-    /// 継続できない失敗。sinkのerrorをそのまま保持する。
+    /// 継続できない送信失敗。sinkのerrorをそのまま保持する。
     Fatal(E),
+    /// 継続できない受信失敗。sourceのerrorをそのまま保持する。
+    SourceFatal(SE),
+    /// `read`の受信が済み、userへのcopy待ちである。受信byteは呼び出し側の
+    /// scratch bufferにあり、handlerが先頭`len` byteを`start`へ移してから
+    /// `a0`へ`len`を書いて戻る。4 KiBを値で返さないのは、trap stackの
+    /// 多重frameでoverflowさせないためである。
+    ReadComplete { start: u64, len: usize },
 }
 
 /// `a7`のsystem call番号に従って`context`を処理する。
 ///
 /// guest pointerをRust参照として解することなく、`write`は1回の検証付きcopyと
 /// 1回の`sink.frame`で処理し、戻り値を`a0`へ書き込む。descriptorは1と2だけを
-/// 許可し、4,096 byteを超える長さは拒否する。
-pub fn dispatch_syscall<const N: usize, M: FrameStore, S: ControlSink>(
+/// 許可し、4,096 byteを超える長さは拒否する。`read`はdescriptor 0だけを許可し、
+/// 書き込み検証を通してから1回の`source.read_stdin`で`read_scratch`へ受信し、
+/// userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは呼び出し側が
+/// 1個だけ持ち、多重frameへ4 KiBを複製しない。
+pub fn dispatch_syscall<const N: usize, M: FrameStore, S: ControlSink, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace<'_, N>,
     memory: &M,
     sink: &mut S,
-) -> SyscallFlow<S::Error> {
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<S::Error, R::Error> {
     let number = context.register(17);
     if number == SyscallNumber::Write as usize {
         dispatch_write(context, space, memory, sink)
+    } else if number == SyscallNumber::Read as usize {
+        dispatch_read(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -49,12 +77,61 @@ pub fn dispatch_syscall<const N: usize, M: FrameStore, S: ControlSink>(
     }
 }
 
-fn dispatch_write<const N: usize, M: FrameStore, S: ControlSink>(
+fn dispatch_read<const N: usize, M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace<'_, N>,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    if context.register(10) != STDIN {
+        context.set_register(10, EBADF as usize);
+        return SyscallFlow::Resume;
+    }
+    let len = context.register(12);
+    if len > MAX_READ_LEN {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    if len == 0 {
+        context.set_register(10, 0);
+        return SyscallFlow::Resume;
+    }
+    let start = context.register(11) as u64;
+    // stdinの消費は不可逆なため、sourceへ触れる前にEFAULTを確定させる。
+    if check_user_writable_range(space, memory, start, len).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+
+    match source.read_stdin(&mut read_scratch[..len]) {
+        Ok(count) => SyscallFlow::ReadComplete { start, len: count },
+        Err(error) => SyscallFlow::SourceFatal(error),
+    }
+}
+
+/// `ReadComplete`の受信済みbyteを検証済みuser rangeへ移し、`a0`へ長さを書く。
+///
+/// # Safety
+///
+/// 呼び出し側は`dispatch_read`へ渡したscratchの先頭`len` byteと、返却された
+/// `start`と`len`をそのまま渡さなければならない。user satpが有効でguestが
+/// 停止中のtrap handlerからのみ呼び、copyの間`sstatus.SUM`を立てておくこと。
+/// 検証時からpage tableは不変であり、このcopyは正確に届く。
+pub unsafe fn complete_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
+    // Safety: 呼び出し側の契約により、検証済みuser rangeへのcopyである。
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, len);
+    }
+    context.set_register(10, len);
+}
+
+fn dispatch_write<const N: usize, M: FrameStore, S: ControlSink, SE>(
     context: &mut UserContext,
     space: &AddressSpace<'_, N>,
     memory: &M,
     sink: &mut S,
-) -> SyscallFlow<S::Error> {
+) -> SyscallFlow<S::Error, SE> {
     let kind = match context.register(10) {
         STDOUT => FrameKind::Stdout,
         STDERR => FrameKind::Stderr,
@@ -100,7 +177,7 @@ mod tests {
 
     use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
-    use super::{ControlSink, SyscallFlow, dispatch_syscall};
+    use super::{ControlSink, ControlSource, SyscallFlow, dispatch_syscall};
     use crate::{
         memory::frame::{FrameAllocator, PAGE_SIZE},
         user::context::UserContext,
@@ -108,12 +185,16 @@ mod tests {
     };
     use minios_abi::{
         control::FrameKind,
-        syscall::{EBADF, EFAULT, EINVAL, ENOSYS, MAX_WRITE_LEN, STDERR, STDOUT, SyscallNumber},
+        syscall::{
+            EBADF, EFAULT, EINVAL, ENOSYS, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT,
+            SyscallNumber,
+        },
     };
 
     const MESSAGE: &[u8] = b"MK4";
     const MESSAGE_PAGE: usize = 0x0010_1000;
     const WRITE_NUMBER: usize = SyscallNumber::Write as usize;
+    const READ_NUMBER: usize = SyscallNumber::Read as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +315,40 @@ mod tests {
         }
     }
 
+    struct FakeSource {
+        script: Vec<u8>,
+        position: usize,
+        fail: bool,
+        reads: usize,
+    }
+
+    impl FakeSource {
+        fn scripted(script: &[u8]) -> Self {
+            Self {
+                script: Vec::from(script),
+                position: 0,
+                fail: false,
+                reads: 0,
+            }
+        }
+    }
+
+    impl ControlSource for FakeSource {
+        type Error = SinkError;
+
+        fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+            self.reads += 1;
+            if self.fail {
+                return Err(SinkError::Injected);
+            }
+            let available = &self.script[self.position..];
+            let count = core::cmp::min(available.len(), output.len());
+            output[..count].copy_from_slice(&available[..count]);
+            self.position += count;
+            Ok(count)
+        }
+    }
+
     fn syscall_context(number: usize, a0: usize, a1: usize, a2: usize) -> UserContext {
         let mut context = UserContext::patterned_for_test(0x0010_0500);
         context.set_register(17, number);
@@ -244,12 +359,14 @@ mod tests {
     }
 
     // MESSAGE page 1枚だけをmapした空間でdispatchを実行する。
-    fn dispatch_fixture(
+    fn dispatch_fixture<R: ControlSource<Error = SinkError>>(
         number: usize,
         a0: usize,
         a1: usize,
         a2: usize,
         sink: &mut FakeSink,
+        source: &mut R,
+        read_scratch: &mut [u8; MAX_READ_LEN],
     ) -> (UserContext, SyscallFlow<SinkError>) {
         let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
         let mut memory = TestFrameStore::default();
@@ -265,8 +382,12 @@ mod tests {
         builder.copy_into(page, 0, MESSAGE).unwrap();
         let space = builder.finish();
         let mut context = syscall_context(number, a0, a1, a2);
-        let flow = dispatch_syscall(&mut context, &space, &memory, sink);
+        let flow = dispatch_syscall(&mut context, &space, &memory, sink, source, read_scratch);
         (context, flow)
+    }
+
+    fn scratch() -> [u8; MAX_READ_LEN] {
+        [0xaa; MAX_READ_LEN]
     }
 
     // Catches missing frames, duplicated frames, wrong frame kinds, wrong
@@ -277,12 +398,15 @@ mod tests {
             [(STDOUT, FrameKind::Stdout), (STDERR, FrameKind::Stderr)]
         {
             let mut sink = FakeSink::default();
+            let mut source = FakeSource::scripted(b"untouched");
             let (context, flow) = dispatch_fixture(
                 WRITE_NUMBER,
                 descriptor,
                 MESSAGE_PAGE,
                 MESSAGE.len(),
                 &mut sink,
+                &mut source,
+                &mut scratch(),
             );
 
             assert_eq!(flow, SyscallFlow::Resume);
@@ -292,6 +416,7 @@ mod tests {
             assert_eq!(context.register(11), MESSAGE_PAGE);
             assert_eq!(context.register(12), MESSAGE.len());
             assert_eq!(context.register(8), 0x5150_0000_0000_0008);
+            assert_eq!(source.reads, 0);
         }
     }
 
@@ -299,8 +424,16 @@ mod tests {
     #[test]
     fn write_reports_unknown_descriptors_with_ebadf() {
         let mut sink = FakeSink::default();
-        let (context, flow) =
-            dispatch_fixture(WRITE_NUMBER, 3, MESSAGE_PAGE, MESSAGE.len(), &mut sink);
+        let mut source = FakeSource::scripted(b"");
+        let (context, flow) = dispatch_fixture(
+            WRITE_NUMBER,
+            3,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
 
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), EBADF as usize);
@@ -311,12 +444,15 @@ mod tests {
     #[test]
     fn write_reports_oversized_lengths_with_einval() {
         let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"");
         let (context, flow) = dispatch_fixture(
             WRITE_NUMBER,
             STDOUT,
             MESSAGE_PAGE,
             MAX_WRITE_LEN + 1,
             &mut sink,
+            &mut source,
+            &mut scratch(),
         );
 
         assert_eq!(flow, SyscallFlow::Resume);
@@ -329,7 +465,16 @@ mod tests {
     #[test]
     fn write_reports_guest_faults_with_efault() {
         let mut sink = FakeSink::default();
-        let (context, flow) = dispatch_fixture(WRITE_NUMBER, STDOUT, 0x0, 4, &mut sink);
+        let mut source = FakeSource::scripted(b"");
+        let (context, flow) = dispatch_fixture(
+            WRITE_NUMBER,
+            STDOUT,
+            0x0,
+            4,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
 
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), EFAULT as usize);
@@ -341,7 +486,9 @@ mod tests {
     #[test]
     fn unknown_numbers_report_enosys_and_resume() {
         let mut sink = FakeSink::default();
-        let (context, flow) = dispatch_fixture(999, 0, 0, 0, &mut sink);
+        let mut source = FakeSource::scripted(b"");
+        let (context, flow) =
+            dispatch_fixture(999, 0, 0, 0, &mut sink, &mut source, &mut scratch());
 
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOSYS as usize);
@@ -352,11 +499,21 @@ mod tests {
     #[test]
     fn exit_returns_the_code_without_touching_the_context() {
         let mut sink = FakeSink::default();
-        let (context, flow) = dispatch_fixture(EXIT_NUMBER, 42, 0, 0, &mut sink);
+        let mut source = FakeSource::scripted(b"untouched");
+        let (context, flow) = dispatch_fixture(
+            EXIT_NUMBER,
+            42,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
 
         assert_eq!(flow, SyscallFlow::Exit(42));
         assert_eq!(context.register(10), 42);
         assert!(sink.frames.is_empty());
+        assert_eq!(source.reads, 0);
     }
 
     // Catches resuming after a sink failure or clobbering the guest context.
@@ -366,11 +523,253 @@ mod tests {
             fail: true,
             ..FakeSink::default()
         };
-        let (context, flow) =
-            dispatch_fixture(WRITE_NUMBER, STDOUT, MESSAGE_PAGE, MESSAGE.len(), &mut sink);
+        let mut source = FakeSource::scripted(b"");
+        let (context, flow) = dispatch_fixture(
+            WRITE_NUMBER,
+            STDOUT,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
 
         assert_eq!(flow, SyscallFlow::Fatal(SinkError::Injected));
         assert_eq!(context.register(10), STDOUT);
+        assert!(sink.frames.is_empty());
+    }
+
+    fn read_completion(flow: SyscallFlow<SinkError>) -> (u64, usize) {
+        match flow {
+            SyscallFlow::ReadComplete { start, len } => (start, len),
+            other => panic!("expected ReadComplete, actual {other:?}"),
+        }
+    }
+
+    // Catches wiring mistakes between dispatch and the real Stdin frame parser.
+    #[test]
+    fn read_serves_real_stdin_frames_through_staging() {
+        use crate::user::stdin::{ByteReader, StdinStaging};
+
+        struct VecReader<'a> {
+            bytes: &'a [u8],
+            position: usize,
+        }
+
+        impl ByteReader for VecReader<'_> {
+            fn read_byte(&mut self) -> u8 {
+                let byte = self.bytes[self.position];
+                self.position += 1;
+                byte
+            }
+        }
+
+        struct StagingSource<'a> {
+            staging: StdinStaging,
+            reader: VecReader<'a>,
+        }
+
+        impl ControlSource for StagingSource<'_> {
+            type Error = SinkError;
+
+            fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+                self.staging
+                    .read(&mut self.reader, output)
+                    .map_err(|_| SinkError::Injected)
+            }
+        }
+
+        let header = |len: u32| {
+            minios_abi::control::FrameHeader {
+                kind: minios_abi::control::FrameKind::Stdin,
+                payload_len: len,
+            }
+            .encode()
+        };
+        let mut stream = Vec::from(header(2));
+        stream.extend_from_slice(b"ab");
+        stream.extend_from_slice(&header(0));
+
+        let mut sink = FakeSink::default();
+        let mut source = StagingSource {
+            staging: StdinStaging::new(),
+            reader: VecReader {
+                bytes: &stream,
+                position: 0,
+            },
+        };
+        let mut received = scratch();
+        let (_, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            512,
+            &mut sink,
+            &mut source,
+            &mut received,
+        );
+        let (_, len) = read_completion(flow);
+        assert_eq!(len, 2);
+        assert_eq!(&received[..len], b"ab");
+    }
+
+    // Catches losing received bytes, misreporting the destination, or setting
+    // a0 before the handler copies the bytes to the guest.
+    #[test]
+    fn read_delivers_source_bytes_as_read_complete() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"hello");
+        let mut received = scratch();
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            b"hello".len(),
+            &mut sink,
+            &mut source,
+            &mut received,
+        );
+
+        let (start, len) = read_completion(flow);
+        assert_eq!(start, MESSAGE_PAGE as u64);
+        assert_eq!(len, b"hello".len());
+        assert_eq!(&received[..len], b"hello");
+        assert_eq!(received[len], 0xaa);
+        assert_eq!(context.register(10), STDIN);
+        assert_eq!(source.reads, 1);
+        assert!(sink.frames.is_empty());
+    }
+
+    // Catches treating an exhausted source as an error instead of EOF.
+    #[test]
+    fn read_reports_eof_with_zero_length() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"");
+        let mut received = scratch();
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut received,
+        );
+
+        let (start, len) = read_completion(flow);
+        assert_eq!(start, MESSAGE_PAGE as u64);
+        assert_eq!(len, 0);
+        assert_eq!(received[0], 0xaa);
+        assert_eq!(context.register(10), STDIN);
+        assert_eq!(source.reads, 1);
+    }
+
+    // Catches accepting a descriptor other than 0 or consuming input on EBADF.
+    #[test]
+    fn read_reports_unknown_descriptors_with_ebadf() {
+        for descriptor in [1, 2, 3] {
+            let mut sink = FakeSink::default();
+            let mut source = FakeSource::scripted(b"hello");
+            let (context, flow) = dispatch_fixture(
+                READ_NUMBER,
+                descriptor,
+                MESSAGE_PAGE,
+                MESSAGE.len(),
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), EBADF as usize);
+            assert_eq!(source.reads, 0);
+            assert!(sink.frames.is_empty());
+        }
+    }
+
+    // Catches copying more than one kernel-page worth of bytes.
+    #[test]
+    fn read_reports_oversized_lengths_with_einval() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"hello");
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            MAX_READ_LEN + 1,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EINVAL as usize);
+        assert_eq!(source.reads, 0);
+        assert!(sink.frames.is_empty());
+    }
+
+    // Catches consuming stdin before the destination range is validated.
+    #[test]
+    fn read_reports_guest_faults_with_efault_without_consuming() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"hello");
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            0x0,
+            4,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.reads, 0);
+        assert!(sink.frames.is_empty());
+    }
+
+    // Catches validating the pointer or touching the source for a zero read.
+    #[test]
+    fn read_with_zero_length_returns_zero_without_touching_the_source() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"hello");
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            0x0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.reads, 0);
+        assert!(sink.frames.is_empty());
+    }
+
+    // Catches resuming after a source failure or clobbering the guest context.
+    #[test]
+    fn source_failure_is_fatal_and_preserves_the_context() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource {
+            fail: true,
+            ..FakeSource::scripted(b"hello")
+        };
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::SourceFatal(SinkError::Injected));
+        assert_eq!(context.register(10), STDIN);
         assert!(sink.frames.is_empty());
     }
 }
