@@ -1,11 +1,13 @@
-//! UART control frameの送信経路。Ready、Stdout、Stderr、Exit、GuestError、
+//! UART control frameの送受信経路。Ready、Stdout、Stderr、Exit、GuestError、
 //! Diagnosticの各frameを、headerの直後にpayloadが続く厳密なbyte列として
 //! UARTへ載せる。hostはこの列を`minicontainer-protocol`のdecoderで検証する。
+//! 受信はStdin frameだけをpull型で読み、`read`の要求分だけ配る。
 
 use minios_abi::boot::{BOOT_ABI_MAJOR, BOOT_ABI_MINOR};
 use minios_abi::control::ReadyPayload;
 use minios_abi::control::{FrameHeader, FrameKind};
-use minios_kernel::user::syscall::ControlSink;
+use minios_kernel::user::stdin::{ByteReader, StdinError, StdinStaging};
+use minios_kernel::user::syscall::{ControlSink, ControlSource};
 
 /// `dispatch_syscall`へ渡すUART sink。UARTのMMIO書き込みは失敗を返さない。
 pub struct UartControlSink;
@@ -16,6 +18,34 @@ impl ControlSink for UartControlSink {
     fn frame(&mut self, kind: FrameKind, payload: &[u8]) -> Result<(), Self::Error> {
         send_frame(kind, payload);
         Ok(())
+    }
+}
+
+struct UartBytes;
+
+impl ByteReader for UartBytes {
+    fn read_byte(&mut self) -> u8 {
+        crate::console::read_byte()
+    }
+}
+
+/// `dispatch_syscall`へ渡すUART source。Stdin frameをblocking readで引く。
+/// stagingはrun単位のstaticが所有し、trapごとに借りて渡す。
+pub struct UartControlSource<'a> {
+    staging: &'a mut StdinStaging,
+}
+
+impl<'a> UartControlSource<'a> {
+    pub const fn new(staging: &'a mut StdinStaging) -> Self {
+        Self { staging }
+    }
+}
+
+impl ControlSource for UartControlSource<'_> {
+    type Error = StdinError;
+
+    fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        self.staging.read(&mut UartBytes, output)
     }
 }
 

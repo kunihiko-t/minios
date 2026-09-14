@@ -4,7 +4,8 @@ pub mod context;
 pub mod memory;
 pub mod run;
 pub mod stack;
+pub mod stdin;
 pub mod syscall;
 pub mod trap;
 
-pub use context::{RunExit, SSTATUS_SPIE, SSTATUS_SPP, UserContext};
+pub use context::{RunExit, SSTATUS_SPIE, SSTATUS_SPP, SSTATUS_SUM, UserContext};

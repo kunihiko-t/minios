@@ -137,11 +137,13 @@ use minios_kernel::memory::{
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::user::run::{RunCompletion, RunOutcome, UserRun};
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::user::syscall::{SyscallFlow, dispatch_syscall};
+use minios_kernel::user::stdin::StdinStaging;
+#[cfg(target_arch = "riscv64")]
+use minios_kernel::user::syscall::{SyscallFlow, complete_read, dispatch_syscall};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::user::trap::TrapAction;
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::user::{RunExit, UserContext};
+use minios_kernel::user::{RunExit, SSTATUS_SUM, UserContext};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::AddressSpace;
 #[cfg(target_arch = "riscv64")]
@@ -247,6 +249,12 @@ const USER_RUN_OUTCOME_EXIT: usize = 1;
 const USER_RUN_OUTCOME_FATAL_TRAP: usize = 2;
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_SINK_FAILURE: usize = 3;
+#[cfg(target_arch = "riscv64")]
+const USER_RUN_OUTCOME_SOURCE_FAILURE: usize = 4;
+/// run単位のstdin staging。resetはrunnerが実行窓の前に行い、handlerだけが
+/// assemblyの実行窓で借りる。runnerが待機中のため同時にaliasしない。
+#[cfg(target_arch = "riscv64")]
+static mut USER_STDIN_STAGING: StdinStaging = StdinStaging::new();
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 const ELF_FIXTURE_OWNED_FRAMES: usize = 23;
@@ -1005,6 +1013,35 @@ unsafe fn rust_user_trap_handler_impl(context: *mut UserContext) -> RunExit {
     }
 }
 
+/// run単位のstdin stagingを借りる。
+///
+/// # Safety
+///
+/// assemblyの実行窓の中のhandlerからのみ呼び、借用をtrapの外へ持ち出さないこと。
+/// runnerは実行窓で待機中のため、借用が同時にaliasすることはない。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn borrow_stdin_staging() -> &'static mut StdinStaging {
+    unsafe { &mut *&raw mut USER_STDIN_STAGING }
+}
+
+/// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
+#[cfg(target_arch = "riscv64")]
+fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
+    // S-modeのhandlerがU pageへ書くため、SUMを立ててcopy後に元へ戻す。
+    // trap中はSIEが落ちており、実行窓ではSTIEも無効なため、SUM立て中の
+    // 割り込みで変わる共有状態はない。
+    let sstatus = arch::riscv64::csr::read_sstatus();
+    // Safety: S-modeでSUM bitだけを立て、copy後に保存値を書き戻す。
+    // `complete_read`の契約（dispatch返却値のそのまま受け渡し、user satp
+    // 有効、guest停止中）は呼び出し側handlerが満たす。
+    unsafe {
+        arch::riscv64::csr::write_sstatus(sstatus | SSTATUS_SUM);
+        complete_read(context, start, len, data);
+        arch::riscv64::csr::write_sstatus(sstatus);
+    }
+}
+
 #[cfg(all(
     target_arch = "riscv64",
     not(any(
@@ -1031,9 +1068,24 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     // handlerの実行中はrunnerがassembly内で待機しているため、同時にaliasしない。
     let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
     let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
-    let flow = dispatch_syscall(context, space, memory, &mut control::UartControlSink);
+    // Safety: 実行窓のhandlerが1 trapにつき1回だけ借り、外へ持ち出さない。
+    let staging = unsafe { borrow_stdin_staging() };
+    let mut source = control::UartControlSource::new(staging);
+    let mut read_scratch = [0u8; minios_abi::syscall::MAX_READ_LEN];
+    let flow = dispatch_syscall(
+        context,
+        space,
+        memory,
+        &mut control::UartControlSink,
+        &mut source,
+        &mut read_scratch,
+    );
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
+        SyscallFlow::ReadComplete { start, len } => {
+            complete_user_read(context, start, len, &read_scratch[..len]);
+            RunExit::Resume
+        }
         SyscallFlow::Exit(code) => {
             USER_EXIT_CODE.store(code as usize, Ordering::Relaxed);
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXIT, Ordering::Relaxed);
@@ -1041,6 +1093,10 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
         }
         SyscallFlow::Fatal(()) => {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SINK_FAILURE, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
+        SyscallFlow::SourceFatal(_) => {
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SOURCE_FAILURE, Ordering::Relaxed);
             RunExit::ReturnToKernel
         }
     }
@@ -1091,9 +1147,24 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     // handlerの実行中はrunnerがassembly内で待機しているため、同時にaliasしない。
     let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
     let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
-    let flow = dispatch_syscall(context, space, memory, &mut control::UartControlSink);
+    // Safety: 実行窓のhandlerが1 trapにつき1回だけ借り、外へ持ち出さない。
+    let staging = unsafe { borrow_stdin_staging() };
+    let mut source = control::UartControlSource::new(staging);
+    let mut read_scratch = [0u8; minios_abi::syscall::MAX_READ_LEN];
+    let flow = dispatch_syscall(
+        context,
+        space,
+        memory,
+        &mut control::UartControlSink,
+        &mut source,
+        &mut read_scratch,
+    );
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
+        SyscallFlow::ReadComplete { start, len } => {
+            complete_user_read(context, start, len, &read_scratch[..len]);
+            RunExit::Resume
+        }
         SyscallFlow::Exit(code) => {
             // このprobeのExit経路はsinkへ直接frameを1回載せる。
             use minios_kernel::user::syscall::ControlSink as _;
@@ -1110,6 +1181,15 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
                 arch::riscv64::sbi::ResetReason::SystemFailure,
             )
         }
+        SyscallFlow::SourceFatal(_) => {
+            crate::console::emergency_print(format_args!(
+                "[MINIOS_TEST] failed: user-syscall source failure\r\n"
+            ));
+            arch::riscv64::sbi::system_reset(
+                arch::riscv64::sbi::ResetType::Shutdown,
+                arch::riscv64::sbi::ResetReason::SystemFailure,
+            )
+        }
     }
 }
 
@@ -1119,9 +1199,24 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     // kernelへ戻るまで所有する単一hart静的参照である。
     let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
     let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
-    let flow = dispatch_syscall(context, space, memory, &mut control::UartControlSink);
+    // Safety: 実行窓のhandlerが1 trapにつき1回だけ借り、外へ持ち出さない。
+    let staging = unsafe { borrow_stdin_staging() };
+    let mut source = control::UartControlSource::new(staging);
+    let mut read_scratch = [0u8; minios_abi::syscall::MAX_READ_LEN];
+    let flow = dispatch_syscall(
+        context,
+        space,
+        memory,
+        &mut control::UartControlSink,
+        &mut source,
+        &mut read_scratch,
+    );
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
+        SyscallFlow::ReadComplete { start, len } => {
+            complete_user_read(context, start, len, &read_scratch[..len]);
+            RunExit::Resume
+        }
         SyscallFlow::Exit(code) => {
             USER_EXIT_CODE.store(code as usize, Ordering::Relaxed);
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXIT, Ordering::Relaxed);
@@ -1129,6 +1224,10 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
         }
         SyscallFlow::Fatal(()) => {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SINK_FAILURE, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
+        SyscallFlow::SourceFatal(_) => {
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SOURCE_FAILURE, Ordering::Relaxed);
             RunExit::ReturnToKernel
         }
     }
@@ -1412,6 +1511,7 @@ fn run_user_exit_test<const KERNEL_N: usize>(
     unsafe {
         USER_SYSCALL_PROBE_SPACE = run.address_space() as *const _ as usize;
         USER_SYSCALL_PROBE_MEMORY = run.memory() as *const IdentityFrameStore as usize;
+        USER_STDIN_STAGING = StdinStaging::new();
     }
 
     // probeはtimer tickに依存せず、Supervisor timer割り込みはuser trapの
@@ -1444,7 +1544,9 @@ fn run_user_exit_test<const KERNEL_N: usize>(
             USER_RUN_OUTCOME_EXIT => {
                 RunOutcome::Exit(USER_EXIT_CODE.load(Ordering::Relaxed) as u32)
             }
-            USER_RUN_OUTCOME_FATAL_TRAP | USER_RUN_OUTCOME_SINK_FAILURE => RunOutcome::Fatal,
+            USER_RUN_OUTCOME_FATAL_TRAP
+            | USER_RUN_OUTCOME_SINK_FAILURE
+            | USER_RUN_OUTCOME_SOURCE_FAILURE => RunOutcome::Fatal,
             _ => RunOutcome::Fatal,
         }
     });
@@ -1488,6 +1590,9 @@ fn run_user_exit_test<const KERNEL_N: usize>(
         ),
         RunCompletion::Fatal if outcome_kind == USER_RUN_OUTCOME_SINK_FAILURE => {
             fatal_qemu_test(format_args!("user-exit sink failure after cleanup"))
+        }
+        RunCompletion::Fatal if outcome_kind == USER_RUN_OUTCOME_SOURCE_FAILURE => {
+            fatal_qemu_test(format_args!("user-exit source failure after cleanup"))
         }
         RunCompletion::Fatal if outcome_kind == USER_RUN_OUTCOME_FATAL_TRAP => {
             fatal_qemu_test(format_args!(
@@ -1583,6 +1688,7 @@ fn run_boot_payload<const KERNEL_N: usize>(
     unsafe {
         USER_SYSCALL_PROBE_SPACE = run.address_space() as *const _ as usize;
         USER_SYSCALL_PROBE_MEMORY = run.memory() as *const IdentityFrameStore as usize;
+        USER_STDIN_STAGING = StdinStaging::new();
     }
 
     // payloadはtimer tickに依存せず、Supervisor timer割り込みはuser trapの
