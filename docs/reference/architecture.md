@@ -119,7 +119,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   `payload-args`経路のbundleにはbuild済みRust guestを格納します。
 - `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第17章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
-- `lib.rs`：公開commandを28段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
+- `lib.rs`：公開commandを29段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
 
 ## Rustユーザープログラム
 

@@ -3,6 +3,7 @@
 この文書は、MiniOSとMiniContainerが共有するMiniContainer Guest ABI v1を定義します。
 整数は、特記しない限りlittle-endianで表現します。
 このABIの公開型と定数は`minios-abi` crateにあります。
+現行のminorは1であり、1.0との互換規約は末尾の互換性規約にまとめます。
 
 ## MiniBundle v1
 
@@ -14,7 +15,7 @@ Rustの構造体をそのままメモリーへ配置せず、各fieldを次のof
 | ---: | ---: | --- | --- |
 | 0 | 8 | `magic` | ASCII `MINICTR`と末尾NUL |
 | 8 | 2 | `abi_major` | `1` |
-| 10 | 2 | `abi_minor` | `0` |
+| 10 | 2 | `abi_minor` | `1`。decoderは自身以下のminorを受理する |
 | 12 | 2 | `header_len` | `96` |
 | 14 | 2 | `flags` | `0` |
 | 16 | 8 | `total_len` | headerを含むbundle全体の長さ |
@@ -74,16 +75,19 @@ MiniOSが同期magicを送った後、UARTは長さ付きbinary frameとしてde
 | 6 | 2 | `reserved` | `0` |
 | 8 | 4 | `payload_len` | payloadのバイト長。最大64 KiB |
 
-| 値 | kind | payload |
-| ---: | --- | --- |
-| 1 | `READY` | 4バイト。ABI majorとABI minor |
-| 2 | `STDOUT` | 任意のバイト列 |
-| 3 | `STDERR` | 任意のバイト列 |
-| 4 | `EXIT` | 4バイトの符号なし終了コード |
-| 5 | `GUEST_ERROR` | UTF-8診断 |
-| 6 | `DIAGNOSTIC` | UTF-8診断 |
+| 値 | kind | payload | 方向 |
+| ---: | --- | --- | --- |
+| 1 | `READY` | 4バイト。ABI majorとABI minor | guest→host |
+| 2 | `STDOUT` | 任意のバイト列 | guest→host |
+| 3 | `STDERR` | 任意のバイト列 | guest→host |
+| 4 | `EXIT` | 4バイトの符号なし終了コード | guest→host |
+| 5 | `GUEST_ERROR` | UTF-8診断 | guest→host |
+| 6 | `DIAGNOSTIC` | UTF-8診断 | guest→host |
+| 7 | `STDIN` | 入力バイト列。長さ0はEOF | host→guest |
 
 `READY`と`EXIT`の`payload_len`は必ず4です。
+`STDIN`の`payload_len`は4 KiB以下であり、長さ0のframeがEOFを表します。
+EOFはstickyであり、EOF以後の`STDIN` frameが届いても入力は戻りません。
 
 `READY` payloadの4バイトは、次の順序で符号なし整数を格納します。
 
@@ -92,10 +96,24 @@ MiniOSが同期magicを送った後、UARTは長さ付きbinary frameとしてde
 | 0 | 2 | `abi_major` | `u16` little-endian |
 | 2 | 2 | `abi_minor` | `u16` little-endian |
 
-したがって、ABI 1.0の`READY` payloadは`01 00 00 00`です。
+したがって、ABI 1.1の`READY` payloadは`01 00 01 00`です。
+ホストは`READY`のminorが1以上のときだけ`STDIN` frameを送ります。
 
 未定義の`kind`、非ゼロの`flags`または`reserved`、上限を超える長さ、固定長payloadの不一致は受理しません。
 同期後にheaderまたはpayload長の規約が壊れたとき、ホストはbyte streamを推測で再同期せず、protocol failureとしてinstanceを停止します。
+
+## Stdin転送
+
+stdinは疑似TTYなしのbyte streamであり、ホストが`STDIN` frameで順に送り、guestが`read`で引きます。
+kernelはguestの`read`要求時にだけUARTから次のframeを読むpull型であり、要求がなければ受信しません。
+frame境界と`read`要求長は一致しなくてよく、frame内の残りは次の`read`へ繰り越します。
+
+上限とbackpressureは次のとおりです。
+
+- 1 frameは4 KiB以下です。これを超える`STDIN`はprotocol failureとして実行を停止します。
+- kernelが保持するのは未配達の1 frame分（最大4 KiB）だけです。未読のbyteはホストとUARTのbufferに残ります。
+- guestの`read`はbyteまたはEOFが届くまで待機します。待機中もtimer割り込みは処理します。
+- guest終了後に届いた入力は読みません。shutdownとともに破棄します。
 
 ## Syscall ABI v1
 
@@ -105,16 +123,19 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | ---: | --- | --- | --- |
 | 1 | `write` | `a0=fd`、`a1=pointer`、`a2=length` | `fd=1`は標準出力、`fd=2`は標準エラー出力。出力は一回につき4 KiB以下 |
 | 2 | `exit` | `a0=code` | 下位8ビットをアプリケーション終了コードとしてホストへ渡し、アプリケーションへ戻らない |
+| 3 | `read` | `a0=fd`、`a1=pointer`、`a2=length` | `fd=0`は標準入力。入力は一回につき4 KiB以下。戻り値はbyte数、EOFは0 |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
+`read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
+長さ0の`read`は入力へ触れず0を返します。
 負のABI error値は次のとおりです。
 
 | 値 | 名前 | 条件 |
 | ---: | --- | --- |
 | `-38` | `ENOSYS` | 未知のsyscall番号 |
 | `-9` | `EBADF` | 未知のfile descriptor |
-| `-14` | `EFAULT` | 不正なpointerまたは読み取り不能な範囲 |
-| `-22` | `EINVAL` | 4 KiBを超える出力長 |
+| `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
+| `-22` | `EINVAL` | 4 KiBを超える入出力長 |
 
 ## 初期スタック ABI v1
 
@@ -135,10 +156,12 @@ guestは書き換え前のスタックを読み取り専用の初期データと
 
 ## 互換性規約
 
-v1のBootHeader decoderは`abi_major=1`かつ`abi_minor=0`だけを受理します。
+BootHeader decoderは`abi_major=1`かつ自身以下の`abi_minor`を受理します。
+現行kernelは1.0と1.1のbundleをどちらも実行でき、既存ホストの1.0 bundleと共存します。
 header長、magic、flags、reserved、range layoutは表の値と規約どおりでなければなりません。
-Control frame decoderは定義済みの六つのkindだけを受理します。
+Control frame decoderは定義済みの七つのkindだけを受理します。
 この文書にないfield、syscall番号、frame種別、非ゼロの予約値は推測して解釈しません。
+ホストは`READY`のminorで対応ABIを判定し、minor 0の相手へ`STDIN`を送りません。
 MiniOS release候補とMiniContainer release候補は、固定した相手のrelease artifactに対するABI互換性試験を通過してから公開します。
 
 [全体構成](architecture.md) | [QEMU `virt`のメモリーマップ](memory-map.md)
