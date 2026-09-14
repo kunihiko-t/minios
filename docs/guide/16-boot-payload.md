@@ -60,5 +60,4 @@ timeout時はQEMU childをkillしてwaitし、出力readerをjoinしてからerr
 
 ## 次の章
 
-このガイドの実装順はここで終わります。
-全章の索引は[学習ガイド](README.md)へ戻ります。
+[第17章「Rustでユーザープログラムを書く」](17-rust-guest.md)では、Rust製guestのbuild、MiniBundle生成、QEMUでの実行を追います。

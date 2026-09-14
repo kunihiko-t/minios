@@ -2,6 +2,7 @@
 
 MiniOSは、ハードウェアに依存する処理を小さい境界へ閉じ込め、純粋なロジックをホストでテストできるライブラリーへ分けています。
 静的RISC-V 64 ELFをMiniBundle boot payloadから検証し、U-modeで`write`と`exit`を実行して所有frameを回収します。
+user ELFはRust製guest crateからbuildし、`cargo xtask bundle`でMiniBundleへ格納します。
 NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行する別の小さな経路です。
 依存方向はシェルとカーネルの入口から型の付いたAPIへ向かいます。
 上位モジュールがCSR、SBIのレジスター、UARTのoffset、PTEのbit列を直接操作することはありません。
@@ -108,14 +109,27 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-argsを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-argsを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
+- `guest.rs`：Rust guestのrelease buildと、kernelのELF parserによる配置契約のhost検査を担当します。
+- `bundle.rs`：manifestの生成と検証、MiniBundle v1の正規配置、SHA-256 digest、`cargo xtask bundle`のfile出力を担当します。
 - `qemu.rs`：QEMU `virt`の引数、MiniBundle loader、marker mode、制限時間、並行した出力の読み取り、childのkillとwait、記録の検証を担当します。
   `user-exit`、`payload`、`payload-args`経路はstdout、必要な場合はstderr、Exit、回収をcontrol frameで観測します。
-- `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第16章までの七つの必須節を検査します。
+  `payload-args`経路のbundleにはbuild済みRust guestを格納します。
+- `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第17章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
 - `lib.rs`：公開commandを28段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
+
+## Rustユーザープログラム
+
+- `guest/src/main.rs`：`no_std`と`no_main`のguest本体であり、`_start`、`guest_main(argc, argv)`、`write`と`exit`の`ecall`、panic時の終了code70を提供します。
+- `guest/linker.ld`：`_start`を先頭に固定し、`.text`と`.rodata`を`0x0010_0000`からのR+X segmentへ置く配置契約を定義します。
+- `guest/build.rs`：linker scriptを呼び出しcwdに依存しない絶対pathで渡します。
+
+`cargo xtask bundle`はguestのbuild、manifest生成、MiniBundle file出力を一つの開発commandにまとめます。
+`cargo xtask test payload-args`はbuild済みguestを含むbundleをQEMU loaderへ渡し、program nameと二つの引数のstdout出力、終了code、回収diagnosticをframe順序で検証します。
+このguestはRV64GCとQEMU `virt`専用であり、RV32IMのNEORV32実機経路では実行しません。
 
 ## 起動からシェルまで
 
