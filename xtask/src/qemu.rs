@@ -25,7 +25,14 @@ const USER_TRAP_FAULT_DIAGNOSTIC: &str =
     "MiniOS user trap: scause=0x000000000000000f stval=0x0000000010000000";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
 const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
-const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\0\0";
+const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x01\0";
+/// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
+const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x01\0";
+/// payload-stdin検査の入力。2 frameのbyte列とEOFのStdin frameである。
+const STDIN_TEST_FRAMES: &[u8] =
+    b"MCF1\x07\0\0\0\x02\0\0\0abMCF1\x07\0\0\0\x04\0\0\0cdefMCF1\x07\0\0\0\0\0\0\0";
+const STDIN_STDOUT_AB_FRAME: &[u8] = b"MCF1\x02\0\0\0\x02\0\0\0ab";
+const STDIN_STDOUT_CDEF_FRAME: &[u8] = b"MCF1\x02\0\0\0\x04\0\0\0cdef";
 const PAYLOAD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x03\0\0\0MK6";
 const PAYLOAD_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK6";
 const PAYLOAD_EXIT_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
@@ -56,6 +63,7 @@ pub enum TestKind {
     UserExit,
     Payload,
     PayloadArgs,
+    PayloadStdin,
     Shell,
 }
 
@@ -74,6 +82,7 @@ impl TestKind {
             Self::UserExit => "qemu-test-user-exit",
             Self::Payload => unreachable!("the payload test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
+            Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -92,6 +101,9 @@ impl TestKind {
             Self::UserExit => USER_EXIT_MARKER,
             Self::Payload => unreachable!("the payload test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
+            Self::PayloadStdin => {
+                unreachable!("the payload-stdin test verifies raw control frames")
+            }
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -284,6 +296,19 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         );
     }
 
+    if kind == TestKind::PayloadStdin {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_stdin()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_stdin_command(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_payload_stdin_result(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+        );
+    }
+
     if kind == TestKind::Shell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let (command, command_line) = qemu_command(&kernel);
@@ -362,6 +387,117 @@ fn run_shell_command(
         Err(failure) => {
             finish_shell_failure(child, readers, command_line, deadline, failure.into())
         }
+    }
+}
+
+/// Ready frameを待ってStdin frame列を送り、終了まで出力を集める。
+/// 入力の一括書き込み後にstdinを閉じるため、kernelはUART bufferから順に引く。
+fn run_stdin_command(
+    mut command: Command,
+    command_line: String,
+    deadline: Duration,
+) -> Result<CompletedProcess, QemuError> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| QemuError::Spawn {
+            command: command_line.clone(),
+            error: error.to_string(),
+        })?;
+    let readers = LiveOutputReaders::start(&mut child);
+    let started = Instant::now();
+
+    if let Err(failure) =
+        wait_for_output(&mut child, &readers, PAYLOAD_READY_TEXT, started, deadline)
+    {
+        return finish_stdin_failure(child, readers, command_line, deadline, failure);
+    }
+
+    let write_result = child
+        .stdin
+        .take()
+        .expect("stdin test stdin must be piped")
+        .write_all(STDIN_TEST_FRAMES);
+    if let Err(error) = write_result {
+        let cleanup = terminate_and_reap(&mut child);
+        let mut output = readers.join().unwrap_or_else(|join_error| join_error);
+        if let Err(cleanup_error) = cleanup {
+            output.push_str("\nQEMU cleanup error: ");
+            output.push_str(&cleanup_error);
+        }
+        return Err(QemuError::Wait {
+            command: command_line,
+            error: format!("could not write stdin frames: {error}\n{output}"),
+        });
+    }
+
+    let remaining = deadline.saturating_sub(started.elapsed());
+    match wait_until_exit(&mut child, remaining) {
+        Ok(status) => {
+            let output = readers.join().map_err(|error| QemuError::Wait {
+                command: command_line.clone(),
+                error,
+            })?;
+            Ok(CompletedProcess { status, output })
+        }
+        Err(WaitFailure::TimedOut) => {
+            let cleanup = terminate_and_reap(&mut child);
+            let mut output = readers.join().unwrap_or_else(|error| error);
+            if let Err(cleanup_error) = cleanup {
+                output.push_str("\nQEMU cleanup error: ");
+                output.push_str(&cleanup_error);
+            }
+            Err(QemuError::TimedOut {
+                command: command_line,
+                deadline,
+                output,
+            })
+        }
+        Err(WaitFailure::Poll(error)) => {
+            let cleanup = terminate_and_reap(&mut child);
+            let output = readers.join().unwrap_or_else(|error| error);
+            let cleanup = cleanup
+                .err()
+                .map(|error| format!("; cleanup also failed: {error}"))
+                .unwrap_or_default();
+            Err(QemuError::Wait {
+                command: command_line,
+                error: format!("{error}{cleanup}\n{output}"),
+            })
+        }
+    }
+}
+
+fn finish_stdin_failure(
+    mut child: Child,
+    readers: LiveOutputReaders,
+    command: String,
+    deadline: Duration,
+    failure: ShellFailure,
+) -> Result<CompletedProcess, QemuError> {
+    let cleanup = terminate_and_reap(&mut child);
+    let mut output = readers.join().unwrap_or_else(|error| error);
+    if let Err(cleanup_error) = cleanup {
+        output.push_str("\nQEMU cleanup error: ");
+        output.push_str(&cleanup_error);
+    }
+    match failure {
+        ShellFailure::TimedOut => Err(QemuError::TimedOut {
+            command,
+            deadline,
+            output,
+        }),
+        ShellFailure::Poll(error) => Err(QemuError::Wait {
+            command,
+            error: format!("{error}\n{output}"),
+        }),
+        ShellFailure::Exited => Err(QemuError::MissingControlFrame {
+            command,
+            expected: "READY",
+            output,
+        }),
     }
 }
 
@@ -647,6 +783,36 @@ const PAYLOAD_ARGS_EXPECTED_FRAMES: [&[u8]; 6] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// payload-stdin検査で期待されるcontrol frame列 (Ready→echo→echo→Exit→cleanup)。
+const PAYLOAD_STDIN_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    STDIN_STDOUT_AB_FRAME,
+    STDIN_STDOUT_CDEF_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
+fn verify_payload_stdin_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &PAYLOAD_STDIN_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
 fn verify_payload_args_result(
     command: &str,
     status: Option<i32>,
@@ -743,6 +909,11 @@ impl PayloadBundle {
         Self::create_with(payload_args_bundle_bytes(&elf)?)
     }
 
+    fn create_stdin() -> Result<Self, QemuError> {
+        let elf = built_cat_elf_bytes()?;
+        Self::create_with(payload_stdin_bundle_bytes(&elf)?)
+    }
+
     fn create_with(bytes: Vec<u8>) -> Result<Self, QemuError> {
         let path = std::env::temp_dir().join(format!(
             "minios-payload-{}-{}.mcb",
@@ -810,6 +981,28 @@ fn built_guest_elf_bytes() -> Result<Vec<u8>, QemuError> {
 /// 手書きのargv loop ELFはRust guestと役割が重複するため、この経路では使わない。
 fn payload_args_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=hello\narg=alpha\narg=bravo\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// build済みstdin cat guestのELF bytesを読み込む。
+fn built_cat_elf_bytes() -> Result<Vec<u8>, QemuError> {
+    let elf_path =
+        crate::guest::build_guest_bin(crate::guest::GUEST_STDIN_CAT).map_err(|error| {
+            QemuError::Bundle {
+                stage: "guest build",
+                error: error.to_string(),
+            }
+        })?;
+    std::fs::read(&elf_path).map_err(|error| QemuError::Bundle {
+        stage: "guest ELF read",
+        error: format!("{}: {error}", elf_path.display()),
+    })
+}
+
+/// payload-stdin検査用bundle: cat guestのELFと引数なしmanifestを
+/// 正規のMiniBundleへ組み立てる。guestはstdinをechoしてexit(42)する。
+fn payload_stdin_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=stdin-cat\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 

@@ -33,6 +33,7 @@ pub enum TestFilter {
     UserExit,
     Payload,
     PayloadArgs,
+    PayloadStdin,
     Shell,
 }
 
@@ -49,7 +50,7 @@ pub fn help() -> &'static str {
   cargo xtask build\n\
   cargo xtask run\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]\n\
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|payload-stdin|shell]\n\
   cargo xtask check"
 }
 
@@ -91,6 +92,9 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         [command, test] if command == "test" && test == "payload-args" => {
             Ok(Command::Test(TestFilter::PayloadArgs))
+        }
+        [command, test] if command == "test" && test == "payload-stdin" => {
+            Ok(Command::Test(TestFilter::PayloadStdin))
         }
         [command, test] if command == "test" && test == "shell" => {
             Ok(Command::Test(TestFilter::Shell))
@@ -184,6 +188,7 @@ mod tests {
             (vec!["test", "user-exit"], TestFilter::UserExit),
             (vec!["test", "payload"], TestFilter::Payload),
             (vec!["test", "payload-args"], TestFilter::PayloadArgs),
+            (vec!["test", "payload-stdin"], TestFilter::PayloadStdin),
             (vec!["test", "shell"], TestFilter::Shell),
         ] {
             assert_eq!(parse(&owned(&args)), Ok(Command::Test(expected)));
@@ -208,7 +213,7 @@ mod tests {
             "cargo xtask build",
             "cargo xtask run",
             "cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]",
-            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]",
+            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|payload-stdin|shell]",
             "cargo xtask check",
         ] {
             assert!(help.contains(command), "missing help entry: {command}");

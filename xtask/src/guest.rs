@@ -4,6 +4,8 @@ use std::{fmt, path::PathBuf, process::Command};
 
 /// guest package名。ビルド成果物のbin名も同じである。
 pub const GUEST_PACKAGE: &str = "minios-guest";
+/// stdin転送sampleのbin名。
+pub const GUEST_STDIN_CAT: &str = "minios-guest-stdin-cat";
 /// guest build target。
 pub const GUEST_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// linker scriptが_startへ置くentry address (=USER_START)。
@@ -38,6 +40,11 @@ impl std::error::Error for GuestError {}
 
 /// guest binaryをrelease profileでbuildし、そのpathを返す。
 pub fn build_guest() -> Result<PathBuf, GuestError> {
+    build_guest_bin(GUEST_PACKAGE)
+}
+
+/// 指定binだけをrelease profileでbuildし、そのpathを返す。
+pub fn build_guest_bin(name: &str) -> Result<PathBuf, GuestError> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .current_dir(crate::workspace_root())
@@ -45,6 +52,8 @@ pub fn build_guest() -> Result<PathBuf, GuestError> {
             "build",
             "-p",
             GUEST_PACKAGE,
+            "--bin",
+            name,
             "--target",
             GUEST_TARGET,
             "--release",
@@ -66,7 +75,7 @@ pub fn build_guest() -> Result<PathBuf, GuestError> {
         .join("target")
         .join(GUEST_TARGET)
         .join("release")
-        .join(GUEST_PACKAGE))
+        .join(name))
 }
 
 /// テスト間で共有する、ビルド済みguest ELFのbytes。
