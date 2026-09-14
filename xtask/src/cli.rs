@@ -157,6 +157,7 @@ mod tests {
 
     #[test]
     fn parses_all_public_commands() {
+        assert_eq!(parse(&owned(&["setup"])), Ok(Command::Setup));
         assert_eq!(parse(&owned(&["build"])), Ok(Command::Build));
         assert_eq!(parse(&owned(&["run"])), Ok(Command::Run));
         assert_eq!(parse(&owned(&["test"])), Ok(Command::Test(TestFilter::All)));
@@ -190,34 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_setup_command() {
-        let args = vec!["setup".to_owned()];
-        assert_eq!(parse(&args), Ok(Command::Setup));
-    }
-
-    #[test]
-    fn parses_kernel_build_run_and_test_commands() {
-        assert_eq!(parse(&["build".to_owned()]), Ok(Command::Build));
-        assert_eq!(parse(&["run".to_owned()]), Ok(Command::Run));
-        assert_eq!(
-            parse(&["test".to_owned(), "boot".to_owned()]),
-            Ok(Command::Test(TestFilter::Boot))
-        );
-        assert_eq!(
-            parse(&["test".to_owned(), "timer".to_owned()]),
-            Ok(Command::Test(TestFilter::Timer))
-        );
-        assert_eq!(
-            parse(&["test".to_owned(), "trap".to_owned()]),
-            Ok(Command::Test(TestFilter::Trap))
-        );
-        assert_eq!(
-            parse(&["test".to_owned(), "memory".to_owned()]),
-            Ok(Command::Test(TestFilter::Memory))
-        );
-    }
-
-    #[test]
     fn rejects_unknown_command_with_helpful_name() {
         let args = vec!["unknown".to_owned()];
         assert_eq!(
@@ -240,14 +213,6 @@ mod tests {
         ] {
             assert!(help.contains(command), "missing help entry: {command}");
         }
-    }
-
-    #[test]
-    fn parses_shell_test_command() {
-        assert_eq!(
-            parse(&["test".to_owned(), "shell".to_owned()]),
-            Ok(Command::Test(TestFilter::Shell))
-        );
     }
 
     #[test]

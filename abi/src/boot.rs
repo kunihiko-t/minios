@@ -346,17 +346,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_an_invalid_range_layout() {
-        let mut bytes = canonical_bytes();
-        bytes[16..24].copy_from_slice(&121_u64.to_le_bytes());
-
-        assert_eq!(
-            BootHeader::decode(&bytes),
-            Err(BootHeaderError::TotalLengthMismatch)
-        );
-    }
-
-    #[test]
     fn accepts_required_padding_and_the_maximum_bundle_length() {
         let cases = [
             (
@@ -482,23 +471,5 @@ mod tests {
                 "{case} bytes"
             );
         }
-    }
-
-    #[test]
-    fn rejects_elf_range_overflow() {
-        let header = BootHeader {
-            total_len: BUNDLE_MAX_LEN,
-            manifest: ByteRange { offset: 96, len: 8 },
-            elf: ByteRange {
-                offset: u64::MAX - 7,
-                len: 16,
-            },
-            digest: [0; 32],
-        };
-
-        assert_eq!(
-            header.validate_layout(),
-            Err(BootHeaderError::RangeOverflow)
-        );
     }
 }

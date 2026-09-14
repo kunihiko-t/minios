@@ -63,6 +63,13 @@ impl From<qemu::QemuError> for XtaskError {
     }
 }
 
+pub(crate) fn workspace_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask must be in the workspace root")
+        .to_path_buf()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Format,
@@ -319,20 +326,18 @@ fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
     if let Some(args) = phase.cargo_args() {
         return cargo::run(args).map_err(XtaskError::Cargo);
     }
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask must be in the workspace root");
+    let workspace = workspace_root();
     match phase {
         Phase::DocsLinks => {
-            docs::check_local_links(workspace)?;
+            docs::check_local_links(&workspace)?;
             return Ok(String::new());
         }
         Phase::DocsGuideStructure => {
-            docs::check_guide_structure(workspace)?;
+            docs::check_guide_structure(&workspace)?;
             return Ok(String::new());
         }
         Phase::DocsPublicationFiles => {
-            docs::check_publication_files(workspace)?;
+            docs::check_publication_files(&workspace)?;
             return Ok(String::new());
         }
         _ => {}

@@ -599,7 +599,7 @@ impl OutputReaders {
     fn join(self) -> Result<String, String> {
         let stdout = join_reader(self.stdout)?;
         let stderr = join_reader(self.stderr)?;
-        Ok(combine_output(&stdout, &stderr))
+        Ok(crate::cargo::combine_output(&stdout, &stderr))
     }
 }
 
@@ -735,7 +735,7 @@ struct PayloadBundle {
 
 impl PayloadBundle {
     fn create() -> Result<Self, QemuError> {
-        Self::create_with(payload_bundle_bytes())
+        Self::create_with(payload_bundle_bytes()?)
     }
 
     fn create_args() -> Result<Self, QemuError> {
@@ -775,8 +775,19 @@ impl Drop for PayloadBundle {
 }
 
 /// kernelに渡す決定的なpayload MiniBundle (manifest "hello" + payload ELF)。
-fn payload_bundle_bytes() -> Vec<u8> {
-    bundle_bytes(b"version=1\nname=hello\n", &payload_elf_bytes())
+/// stderr frame経路を担い、正規builderで組み立てる。
+fn payload_bundle_bytes() -> Result<Vec<u8>, QemuError> {
+    assemble_test_bundle(b"version=1\nname=hello\n", &payload_elf_bytes())
+}
+
+/// QEMU検査用bundleを正規builderで組み立てる。手書きのheader組立は持たない。
+fn assemble_test_bundle(manifest: &[u8], elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    crate::bundle::build_bundle(manifest, elf)
+        .map(|bundle| bundle.bytes().to_vec())
+        .map_err(|error| QemuError::Bundle {
+            stage: "bundle layout",
+            error: error.to_string(),
+        })
 }
 
 /// build済みRust guestのELF bytesを読み込む。
@@ -799,42 +810,7 @@ fn built_guest_elf_bytes() -> Result<Vec<u8>, QemuError> {
 /// 手書きのargv loop ELFはRust guestと役割が重複するため、この経路では使わない。
 fn payload_args_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=hello\narg=alpha\narg=bravo\n";
-    crate::bundle::build_bundle(MANIFEST, elf)
-        .map(|bundle| bundle.bytes().to_vec())
-        .map_err(|error| QemuError::Bundle {
-            stage: "bundle layout",
-            error: error.to_string(),
-        })
-}
-
-fn bundle_bytes(manifest: &[u8], elf: &[u8]) -> Vec<u8> {
-    let manifest_end = 96 + manifest.len();
-    let padding_len = (8 - manifest_end % 8) % 8;
-    let elf_offset = manifest_end + padding_len;
-    let total_len = elf_offset + elf.len();
-
-    let mut header = [0u8; 96];
-    header[0..8].copy_from_slice(b"MINICTR\0");
-    header[8..10].copy_from_slice(&1u16.to_le_bytes());
-    header[12..14].copy_from_slice(&96u16.to_le_bytes());
-    header[16..24].copy_from_slice(&(total_len as u64).to_le_bytes());
-    header[24..32].copy_from_slice(&(96u64).to_le_bytes());
-    header[32..40].copy_from_slice(&(manifest.len() as u64).to_le_bytes());
-    header[40..48].copy_from_slice(&(elf_offset as u64).to_le_bytes());
-    header[48..56].copy_from_slice(&(elf.len() as u64).to_le_bytes());
-
-    let mut bytes = vec![0u8; total_len];
-    bytes[..96].copy_from_slice(&header);
-    bytes[96..manifest_end].copy_from_slice(manifest);
-    bytes[elf_offset..].copy_from_slice(elf);
-    // digest = SHA-256(digest fieldを0にしたheader || header以降の可変bytes)。
-    let mut digest_input = Vec::with_capacity(96 + total_len - 96);
-    let mut zeroed_header = header;
-    zeroed_header[56..88].fill(0);
-    digest_input.extend_from_slice(&zeroed_header);
-    digest_input.extend_from_slice(&bytes[96..]);
-    bytes[56..88].copy_from_slice(&sha256(&digest_input));
-    bytes
+    assemble_test_bundle(MANIFEST, elf)
 }
 
 /// payload ELF: stdout "MK6"、stderr "MK6"、exit(42)を順に発行するだけの
@@ -902,12 +878,6 @@ fn payload_elf_bytes() -> Vec<u8> {
     bytes[header + 48..header + 56].copy_from_slice(&0x1000u64.to_le_bytes());
     bytes[0x1000..].copy_from_slice(&code_bytes);
     bytes
-}
-
-/// payload fixtureのdigestはbundle生成と同一のSHA-256で計算する。
-/// 実装は`bundle`側に一本化し、ここでは呼び出しだけを残す。
-fn sha256(message: &[u8]) -> [u8; 32] {
-    crate::bundle::sha256(message)
 }
 
 fn qemu_command(kernel: &Path) -> (Command, String) {
@@ -1177,12 +1147,6 @@ fn line_has_memory_stats(line: &str) -> bool {
     [total, allocated, free]
         .into_iter()
         .all(|value| !value.is_empty() && value.parse::<usize>().is_ok())
-}
-
-fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut output = String::from_utf8_lossy(stdout).into_owned();
-    output.push_str(&String::from_utf8_lossy(stderr));
-    output
 }
 
 #[cfg(test)]
@@ -1691,7 +1655,7 @@ mod tests {
     // digest drifts from the canonical layout the kernel parser validates.
     #[test]
     fn payload_bundle_is_canonical_and_self_consistent() {
-        let bundle = payload_bundle_bytes();
+        let bundle = payload_bundle_bytes().expect("fixture bundle must build");
         assert_eq!(&bundle[0..8], b"MINICTR\0");
         assert_eq!(&bundle[8..10], &1u16.to_le_bytes());
         let total_len = u64::from_le_bytes(bundle[16..24].try_into().unwrap());
@@ -1717,7 +1681,7 @@ mod tests {
         zeroed[56..88].fill(0);
         digest_input.extend_from_slice(&zeroed);
         digest_input.extend_from_slice(&bundle[96..]);
-        assert_eq!(&bundle[56..88], &sha256(&digest_input)[..]);
+        assert_eq!(&bundle[56..88], &crate::bundle::sha256(&digest_input)[..]);
     }
 
     // Catches a payload ELF that stops emitting stdout/stderr/exit or changes

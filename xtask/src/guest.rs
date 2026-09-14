@@ -1,6 +1,6 @@
 //! Rust guest (`minios-guest`) のビルドと、kernel ELF loader契約のhost検査。
 
-use std::{fmt, path::Path, path::PathBuf, process::Command};
+use std::{fmt, path::PathBuf, process::Command};
 
 /// guest package名。ビルド成果物のbin名も同じである。
 pub const GUEST_PACKAGE: &str = "minios-guest";
@@ -36,18 +36,11 @@ impl fmt::Display for GuestError {
 
 impl std::error::Error for GuestError {}
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask must be in the workspace root")
-        .to_path_buf()
-}
-
 /// guest binaryをrelease profileでbuildし、そのpathを返す。
 pub fn build_guest() -> Result<PathBuf, GuestError> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
-        .current_dir(workspace_root())
+        .current_dir(crate::workspace_root())
         .args([
             "build",
             "-p",
@@ -69,7 +62,7 @@ pub fn build_guest() -> Result<PathBuf, GuestError> {
             ),
         });
     }
-    Ok(workspace_root()
+    Ok(crate::workspace_root()
         .join("target")
         .join(GUEST_TARGET)
         .join("release")
