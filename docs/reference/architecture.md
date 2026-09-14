@@ -155,5 +155,6 @@ U-modeの`ecall`は`sscratch`によるstack交換を通り、`write`または`ex
 
 この経路はOpenSBI、Sv39、タイマー、物理ページ管理、U-modeを使いません。
 RV64の仕組みをそのまま縮小した構成ではなく、UARTとシェルの境界を実機へ移植するための入口です。
+アプリケーション実行方式の検討記録は[NEORV32でアプリケーションを動かす方式の検討](neorv32-applications.md)にあります。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

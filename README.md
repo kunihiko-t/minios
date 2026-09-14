@@ -102,6 +102,7 @@ RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`comman
 - [全体構成と起動段階](docs/reference/architecture.md)
 - [QEMU `virt`のメモリーマップ](docs/reference/memory-map.md)
 - [MiniContainer Guest ABI](docs/reference/minicontainer-abi.md)
+- [NEORV32でアプリケーションを動かす方式の検討](docs/reference/neorv32-applications.md)
 - [用語集](docs/reference/glossary.md)
 - [問題の切り分け方](docs/reference/troubleshooting.md)
 - [発展ロードマップ](docs/reference/roadmap.md)
