@@ -80,8 +80,9 @@ pub fn build_guest() -> Result<PathBuf, GuestError> {
 ///
 /// 並行testがそれぞれcargoを起動して同じ成果物を競合させないよう、
 /// 一度だけbuildして読み込んだ中身をprocess全体で共有する。
+/// bundle検査も同じ実体を使い、guestの再buildを避ける。
 #[cfg(test)]
-fn guest_bytes() -> &'static [u8] {
+pub(crate) fn guest_bytes() -> &'static [u8] {
     use std::sync::OnceLock;
     static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
     BYTES.get_or_init(|| {
