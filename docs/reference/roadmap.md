@@ -39,6 +39,11 @@ M-modeの入口がIMEMに置かれた`.data`初期値をDMEMへコピーし、BS
 NEORV32実機経路はkernel shellまでに限定し、U-mode guestは対象外とします。
 検討記録は[NEORV32でアプリケーションを動かす方式の検討](neorv32-applications.md)にあります。
 
+NEORV32向けread-only storageの節目も完了しています。
+GPIO-SPI経由のSD sector readerとFAT32 parserをRV32 shellの`ls`と`cat`から使い、host testでprotocolと配置を検証します。
+RV32IMEM契約は実効32 KiBへ更新し、RV32 buildは`opt-level=z`で収めます。
+設計は[NEORV32 read-only FAT32設計](sd-fat32.md)にあります。
+
 ## 次
 
 Device TreeはRAM、UART、timebaseの固定値をmachine記述へ置き換えるときに導入します。

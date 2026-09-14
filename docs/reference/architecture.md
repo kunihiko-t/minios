@@ -151,10 +151,20 @@ U-modeの`ecall`は`sscratch`によるstack交換を通り、`write`または`ex
 1. FPGAのブート機構が、カーネルのロードイメージを内蔵IMEMへ配置して`pc=0`から実行します。
 2. RV32の`_start`がDMEM上端へスタックを置き、`.data`をIMEMからDMEMへコピーしてBSSをゼロ化します。
 3. `kernel_main32`が96 MHzと19,200 baudの前提でUART0を初期化し、起動メッセージを出します。
-4. 固定長の入力バッファーを使うシェルが`help`、`info`、`echo`を処理します。
+4. 固定長の入力バッファーを使うシェルが`help`、`info`、`echo`、`ls`、`cat`を処理します。
 
 この経路はOpenSBI、Sv39、タイマー、物理ページ管理、U-modeを使いません。
 RV64の仕組みをそのまま縮小した構成ではなく、UARTとシェルの境界を実機へ移植するための入口です。
 アプリケーション実行方式の検討記録は[NEORV32でアプリケーションを動かす方式の検討](neorv32-applications.md)にあります。
+
+## NEORV32 read-only storage
+
+- `storage/sd.rs`：SDHCとSDXC専用のread-only SPI driverであり、CMD17によるsector読み取りとCRC16検証を行います。
+- `storage/fat32.rs`：read-only FAT32 parserであり、partition選択、BPB検証、root directory反復、8.3名lookupを行います。
+- `drivers/neorv32_sd.rs`：GPIO bit-bangのSPI busであり、`rdcycle`基準のdelayで初期化時375 kHz以下を保ちます。
+- `shell`の`ls`と`cat`：単一sessionを使い回し、型付きerrorを`sd:`接頭辞の安定messageへ写像します。
+
+IMEM契約は実効32 KiBであり、RV32 buildは`opt-level=z`で収めます。
+詳細は[NEORV32 read-only FAT32設計](sd-fat32.md)を参照してください。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

@@ -16,16 +16,15 @@ pub struct Neorv32SdBus {
 impl Neorv32SdBus {
     pub fn new() -> Self {
         let bus = Self { output: GPIO_MOSI };
-        // Drive the deselected, idle SPI state before SD initialization's
-        // first delay, rather than leaving GPIO state undefined during it.
+        // SD初期化の最初のdelayより前にdeselect済みidle状態を出しておき、
+        // delay中のGPIO不定をなくす。
         bus.write();
         bus
     }
 
     fn write(&self) {
-        // Safety: NEORV32 GPIO output is the word at GPIO_BASE + 4. The fixed
-        // address is valid only for the RV32 NEORV32 target where this module
-        // is compiled.
+        // Safety: NEORV32のGPIO出力はGPIO_BASE + 4のwordである。このmoduleが
+        // compileされるRV32 NEORV32 targetでのみ有効な固定addressである。
         unsafe { core::ptr::write_volatile((GPIO_BASE + 4) as *mut u32, self.output) };
     }
 }
@@ -57,7 +56,7 @@ impl Bus for Neorv32SdBus {
             self.output |= GPIO_SCK;
             self.write();
             delay_cycles(HALF_CYCLE);
-            // Safety: GPIO_BASE is the NEORV32 GPIO input register on RV32.
+            // Safety: GPIO_BASEはRV32上のNEORV32 GPIO入力registerである。
             let input = unsafe { core::ptr::read_volatile(GPIO_BASE as *const u32) };
             rx = (rx << 1) | ((input & GPIO_MISO != 0) as u8);
         }
@@ -75,8 +74,8 @@ impl Bus for Neorv32SdBus {
 
 fn cycles() -> u32 {
     let value;
-    // Safety: `rdcycle` is available in the NEORV32 RV32IM execution mode and
-    // does not access memory or the stack.
+    // Safety: `rdcycle`はNEORV32 RV32IM実行modeで利用でき、
+    // memoryとstackに触れない。
     unsafe { core::arch::asm!("rdcycle {0}", out(reg) value, options(nomem, nostack)) };
     value
 }

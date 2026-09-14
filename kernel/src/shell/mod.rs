@@ -14,6 +14,8 @@ const INPUT_CAPACITY: usize = 128;
 #[cfg(target_arch = "riscv32")]
 const INPUT_CAPACITY: usize = 128;
 
+/// RV32 shellが保持する単一のSD/FAT32 session。初回の`ls`/`cat`でmountし、
+/// 以降は作り直さず使い回す。heapもcacheも持たない。
 #[cfg(target_arch = "riscv32")]
 type Rv32Storage = crate::storage::fat32::Fat32<
     crate::storage::sd::SdCard<crate::drivers::neorv32_sd::Neorv32SdBus>,

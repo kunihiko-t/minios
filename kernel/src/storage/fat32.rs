@@ -1,5 +1,7 @@
 use super::SectorReader;
 
+// read-only FAT32 parser。BPBとFATの値はaddress計算の前にすべて検証し、
+// checked演算とdata cluster数上限でvolume外参照と無限loopを防ぐ。
 #[derive(Debug, PartialEq, Eq)]
 pub enum FatError<E> {
     Read(E),
@@ -22,6 +24,7 @@ pub struct DirEntry {
 
 impl DirEntry {
     pub fn name(&self) -> &str {
+        // parse時に0x21..=0x7eと'.'だけへ正規化済みのため、UTF-8変換は失敗しない。
         core::str::from_utf8(&self.name[..self.name_len as usize]).expect("validated FAT name")
     }
 
@@ -34,8 +37,6 @@ impl DirEntry {
     }
 }
 
-// Task 3 consumes the retained reader and geometry for FAT traversal.
-#[allow(dead_code)]
 pub struct Fat32<R> {
     reader: R,
     partition_start: u32,
