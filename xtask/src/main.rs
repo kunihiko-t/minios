@@ -18,5 +18,8 @@ fn error_message(error: &cli::CliError) -> String {
         cli::CliError::UnknownCommand(command) => {
             format!("unknown xtask command: {command}\n\n{}", cli::help())
         }
+        cli::CliError::InvalidBundleOptions(detail) => {
+            format!("invalid bundle options: {detail}\n\n{}", cli::help())
+        }
     }
 }

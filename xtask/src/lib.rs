@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod cargo;
 pub mod cli;
 pub mod docs;
@@ -11,6 +12,7 @@ use cli::{Command, TestFilter};
 
 #[derive(Debug)]
 pub enum XtaskError {
+    Bundle(bundle::BundleError),
     Cargo(cargo::CargoError),
     Docs(docs::DocsError),
     Qemu(qemu::QemuError),
@@ -20,6 +22,7 @@ pub enum XtaskError {
 impl fmt::Display for XtaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Bundle(error) => error.fmt(formatter),
             Self::Cargo(error) => error.fmt(formatter),
             Self::Docs(error) => error.fmt(formatter),
             Self::Qemu(error) => error.fmt(formatter),
@@ -29,6 +32,12 @@ impl fmt::Display for XtaskError {
 }
 
 impl std::error::Error for XtaskError {}
+
+impl From<bundle::BundleError> for XtaskError {
+    fn from(error: bundle::BundleError) -> Self {
+        Self::Bundle(error)
+    }
+}
 
 impl From<tools::ToolError> for XtaskError {
     fn from(error: tools::ToolError) -> Self {
@@ -362,7 +371,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         }
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
         Command::Check => Some(check_phases()),
-        Command::Setup | Command::Build | Command::Run => None,
+        Command::Setup | Command::Build | Command::Run | Command::Bundle(_) => None,
     }
 }
 
@@ -376,9 +385,34 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
             cargo::build_kernel(false)?;
         }
         Command::Run => qemu::run_kernel()?,
+        Command::Bundle(options) => {
+            let request = bundle::BundleRequest {
+                name: options.name,
+                args: options.args,
+                output: options.output,
+            };
+            let product = bundle::create_bundle_file(&request)?;
+            println!(
+                "wrote {} ({} bytes, name={}, args={}, sha256={})",
+                product.path.display(),
+                product.total_len,
+                product.name,
+                product.arguments,
+                hex_digest(&product.digest),
+            );
+        }
         Command::Test(_) | Command::Check => unreachable!("phase commands returned above"),
     }
     Ok(())
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 #[cfg(test)]
