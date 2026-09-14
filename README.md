@@ -117,7 +117,7 @@ RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`comman
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの13経路を28段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの14経路を29段階で検査します。
 
 ## 現在の制約
 

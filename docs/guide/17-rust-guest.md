@@ -5,6 +5,7 @@
 `no_std`と`no_main`のRustプログラムが、静的なRV64 ELFとしてbuildされる流れを説明できるようになります。
 guest専用linker scriptの配置契約と、`_start`から`argc/argv`を受け取る起動規約を追います。
 `write`と`exit`の呼び出し規約、panic時の終了経路を確認します。
+`read`によるstdin転送と、EOFまでのechoを繰り返す第二のguestを確認します。
 `cargo xtask bundle`によるMiniBundle生成と、QEMUでのend-to-end実行を確認します。
 
 ## 背景
@@ -42,6 +43,12 @@ system callは[`minios_abi::syscall`](../../abi/src/syscall.rs)の番号に従�
 `sys_write`は`a0=fd`（引数兼戻り値）、`a1=pointer`、`a2=len`、`a7=1`で`ecall`し、書いたbyte数か負のerrnoを受けます。
 `sys_exit`は`a0=code`、`a7=2`で`ecall`し、kernelがguestへ戻らない契約のため`noreturn`です。
 panic handlerと`write`失敗時は終了code70で`exit`し、沈黙した停止や未定義の継続を作りません。
+
+第二のguestは[`guest/src/bin/stdin_cat.rs`](../../guest/src/bin/stdin_cat.rs)にあります。
+`sys_read`は`a0=0`（`STDIN`）、`a1=pointer`、`a2=len`、`a7=3`で`ecall`し、読んだbyte数、EOFの0、負のerrnoを受けます。
+`guest_main`はstack上の512 byte bufferへ`read`し、読んだ分だけ`write`するloopをEOFまで繰り返してから終了code42で`exit`します。
+frame境界と要求長は一致しなくてよく、kernelがframe内の残りを次の`read`へ繰り越します。
+`read`失敗時も終了code70で`exit`します。
 
 [`xtask/src/guest.rs`](../../xtask/src/guest.rs)の`build_guest`は、`riscv64gc-unknown-none-elf`向けにrelease buildします。
 host testはbuild済みELFをkernelの[`ElfImage`](../../kernel/src/elf/header.rs)と[`LoadPlan`](../../kernel/src/elf/plan.rs)で検査します。
@@ -89,6 +96,19 @@ host harnessはReady、stdout（`hello`、`alpha`、`bravo`の順）、Exit（co
 `hello`はmanifestの`name`、`alpha`と`bravo`は`arg=`行であり、guestが`argc/argv`から読んだ順序どおりです。
 timeout時はQEMU childをkillしてwaitし、受信済み出力を診断へ残します。
 
+stdin転送のend-to-end実行は次のコマンドです。
+
+```console
+$ cargo xtask test payload-stdin
+...
+MiniOS payload: ok code=42
+...
+summary: PASSED all 1 phases (elapsed: ...)
+```
+
+host harnessはReadyを待ってから`ab`、`cdef`、EOFの`STDIN` frame列を送り、Ready、stdout（`ab`、`cdef`の順）、Exit（code 42）、回収diagnosticの完全なframe列を検証します。
+cat guestの要求512 byteに対し、kernelは届いたframe分だけを返し、残りを次の`read`へ繰り越します。
+
 host側の配置検査は次のコマンドで実行します。
 
 ```sh
@@ -103,6 +123,7 @@ cargo test -p xtask --locked bundle
 - 初期stackの上位を書き換える：argv文字列は`sp`より上位の読み取り専用初期データであり、以降のstack使用は`sp`より下位へ行います。
 - manifestの`name`に空白を入れる：文字種違反のため、`InvalidName`を報告してbundle生成が失敗します。
 - guestにstderr出力を期待する：guestはstdoutだけを書き、stderr frame経路はMK6 payload testが担います。
+- EOFを送らずに`read`の完了を待つ：`read`はbyteかEOFが届くまで待機するため、入力の末尾には長さ0の`STDIN` frameを送ります。
 - NEORV32でguestを実行しようとする：実機経路はRV32IMのM-mode kernel shell専用であり、RV64 guestはQEMU `virt`でのみ実行します。
 - bundleのbyte数やdigestを固定値として記録する：toolchainで変わるため、検証はABI decoderとframe順序で行います。
 
