@@ -212,6 +212,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::UserExit) => "QEMU user-exit test".to_owned(),
             Self::Qemu(qemu::TestKind::Payload) => "QEMU payload test".to_owned(),
             Self::Qemu(qemu::TestKind::PayloadArgs) => "QEMU payload-args test".to_owned(),
+            Self::Qemu(qemu::TestKind::PayloadStdin) => "QEMU payload-stdin test".to_owned(),
             Self::Qemu(qemu::TestKind::Shell) => "QEMU shell test".to_owned(),
             _ => unreachable!("Cargo phases returned above"),
         }
@@ -234,6 +235,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserExit),
         Phase::Qemu(qemu::TestKind::Payload),
         Phase::Qemu(qemu::TestKind::PayloadArgs),
+        Phase::Qemu(qemu::TestKind::PayloadStdin),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -267,6 +269,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserExit),
         Phase::Qemu(qemu::TestKind::Payload),
         Phase::Qemu(qemu::TestKind::PayloadArgs),
+        Phase::Qemu(qemu::TestKind::PayloadStdin),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -375,6 +378,9 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::PayloadArgs) => {
             Some(vec![Phase::Qemu(qemu::TestKind::PayloadArgs)])
         }
+        Command::Test(TestFilter::PayloadStdin) => {
+            Some(vec![Phase::Qemu(qemu::TestKind::PayloadStdin)])
+        }
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
         Command::Check => Some(check_phases()),
         Command::Setup | Command::Build | Command::Run | Command::Bundle(_) => None,
@@ -444,6 +450,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::UserExit),
                 Phase::Qemu(qemu::TestKind::Payload),
                 Phase::Qemu(qemu::TestKind::PayloadArgs),
+                Phase::Qemu(qemu::TestKind::PayloadStdin),
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
@@ -499,6 +506,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserExit),
             Phase::Qemu(qemu::TestKind::Payload),
             Phase::Qemu(qemu::TestKind::PayloadArgs),
+            Phase::Qemu(qemu::TestKind::PayloadStdin),
             Phase::Qemu(qemu::TestKind::Shell),
         ];
         assert_eq!(check_phases(), expected);
@@ -547,10 +555,11 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserExit),
             Phase::Qemu(qemu::TestKind::Payload),
             Phase::Qemu(qemu::TestKind::PayloadArgs),
+            Phase::Qemu(qemu::TestKind::PayloadStdin),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 13], expected);
-        assert_eq!(plan.len(), 28);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 14], expected);
+        assert_eq!(plan.len(), 29);
     }
 
     #[test]
@@ -586,6 +595,10 @@ mod tests {
         assert_eq!(
             phase_plan_for(&Command::Test(TestFilter::PayloadArgs)),
             Some(vec![Phase::Qemu(qemu::TestKind::PayloadArgs)])
+        );
+        assert_eq!(
+            phase_plan_for(&Command::Test(TestFilter::PayloadStdin)),
+            Some(vec![Phase::Qemu(qemu::TestKind::PayloadStdin)])
         );
         assert_eq!(Phase::Qemu(qemu::TestKind::Vm).command(), "QEMU VM test");
         assert_eq!(Phase::Qemu(qemu::TestKind::Elf).command(), "QEMU ELF test");
