@@ -61,7 +61,7 @@ U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類さ
 各processの終了は`PROC_EXIT` frameで個別に通知され、slotを取り除いて全所有frameを回収します。
 `cargo xtask test sched`は、busy-waitするprocessの出力の間に短命processの出力が挟まることと、切り替え回数の報告をQEMU上で確認します。
 `read`は入力未到着ならprocessを`BlockedOnStdin`へ回してecallをやり直すため、stdin待ちの間も他processが進みます（`cargo xtask test sched-io`で検証）。
-残る制限として、Stdin frameの途中受信だけはtrap内の同期pollingです。
+Stdin frameの受信は`StdinStaging`の再開可能なdecoderが担い、frame途中のbyte枯渇でもprocessは再びstdin待ちへ戻ります（`cargo xtask test sched-io-partial`で検証）。
 
 ## 次
 

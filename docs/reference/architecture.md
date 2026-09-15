@@ -108,7 +108,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   manifest v2では終了を`PROC_EXIT` frame（pidと終了code）で個別に通知し、v1の単一imageでは従来の`EXIT` frameを維持します。
 - `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
   processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
-  残る制限として、Stdin frameの途中受信（headerやpayloadのbyte待ち）はtrap内の同期pollingであり、その間だけ他processが進みません。
+  Stdin frameの受信は`StdinStaging`内の再開可能なdecoderがbyte単位で蓄積し、frame途中でbyteが尽きた再試行は`WouldBlock`として再び`Blocked`へ戻るため、受信途中の間も他processが進み続けます。
 
 ### シェル
 

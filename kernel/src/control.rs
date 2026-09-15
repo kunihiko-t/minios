@@ -27,12 +27,18 @@ impl ByteReader for UartBytes {
     fn read_byte(&mut self) -> u8 {
         crate::console::read_byte()
     }
+
+    fn try_read_byte(&mut self) -> Option<u8> {
+        // 受信FIFOを空見てから読むため、この経路は決して受信待ちで停まらない。
+        crate::console::stdin_pending().then(crate::console::read_byte)
+    }
 }
 
-/// `dispatch_syscall`へ渡すUART source。Stdin frameをblocking readで引く。
+/// `dispatch_syscall`へ渡すUART source。Stdin frameをnon-blockingな
+/// `try_read_byte`で引き、frame途中でbyteが尽きた場合もstagingの再開可能な
+/// stateが保持される。`WouldBlock`は`Ok(None)`へ写像し、`dispatch_read`が
+/// `Blocked`へ変換してprocessをstdin待ちへ回す。
 /// stagingはrun単位のstaticが所有し、trapごとに借りて渡す。
-/// `stdin_ready`で先に受信可否を確認するため、未到着時の無限待ちは
-/// `dispatch_read`が`Blocked`へ変換し、frameの途中受信だけが待ち得る。
 pub struct UartControlSource<'a> {
     staging: &'a mut StdinStaging,
 }
@@ -46,12 +52,12 @@ impl<'a> UartControlSource<'a> {
 impl ControlSource for UartControlSource<'_> {
     type Error = StdinError;
 
-    fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
-        self.staging.read(&mut UartBytes, output)
-    }
-
-    fn stdin_ready(&mut self) -> bool {
-        self.staging.has_pending() || self.staging.is_eof() || crate::console::stdin_pending()
+    fn read_stdin(&mut self, output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+        match self.staging.read(&mut UartBytes, output) {
+            Ok(count) => Ok(Some(count)),
+            Err(StdinError::WouldBlock) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
