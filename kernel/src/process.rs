@@ -59,6 +59,16 @@ impl<const N: usize, E> fmt::Debug for SpawnFailure<'_, N, E> {
     }
 }
 
+/// processの実行可能状態。占有slotはすべて生きているprocessであり、
+/// 終了したprocessは`take`でslotから除かれる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    /// 次のdispatchを受け付けられる。
+    Runnable,
+    /// `read`が入力待ちで中断した。stdinへbyteが届くと`Runnable`へ戻る。
+    BlockedOnStdin,
+}
+
 /// 再入可能なuser process。image (user address spaceとその所有frame)、
 /// 専用kernel trap stack、前回中断時の`UserContext`を所有する。
 ///
@@ -73,6 +83,7 @@ pub struct Process<'storage, const N: usize> {
     kernel_stack_bottom: usize,
     user_satp: u64,
     context: UserContext,
+    state: ProcessState,
 }
 
 impl<const N: usize> fmt::Debug for Process<'_, N> {
@@ -178,11 +189,26 @@ impl<'storage, const N: usize> Process<'storage, N> {
             kernel_stack_bottom: stack_bottom.expect("kernel stack has at least one page"),
             user_satp,
             context,
+            state: ProcessState::Runnable,
         })
     }
 
     pub const fn name(&self) -> &'static str {
         self.name
+    }
+
+    /// stdin待ちへ移す。`dispatch`が`Blocked`を返した直後に呼ぶ。
+    pub fn block_on_stdin(&mut self) {
+        self.state = ProcessState::BlockedOnStdin;
+    }
+
+    /// stdinへのbyte到着で再びdispatch可能にする。
+    pub fn wake(&mut self) {
+        self.state = ProcessState::Runnable;
+    }
+
+    pub const fn is_runnable(&self) -> bool {
+        matches!(self.state, ProcessState::Runnable)
     }
 
     pub const fn address_space(&self) -> &AddressSpace<'storage, N> {
@@ -343,18 +369,28 @@ impl<'storage, const N: usize> ProcessTable<'storage, N> {
         self.slots.get_mut(pid).and_then(|slot| slot.take())
     }
 
-    /// 前回dispatchしたpidの次から時計回りに走査し、最初の占有slotのpidを
-    /// 返す。全slotが空なら`None`。占有slotはすべてrunnableであり、退出した
-    /// processは`take`で取り除くため状態列は持たない。
+    /// 前回dispatchしたpidの次から時計回りに走査し、最初のrunnable slotの
+    /// pidを返す。全slotが空か、占有slotがすべてblockedなら`None`を返す。
+    /// 退出したprocessは`take`で取り除く。
     pub fn pick_next(&mut self) -> Option<usize> {
         for offset in 0..MAX_PROCS {
             let pid = (self.next_hint + offset) % MAX_PROCS;
-            if self.slots[pid].is_some() {
+            if self.slots[pid].as_ref().is_some_and(Process::is_runnable) {
                 self.next_hint = (pid + 1) % MAX_PROCS;
                 return Some(pid);
             }
         }
         None
+    }
+
+    /// 占有slotがありながら`pick_next`が`None`＝全processがstdin待ち。
+    /// stdinへbyteが届いたら呼び、blocked processをすべてrunnableへ戻す。
+    pub fn wake_all_blocked(&mut self) {
+        for slot in self.slots.iter_mut().flatten() {
+            if !slot.is_runnable() {
+                slot.wake();
+            }
+        }
     }
 }
 
@@ -670,5 +706,47 @@ mod tests {
 
         assert!(table.is_empty());
         assert_eq!(table.pick_next(), None);
+    }
+
+    // Catches the scheduler dispatching a stdin-blocked process, or failing
+    // to wake it when input arrives: blocked slots must be skipped by
+    // pick_next, and wake_all_blocked must return them to the rotation.
+    #[test]
+    fn blocked_slots_are_skipped_and_woken() {
+        let mut fixture = SpawnFixture::new();
+        let mut storages = [const { AddressSpaceStorage::<64>::new() }; 2];
+        let [s0, s1] = storages.each_mut();
+        let mut table = ProcessTable::<64>::new();
+
+        let p0 = fixture.spawn(s0, "p0");
+        let p1 = fixture.spawn(s1, "p1");
+        table.insert(p0).expect("insert p0");
+        table.insert(p1).expect("insert p1");
+
+        table.get_mut(0).expect("slot 0 is live").block_on_stdin();
+
+        let sequence: Vec<usize> = (0..3).map(|_| table.pick_next().unwrap()).collect();
+        assert_eq!(sequence, [1, 1, 1]);
+
+        table.wake_all_blocked();
+        let sequence: Vec<usize> = (0..4).map(|_| table.pick_next().unwrap()).collect();
+        assert_eq!(sequence, [0, 1, 0, 1]);
+    }
+
+    // Catches the all-blocked case collapsing into an empty-table verdict:
+    // with live but blocked slots the table must stay non-empty so the
+    // scheduler can distinguish "wait for stdin" from "all exited".
+    #[test]
+    fn all_blocked_slots_still_report_live() {
+        let mut fixture = SpawnFixture::new();
+        let mut storage = AddressSpaceStorage::<64>::new();
+        let mut table = ProcessTable::<64>::new();
+
+        let p0 = fixture.spawn(&mut storage, "p0");
+        table.insert(p0).expect("insert p0");
+        table.get_mut(0).expect("slot 0 is live").block_on_stdin();
+
+        assert_eq!(table.pick_next(), None);
+        assert!(!table.is_empty());
     }
 }

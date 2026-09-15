@@ -32,7 +32,9 @@ headerの`total_len`が予約windowを超えないことを確認してから、
 `Process`はuser address space、4ページのkernel trap stack、中断時の`UserContext`を所有し、allocatorやframe memoryへの参照はdispatchのたびに呼び出し側が渡します。
 processごとのaddress space所有権は、最大4個の静的な`AddressSpaceStorage` arenaが担います。
 U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類され、handlerが次のtickを再アームしてkernelへ戻ると、`ProcessTable`が前回pidの次から時計回りに次のprocessを選びます。
-既知の制限として、`read`はsyscall handler内でUARTを同期pollingするため、blockしたprocessの間は他processも進みません。
+`read`は入力未到着のとき`Blocked`としてkernelへ戻り、processはstdin待ちで再選対象から外れます。
+入力が届くとecallがやり直されて完了するため、block中も他processが進みます。
+残る制限として、Stdin frameの途中受信（headerやpayloadのbyte待ち）はtrap内で同期pollingするため、その間だけ他processが進みません。
 
 [`qemu_command_with_payload`](../../xtask/src/qemu.rs)は一時MiniBundleをQEMUの`-device loader`へ渡します。
 loader argumentは`addr=0x87800000,force-raw=on`を指定し、kernelが検証する予約windowの先頭へraw byteを置きます。

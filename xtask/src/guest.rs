@@ -10,6 +10,8 @@ pub const GUEST_STDIN_CAT: &str = "minios-guest-stdin-cat";
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 /// scheduler検証の短命側bin名。
 pub const GUEST_SCHED_B: &str = "minios-guest-sched-b";
+/// scheduler検証のstdin待ち側bin名。
+pub const GUEST_SCHED_R: &str = "minios-guest-sched-r";
 /// guest build target。
 pub const GUEST_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// linker scriptが_startへ置くentry address (=USER_START)。

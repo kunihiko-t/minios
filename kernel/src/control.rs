@@ -31,6 +31,8 @@ impl ByteReader for UartBytes {
 
 /// `dispatch_syscall`へ渡すUART source。Stdin frameをblocking readで引く。
 /// stagingはrun単位のstaticが所有し、trapごとに借りて渡す。
+/// `stdin_ready`で先に受信可否を確認するため、未到着時の無限待ちは
+/// `dispatch_read`が`Blocked`へ変換し、frameの途中受信だけが待ち得る。
 pub struct UartControlSource<'a> {
     staging: &'a mut StdinStaging,
 }
@@ -46,6 +48,10 @@ impl ControlSource for UartControlSource<'_> {
 
     fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
         self.staging.read(&mut UartBytes, output)
+    }
+
+    fn stdin_ready(&mut self) -> bool {
+        self.staging.has_pending() || self.staging.is_eof() || crate::console::stdin_pending()
     }
 }
 
