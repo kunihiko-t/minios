@@ -6,6 +6,10 @@ use std::{fmt, path::PathBuf, process::Command};
 pub const GUEST_PACKAGE: &str = "minios-guest";
 /// stdin転送sampleのbin名。
 pub const GUEST_STDIN_CAT: &str = "minios-guest-stdin-cat";
+/// scheduler検証のCPU-bound側bin名。
+pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
+/// scheduler検証の短命側bin名。
+pub const GUEST_SCHED_B: &str = "minios-guest-sched-b";
 /// guest build target。
 pub const GUEST_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// linker scriptが_startへ置くentry address (=USER_START)。

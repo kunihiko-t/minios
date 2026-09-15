@@ -25,8 +25,14 @@ headerの`total_len`が予約windowを超えないことを確認してから、
 [`KernelMapPlan::with_payload_pages`](../../kernel/src/vm/kernel.rs)はpayload先頭から使用lengthを4 KiBへ切り上げます。
 そのpageだけを`U=0`かつread-onlyでidentity mapし、予約window全体やwritable mappingを作りません。
 
-[`kernel_main`](../../kernel/src/main.rs)はbare modeでpayload headerを確認し、kernel address spaceの完成後にpayload ELFを`LoadedImage`へ配置します。
-[`run_boot_payload`](../../kernel/src/main.rs)はReady frameを送ってU-mode実行を開始し、`UserRun::finish_exit`でExit frameと実行用frameの回収を完了します。
+[`kernel_main`](../../kernel/src/main.rs)はbare modeでpayload headerを確認し、kernel address spaceの完成後にmanifestの各imageを`Process`としてspawnします。
+[`run_boot_payload`](../../kernel/src/main.rs)はReady frameを送り、各processのcontextを専用kernel trap stackへ保持しながら、timerプリエンプションのround-robinで全processが終了するまでU-mode実行を繰り返します。
+単一image (manifest v1) では終了を`Exit` frameで通知し、複数image (v2) では`ProcExit` frameでprocess indexと終了codeを個別に通知します。
+
+`Process`はuser address space、4ページのkernel trap stack、中断時の`UserContext`を所有し、allocatorやframe memoryへの参照はdispatchのたびに呼び出し側が渡します。
+processごとのaddress space所有権は、最大4個の静的な`AddressSpaceStorage` arenaが担います。
+U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類され、handlerが次のtickを再アームしてkernelへ戻ると、`ProcessTable`が前回pidの次から時計回りに次のprocessを選びます。
+既知の制限として、`read`はsyscall handler内でUARTを同期pollingするため、blockしたprocessの間は他processも進みません。
 
 [`qemu_command_with_payload`](../../xtask/src/qemu.rs)は一時MiniBundleをQEMUの`-device loader`へ渡します。
 loader argumentは`addr=0x87800000,force-raw=on`を指定し、kernelが検証する予約windowの先頭へraw byteを置きます。
@@ -42,6 +48,7 @@ MiniOS payload: ok code=42
 ```
 
 host harnessはReady、stdout、stderr、Exit、cleanup diagnosticの順序を検証します。
+複数imageの`sched`経路は、busy-waitするprocessの出力`a1`と`a3`の間に短命processの`b1`が挟まること、二つの`ProcExit` frame、回収diagnosticの`switches`報告を要求します。
 timeout時はQEMU childをkillしてwaitし、出力readerをjoinしてからerrorを返します。
 
 ## よくある失敗

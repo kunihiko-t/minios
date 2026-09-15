@@ -7,18 +7,26 @@ use super::context::{SSTATUS_SPP, UserContext};
 pub enum TrapAction {
     /// U-mode由来の`ecall`。`sepc`は実行済みの`ecall`の次の命令へ進めてある。
     SystemCall,
+    /// U-mode実行中のsupervisor timer割り込み。`sepc`とregisterは変更しない
+    /// (割り込みはskipする命令ではない)。schedulerが次のprocessを選ぶ。
+    Timer,
     /// 継続できない例外または割り込み。原因CSR値をそのまま保持する。
     Fatal { scause: usize, stval: usize },
 }
 
-/// U-mode `ecall`だけを継続可能と判定し、それ以外を`Fatal`へ分類する。
+/// U-mode `ecall`とsupervisor timer割り込みだけを継続可能と判定し、
+/// それ以外を`Fatal`へ分類する。
 ///
 /// 割り込みbitなし・原因code 8・保存済み`sstatus.SPP=0`の三つが揃った場合だけ
-/// `sepc`を4 byte進めて`SystemCall`を返す。それ以外の例外と割り込みは、CSR値を
-/// 変更せずに`Fatal`へ渡す。
+/// `sepc`を4 byte進めて`SystemCall`を返す。U-modeからのsupervisor timer
+/// 割り込み (interrupt bit付き原因code 5) はcontextを触らず`Timer`を返す。
+/// それ以外の例外と割り込みは、CSR値を変更せずに`Fatal`へ渡す。
 pub fn classify_user_trap(context: &mut UserContext, scause: usize, stval: usize) -> TrapAction {
     let interrupt = 1_usize << (usize::BITS - 1);
     let from_user = context.sstatus() & SSTATUS_SPP == 0;
+    if scause == interrupt | 5 && from_user {
+        return TrapAction::Timer;
+    }
     if scause & interrupt == 0 && scause & !interrupt == 8 && from_user {
         let resumed = context
             .sepc()
@@ -71,16 +79,16 @@ mod tests {
             assert_eq!(context.registers_for_test(), before);
         }
 
-        let timer_interrupt = (1_usize << (usize::BITS - 1)) | 5;
-        let mut context = UserContext::patterned_for_test(0x0010_0300);
-        assert_eq!(
-            classify_user_trap(&mut context, timer_interrupt, 0),
-            TrapAction::Fatal {
-                scause: timer_interrupt,
-                stval: 0
-            }
-        );
-        assert_eq!(context.sepc(), 0x0010_0300);
+        // supervisor timer以外の割り込み (software / external) はFatalのまま。
+        for cause in [1_usize, 9] {
+            let scause = (1_usize << (usize::BITS - 1)) | cause;
+            let mut context = UserContext::patterned_for_test(0x0010_0300);
+            assert_eq!(
+                classify_user_trap(&mut context, scause, 0),
+                TrapAction::Fatal { scause, stval: 0 }
+            );
+            assert_eq!(context.sepc(), 0x0010_0300);
+        }
 
         let mut context = UserContext::patterned_for_test(0x0010_0400);
         context.set_sstatus_for_test(context.sstatus() | SSTATUS_SPP);
@@ -92,6 +100,35 @@ mod tests {
             }
         );
         assert_eq!(context.sepc(), 0x0010_0400);
+    }
+
+    // Catches the scheduler path losing a timer tick's interrupt status, or
+    // touching the interrupted context (an interrupt is not an instruction to
+    // skip, so sepc must not advance).
+    #[test]
+    fn user_timer_interrupt_is_preemptive_and_preserves_context() {
+        let timer = (1_usize << (usize::BITS - 1)) | 5;
+        let mut context = UserContext::patterned_for_test(0x0010_0800);
+        let before = context.registers_for_test();
+
+        assert_eq!(
+            classify_user_trap(&mut context, timer, 0),
+            TrapAction::Timer
+        );
+        assert_eq!(context.sepc(), 0x0010_0800);
+        assert_eq!(context.registers_for_test(), before);
+
+        // S-mode (SPP=1) からのtimerはこの入口には来ないはずだが、万が一の
+        // 場合は無条件に再開させずFatalへ回す。
+        let mut context = UserContext::patterned_for_test(0x0010_0900);
+        context.set_sstatus_for_test(context.sstatus() | SSTATUS_SPP);
+        assert_eq!(
+            classify_user_trap(&mut context, timer, 0),
+            TrapAction::Fatal {
+                scause: timer,
+                stval: 0
+            }
+        );
     }
 
     // The kernel entry point must share the classifier's contract exactly.

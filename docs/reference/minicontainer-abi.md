@@ -3,7 +3,7 @@
 この文書は、MiniOSとMiniContainerが共有するMiniContainer Guest ABI v1を定義します。
 整数は、特記しない限りlittle-endianで表現します。
 このABIの公開型と定数は`minios-abi` crateにあります。
-現行のminorは1であり、1.0との互換規約は末尾の互換性規約にまとめます。
+現行のminorは2であり、1.0と1.1との互換規約は末尾の互換性規約にまとめます。
 
 ## MiniBundle v1
 
@@ -15,7 +15,7 @@ Rustの構造体をそのままメモリーへ配置せず、各fieldを次のof
 | ---: | ---: | --- | --- |
 | 0 | 8 | `magic` | ASCII `MINICTR`と末尾NUL |
 | 8 | 2 | `abi_major` | `1` |
-| 10 | 2 | `abi_minor` | `1`。decoderは自身以下のminorを受理する |
+| 10 | 2 | `abi_minor` | `2`。decoderは自身以下のminorを受理する |
 | 12 | 2 | `header_len` | `96` |
 | 14 | 2 | `flags` | `0` |
 | 16 | 8 | `total_len` | headerを含むbundle全体の長さ |
@@ -121,7 +121,7 @@ EOFはstickyであり、EOF以後の`STDIN` frameが届いても入力は戻り�
 | 0 | 2 | `abi_major` | `u16` little-endian |
 | 2 | 2 | `abi_minor` | `u16` little-endian |
 
-したがって、ABI 1.1の`READY` payloadは`01 00 01 00`です。
+したがって、ABI 1.2の`READY` payloadは`01 00 02 00`です。
 ホストは`READY`のminorが1以上のときだけ`STDIN` frameを送ります。
 
 `PROC_EXIT` payloadの8バイトは、次の順序で符号なし整数を格納します。
@@ -190,7 +190,7 @@ guestは書き換え前のスタックを読み取り専用の初期データと
 ## 互換性規約
 
 BootHeader decoderは`abi_major=1`かつ自身以下の`abi_minor`を受理します。
-現行kernelは1.0と1.1のbundleをどちらも実行でき、既存ホストの1.0 bundleと共存します。
+現行kernelは1.0から1.2までのbundleをどれも実行でき、既存ホストの1.0 bundleと共存します。
 header長、magic、flags、reserved、range layoutは表の値と規約どおりでなければなりません。
 Control frame decoderは定義済みの八つのkindだけを受理します。
 この文書にないfield、syscall番号、frame種別、非ゼロの予約値は推測して解釈しません。

@@ -22,25 +22,26 @@ Device Tree対応は完了しており、`kernel_main`はOpenSBIが`a1`へ渡す
 
 ## 実装
 
-物理フレームアロケーター、Sv39のactiveなカーネル空間、静的RISC-V 64 ELFから作る`LoadedImage`、U-mode実行、MiniBundle payload、DTBからmachine記述を発見するDevice Tree解析、固定領域上のfree-listヒープが完成しています。
+物理フレームアロケーター、Sv39のactiveなカーネル空間、静的RISC-V 64 ELFから作る`LoadedImage`、U-mode実行、MiniBundle payload、DTBからmachine記述を発見するDevice Tree解析、固定領域上のfree-listヒープ、最大4 processのプリエンプティブround-robinが完成しています。
 実行済みの接続は次のとおりです。
 
 1. **U-mode遷移とuser trap context**：`LoadedImage`のentryとuser stack上端から初期registerを作り、`sscratch`を使うkernel stackへtrapを保存して`sret`します。
 2. **`write` system call**：U-modeの`ecall`はuser pointerとPTE権限を検査し、stdoutまたはstderr control frameへbyteを送ります。
-3. **`exit` system call**：終了codeをExit frameで通知し、user address spaceとkernel trap stackの所有frameを回収します。
+3. **`exit` system call**：終了codeをExit frame（複数imageでは`ProcExit` frame）で通知し、user address spaceとkernel trap stackの所有frameを回収します。
 4. **MiniBundle payload統合**：予約物理windowからMiniBundle内のELFを二段階で検証し、使用pageだけをS-mode read-onlyでmapします。
+5. **processとscheduler**：manifest v2の各imageを`Process`としてspawnし、U-mode中のtimer割り込みで中断したcontextを保存して、round-robinで次のprocessへ切り替えます。
 
 NEORV32向けには、RV32IMのM-mode起動、IMEMからDMEMへの`.data`コピー、UART0、SD/FAT32の読み出し、`help`、`info`、`uptime`、`memory`、`echo`、`ls`、`cat`、`clear`、`shutdown`を持つ対話シェルまでを実装しています。
 この実機経路は、QEMU側のSv39やU-modeを前提にせず、共通のコンソールと入力処理を別のハードウェアへ接続します。
 
 Device Tree解析は、QEMU `virt`の固定値をmachine記述へ置き換える段階として導入済みです。
 汎用ヒープも固定領域上のfree-listとして導入済みであり、ヒープ領域の動的拡張は固定容量の単一アドレス空間を越える段階で進めます。
-その後にprocessとscheduler、VirtIO、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
+その後にVirtIO、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
 各段階の完了条件は[発展ロードマップ](../reference/roadmap.md)にあります。
 
 ## 実行と確認
 
-実装後の全検査には、31段階のrelease gateを実行します。
+実装後の全検査には、32段階のrelease gateを実行します。
 
 ```sh
 cargo xtask check

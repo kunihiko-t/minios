@@ -1,6 +1,6 @@
 pub const BOOT_MAGIC: [u8; 8] = *b"MINICTR\0";
 pub const BOOT_ABI_MAJOR: u16 = 1;
-pub const BOOT_ABI_MINOR: u16 = 1;
+pub const BOOT_ABI_MINOR: u16 = 2;
 pub const BOOT_HEADER_LEN: usize = 96;
 // QEMU `virt`はFDTをDRAM上端の2 MiB予約領域へ置く。payload窓はその直下にあり、
 // bundleがFDTを上書きしないよう上限は6 MiBである。
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(
             &bytes[..56],
             &[
-                b'M', b'I', b'N', b'I', b'C', b'T', b'R', 0, 1, 0, 1, 0, 96, 0, 0, 0, 120, 0, 0, 0,
+                b'M', b'I', b'N', b'I', b'C', b'T', b'R', 0, 1, 0, 2, 0, 96, 0, 0, 0, 120, 0, 0, 0,
                 0, 0, 0, 0, 96, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 104, 0, 0, 0, 0, 0, 0,
                 0, 16, 0, 0, 0, 0, 0, 0, 0,
             ],

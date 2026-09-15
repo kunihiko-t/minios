@@ -96,6 +96,19 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 - `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
 - `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 
+### 複数processとスケジューリング
+
+- `process.rs`：再入可能な実行単位`Process`と、最大4 slotのround-robin`ProcessTable`を定義します。
+  各`Process`は`LoadedImage`（user address spaceとその所有frame）、4ページの専用kernel trap stack、前回中断時の`UserContext`を所有します。
+  allocatorやframe memoryへの参照は保持しないため、生存中のprocess同士がborrowを共有しません。
+- manifest v2のbundleは`image=`sectionごとに`elf=<offset>,<len>`で共有ELF領域内のrangeを宣言し、slot indexがmanifest順のpidになります。
+- U-mode実行中のsupervisor timer割り込みは`user/trap.rs`が`TrapAction::Timer`へ分類し、trap handlerはtickを再アームしてから`Preempted`のoutcomeでkernelへ戻ります。
+  切り替えはtrap内ではなく`run_boot_payload`のdispatch loopが行うため、kernel trap stackは常に「実行中process専用」の不変条件を保ちます。
+- processの`exit`またはfatal trapでslotを取り除き、全所有frameを回収してから次を選びます。
+  manifest v2では終了を`PROC_EXIT` frame（pidと終了code）で個別に通知し、v1の単一imageでは従来の`EXIT` frameを維持します。
+- 既知の制限として、`read`はsyscall handler内でUARTを同期pollingします。
+  trap中は割り込みが無効なため、`read`でblockしたprocessの間は他processも進みません。
+
 ### シェル
 
 - `shell/line.rs`：容量が固定された印字可能ASCII buffer、Backspace、入力超過状態の保持、状態の初期化を純粋なロジックとして提供します。
@@ -113,17 +126,18 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-argsを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、schedを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
 - `guest.rs`：Rust guestのrelease buildと、kernelのELF parserによる配置契約のhost検査を担当します。
-- `bundle.rs`：manifestの生成と検証、MiniBundle v1の正規配置、SHA-256 digest、`cargo xtask bundle`のfile出力を担当します。
+- `bundle.rs`：manifestの生成と検証、MiniBundleの正規配置、複数imageの連結と`elf=`range記録、SHA-256 digest、`cargo xtask bundle`のfile出力を担当します。
 - `qemu.rs`：QEMU `virt`の引数、MiniBundle loader、marker mode、制限時間、並行した出力の読み取り、childのkillとwait、記録の検証を担当します。
-  `user-exit`、`payload`、`payload-args`経路はstdout、必要な場合はstderr、Exit、回収をcontrol frameで観測します。
+  `user-exit`、`payload`、`payload-args`、`payload-stdin`経路はstdout、必要な場合はstderr、Exit、回収をcontrol frameで観測します。
   `payload-args`経路のbundleにはbuild済みRust guestを格納します。
+  `sched`経路は二つのguestを持つmanifest v2 bundleを通常カーネルへ渡し、stdoutの交差と`PROC_EXIT` frameを検査します。
 - `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第17章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
-- `lib.rs`：公開commandを29段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
+- `lib.rs`：公開commandを32段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
 
 ## Rustユーザープログラム
 
@@ -147,8 +161,9 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 8. **テストまたはシェル**：テスト用機能は対象を観測してmarkerを出し、通常buildはbannerと`minios> `を表示してcommandを処理します。
 9. **非同期timer**：シェル実行中もSupervisor timer trapが入り、レジスターの保存、tickの更新、次のdeadline予約、レジスターの復元を経て`sret`で中断位置へ戻ります。
 
-payload bootでは`kernel_main`がMiniBundleを二段階で検証し、ELFをU-modeへ遷移させます。
+payload bootでは`kernel_main`がMiniBundleを二段階で検証し、manifestの各imageをprocessとしてspawnしてからround-robinでU-modeへ遷移させます。
 U-modeの`ecall`は`sscratch`によるstack交換を通り、`write`または`exit`を処理してからkernelへ戻ります。
+U-mode中のtimer割り込みは実行中processのtrap stackへcontextを保存し、kernel側のdispatch loopが次のprocessを選んで再開します。
 
 ## NEORV32の起動からシェルまで
 
