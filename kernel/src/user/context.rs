@@ -2,6 +2,8 @@
 
 use crate::vm::VirtAddr;
 
+/// `sstatus.SIE`: S-mode実行中のsupervisor割り込み許可。U-mode中の配送には効かない。
+pub const SSTATUS_SIE: usize = 1 << 1;
 /// `sstatus.SPP`: 0は`sret`後のU-mode遷移、1はS-mode残留を意味する。
 pub const SSTATUS_SPP: usize = 1 << 8;
 /// `sstatus.SPIE`: `sret`がSIEへコピーする、トラップ前の割り込み許可値。

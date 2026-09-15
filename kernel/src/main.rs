@@ -186,7 +186,7 @@ use minios_kernel::user::syscall::{SyscallFlow, complete_read, dispatch_syscall}
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::user::trap::TrapAction;
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::user::{RunExit, SSTATUS_SUM, UserContext};
+use minios_kernel::user::{RunExit, SSTATUS_SIE, SSTATUS_SUM, UserContext};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::AddressSpace;
 #[cfg(target_arch = "riscv64")]
@@ -2025,10 +2025,17 @@ fn run_boot_payload<const KERNEL_N: usize>(
     }
 
     // user trap入口を指し直し、Supervisor timer割り込みを有効化する。
-    // `sie.STIE`は実行窓でU-modeへ落ちるたびにsstatus.SPIE経由で効く。
+    // `time::init`が立てたsstatus.SIEはboot以降1のままなので、このまま
+    // `stvec`をuser入口へ向けるとS-mode実行中に届いたtickがsscratch未設定の
+    // `__user_trap_entry`へ飛び、context保存先がアドレス0付近へずれて壊れる。
+    // U-mode中の割り込み配送はsstatus.SIEに依らないため、実行窓ではS-mode側を
+    // 遮断してから`stvec`と`sie`を設定する。dispatch loop中のS-modeでは
+    // trap時にSIEが落ちるため、この後に再び立つことはない。
     const SIE_STIE: usize = 1 << 5;
-    // Safety: S-modeで`stvec`と`sie`を書く。
+    // Safety: S-modeで`sstatus`、`stvec`、`sie`を書く。
     unsafe {
+        let sstatus = arch::riscv64::csr::read_sstatus();
+        arch::riscv64::csr::write_sstatus(sstatus & !SSTATUS_SIE);
         arch::riscv64::csr::write_stvec(__user_trap_entry as *const () as usize);
         let sie = arch::riscv64::csr::read_sie();
         arch::riscv64::csr::write_sie(sie | SIE_STIE);
