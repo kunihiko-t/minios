@@ -23,8 +23,8 @@ pub enum UserMemoryError<E> {
 /// `read`はstdinの消費が不可逆なため、sourceへ触れる前に呼び出し側が
 /// この検査でEFAULTを確定させる。page walkの順序とerrorの優先順位は
 /// `copy_from_user`と同じである。
-pub fn check_user_writable_range<const N: usize, M: FrameStore>(
-    space: &AddressSpace<'_, N>,
+pub fn check_user_writable_range<M: FrameStore>(
+    space: &AddressSpace,
     memory: &M,
     start: u64,
     len: usize,
@@ -60,8 +60,8 @@ pub fn check_user_writable_range<const N: usize, M: FrameStore>(
 /// 確認してから、そのpage内のbyteだけ`FrameStore::copy_out`する。呼び出し側が
 /// 用意するbufferは4,096 byte以下でなければならず、user pointerがRustの
 /// 参照やraw pointerとして解されることは決してない。
-pub fn copy_from_user<const N: usize, M: FrameStore>(
-    space: &AddressSpace<'_, N>,
+pub fn copy_from_user<M: FrameStore>(
+    space: &AddressSpace,
     memory: &M,
     start: u64,
     output: &mut [u8],
@@ -109,7 +109,7 @@ mod tests {
     use super::{UserMemoryError, check_user_writable_range, copy_from_user};
     use crate::{
         memory::frame::{FrameAllocator, PAGE_SIZE},
-        vm::{AddressSpaceBuilder, AddressSpaceStorage, FrameStore, PageFlags, PhysAddr, VirtPage},
+        vm::{AddressSpaceBuilder, FrameStore, PageFlags, PhysAddr, VirtPage},
     };
 
     const FIRST_USER_PAGE: u64 = 0x0010_0000;
@@ -218,9 +218,7 @@ mod tests {
     fn copy_fixture(start: u64, len: usize) -> Result<Vec<u8>, UserMemoryError<TestStoreError>> {
         let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut memory, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
         let user_flags = PageFlags::new(true, true, false, true).unwrap();
         let first = builder
             .map_new_zeroed(VirtPage::from_start(FIRST_USER_PAGE).unwrap(), user_flags)
@@ -273,9 +271,7 @@ mod tests {
     fn copy_rejects_user_pages_without_read_permission() {
         let mut allocator = unsafe { FrameAllocator::<8>::new(0x1000, 0x21_000) }.unwrap();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut memory, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
         builder
             .map_new_zeroed(
                 VirtPage::from_start(FIRST_USER_PAGE).unwrap(),
@@ -304,9 +300,7 @@ mod tests {
     fn check_fixture(start: u64, len: usize) -> Result<(), UserMemoryError<TestStoreError>> {
         let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut memory, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
         let user_flags = PageFlags::new(true, true, false, true).unwrap();
         builder
             .map_new_zeroed(VirtPage::from_start(FIRST_USER_PAGE).unwrap(), user_flags)
@@ -348,9 +342,7 @@ mod tests {
 
         let mut allocator = unsafe { FrameAllocator::<8>::new(0x1000, 0x21_000) }.unwrap();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut memory, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
         builder
             .map_new_zeroed(
                 VirtPage::from_start(FIRST_USER_PAGE).unwrap(),

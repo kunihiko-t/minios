@@ -59,7 +59,7 @@ $ cargo xtask test elf
 
 `kernel::elf::fixture`が作る正常なELFを基準にし、program headerのfieldを一つずつ変更するホスト試験を追加してください。
 `p_filesz`、`p_memsz`、`p_align`、`p_vaddr`、`p_offset`、flags、entryを個別に壊し、対応する`ElfError`だけが返ることを確認します。
-allocation後の失敗を注入する試験では、実行前後の`FrameStats`と`AddressSpaceStorage::len()`を比較し、回収漏れを観測できるようにします。
+allocation後の失敗を注入する試験では、実行前後の`FrameStats`と`AddressSpace::owned_frames()`を比較し、回収漏れを観測できるようにします。
 試験後は`cargo test -p minios-kernel elf:: --locked`と`cargo xtask test elf`を実行してください。
 
 ## 次の章

@@ -15,7 +15,7 @@ use crate::{
         run::KERNEL_STACK_PAGES,
         stack::{InitialStackError, write_initial_argv},
     },
-    vm::{AddressSpace, AddressSpaceStorage, FrameStore, KernelMapping, PhysPageNum, VirtAddr},
+    vm::{AddressSpace, FrameStore, KernelMapping, PhysPageNum, VirtAddr},
 };
 
 /// 同時に生存できるprocess数。manifestが宣言できるimage数の上限と一致させる。
@@ -45,12 +45,12 @@ pub enum SpawnError<E> {
 
 /// `Process::spawn`の失敗結果。回収しきれなかったimageを保持し、呼び出し側が
 /// `LoadedImage::destroy`を再試行できるようにする。
-pub struct SpawnFailure<'storage, const N: usize, E> {
+pub struct SpawnFailure<E> {
     pub error: SpawnError<E>,
-    pub image: Option<LoadedImage<'storage, N>>,
+    pub image: Option<LoadedImage>,
 }
 
-impl<const N: usize, E> fmt::Debug for SpawnFailure<'_, N, E> {
+impl<E> fmt::Debug for SpawnFailure<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SpawnFailure")
@@ -76,9 +76,9 @@ pub enum ProcessState {
 /// borrowを共有せず、tableが複数のprocessを同時に抱えられる。
 /// `dispatch`中だけkernelが当該stackを使い、戻った時点でcontextをslotから
 /// 回収する (`reload_context`)。
-pub struct Process<'storage, const N: usize> {
+pub struct Process {
     name: &'static str,
-    image: Option<LoadedImage<'storage, N>>,
+    image: Option<LoadedImage>,
     kernel_stack: [Option<PhysFrame>; KERNEL_STACK_PAGES],
     kernel_stack_bottom: usize,
     user_satp: u64,
@@ -86,7 +86,7 @@ pub struct Process<'storage, const N: usize> {
     state: ProcessState,
 }
 
-impl<const N: usize> fmt::Debug for Process<'_, N> {
+impl fmt::Debug for Process {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Process")
@@ -97,33 +97,30 @@ impl<const N: usize> fmt::Debug for Process<'_, N> {
     }
 }
 
-impl<'storage, const N: usize> Process<'storage, N> {
+impl Process {
     /// ELFを独立したaddress spaceへ読み込み、kernel trap stackと初期contextを
     /// 組み立てる。途中失敗時は確保済みのresourceをすべて回収する。
     ///
-    /// `storage`はこのprocess専用の空arenaでなければならない
-    /// (`AddressSpaceBuilder`の不変条件)。`kernel_mappings`はsupervisor専用の
-    /// 借用mappingとして各user spaceへ複写される。
+    /// 所有権台帳はimage内のaddress spaceが所有するため専用arenaの受け渡しは
+    /// 要らない。`kernel_mappings`はsupervisor専用の借用mappingとして
+    /// 各user spaceへ複写される。
     pub fn spawn<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
         name: &'static str,
         elf: &[u8],
         arguments: &[&str],
         allocator: &mut dyn FrameSource,
         memory: &mut M,
-        storage: &'storage mut AddressSpaceStorage<N>,
         kernel_mappings: I,
-    ) -> Result<Self, SpawnFailure<'storage, N, M::Error>> {
-        let image =
-            match load_image_with_kernel_mappings(elf, allocator, memory, storage, kernel_mappings)
-            {
-                Ok(image) => image,
-                Err(error) => {
-                    return Err(SpawnFailure {
-                        error: SpawnError::Load(error),
-                        image: None,
-                    });
-                }
-            };
+    ) -> Result<Self, SpawnFailure<M::Error>> {
+        let image = match load_image_with_kernel_mappings(elf, allocator, memory, kernel_mappings) {
+            Ok(image) => image,
+            Err(error) => {
+                return Err(SpawnFailure {
+                    error: SpawnError::Load(error),
+                    image: None,
+                });
+            }
+        };
 
         let mut kernel_stack = [const { None }; KERNEL_STACK_PAGES];
         let mut stack_bottom = None;
@@ -211,7 +208,7 @@ impl<'storage, const N: usize> Process<'storage, N> {
         matches!(self.state, ProcessState::Runnable)
     }
 
-    pub const fn address_space(&self) -> &AddressSpace<'storage, N> {
+    pub const fn address_space(&self) -> &AddressSpace {
         self.image
             .as_ref()
             .expect("live process retains its loaded image")
@@ -275,12 +272,12 @@ impl<'storage, const N: usize> Process<'storage, N> {
 
 /// kernel stackとimageの部分回収。`UserRun`の`build_failure`と同じ順序で、
 /// 途中失敗時に確保済みresourceを漏らさない。
-fn spawn_failure<'storage, const N: usize, E>(
-    image: LoadedImage<'storage, N>,
+fn spawn_failure<E>(
+    image: LoadedImage,
     stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
     allocator: &mut dyn FrameSource,
     primary: SpawnError<E>,
-) -> SpawnFailure<'storage, N, E> {
+) -> SpawnFailure<E> {
     for slot in stack.iter_mut().rev() {
         if let Some(frame) = slot.take()
             && let Err((_, frame)) = allocator.deallocate_recoverable(frame)
@@ -311,18 +308,18 @@ const fn sv39_satp_bits(root: PhysPageNum) -> u64 {
 
 /// 固定上限のprocess table。slot indexがprocess IDとなり、manifestの
 /// image順と一致する。空slotは`pick_next`が読み飛ばす。
-pub struct ProcessTable<'storage, const N: usize> {
-    slots: [Option<Process<'storage, N>>; MAX_PROCS],
+pub struct ProcessTable {
+    slots: [Option<Process>; MAX_PROCS],
     next_hint: usize,
 }
 
-impl<'storage, const N: usize> Default for ProcessTable<'storage, N> {
+impl Default for ProcessTable {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'storage, const N: usize> ProcessTable<'storage, N> {
+impl ProcessTable {
     pub const fn new() -> Self {
         Self {
             slots: [const { None }; MAX_PROCS],
@@ -345,7 +342,7 @@ impl<'storage, const N: usize> ProcessTable<'storage, N> {
     /// 回収するためであり、`deallocate_recoverable`が失敗時にframeを返すのと
     /// 同じ規約である。
     #[allow(clippy::result_large_err)]
-    pub fn insert(&mut self, process: Process<'storage, N>) -> Result<usize, Process<'storage, N>> {
+    pub fn insert(&mut self, process: Process) -> Result<usize, Process> {
         let Some(index) = self.slots.iter().position(|slot| slot.is_none()) else {
             return Err(process);
         };
@@ -353,16 +350,16 @@ impl<'storage, const N: usize> ProcessTable<'storage, N> {
         Ok(index)
     }
 
-    pub fn get(&self, pid: usize) -> Option<&Process<'storage, N>> {
+    pub fn get(&self, pid: usize) -> Option<&Process> {
         self.slots.get(pid).and_then(|slot| slot.as_ref())
     }
 
-    pub fn get_mut(&mut self, pid: usize) -> Option<&mut Process<'storage, N>> {
+    pub fn get_mut(&mut self, pid: usize) -> Option<&mut Process> {
         self.slots.get_mut(pid).and_then(|slot| slot.as_mut())
     }
 
     /// slotからprocessを取り出す。呼び出し側が`reclaim`で所有frameを回収する。
-    pub fn take(&mut self, pid: usize) -> Option<Process<'storage, N>> {
+    pub fn take(&mut self, pid: usize) -> Option<Process> {
         self.slots.get_mut(pid).and_then(|slot| slot.take())
     }
 
@@ -527,11 +524,7 @@ mod tests {
             self.frames.stats()
         }
 
-        fn spawn<'a>(
-            &mut self,
-            storage: &'a mut AddressSpaceStorage<64>,
-            name: &'static str,
-        ) -> Process<'a, 64> {
+        fn spawn(&mut self, name: &'static str) -> Process {
             let bytes = valid_riscv64_elf();
             Process::spawn(
                 name,
@@ -539,7 +532,6 @@ mod tests {
                 &[],
                 &mut self.frames,
                 &mut self.memory,
-                storage,
                 core::iter::empty(),
             )
             .unwrap_or_else(|error| panic!("fixture process must spawn: {error:?}"))
@@ -552,15 +544,14 @@ mod tests {
     #[test]
     fn spawn_owns_image_stack_and_context() {
         let mut fixture = SpawnFixture::new();
-        let mut storage = AddressSpaceStorage::<64>::new();
         let before = fixture.baseline();
 
-        let process = fixture.spawn(&mut storage, "proc-a");
+        let process = fixture.spawn("proc-a");
 
         assert_eq!(process.name(), "proc-a");
         assert_eq!(process.kernel_stack_top() % PAGE_SIZE, 0);
         assert_eq!(process.user_satp() >> 60, 8);
-        assert!(!storage.is_empty());
+        assert!(process.address_space().owned_frames() > 0);
         assert!(fixture.frames.stats().allocated > before.allocated);
     }
 
@@ -572,16 +563,10 @@ mod tests {
         // imageが占有するframe数を測り、それより2枚だけ多いarenaを用意すると、
         // stack確保が途中で枯渇して部分確保の回収経路を踏む。
         let mut probe = SpawnFixture::new();
-        let mut probe_storage = AddressSpaceStorage::<64>::new();
         let before = probe.baseline().allocated;
         let bytes = valid_riscv64_elf();
-        let image = crate::elf::load_image(
-            &bytes,
-            &mut probe.frames,
-            &mut probe.memory,
-            &mut probe_storage,
-        )
-        .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"));
+        let image = crate::elf::load_image(&bytes, &mut probe.frames, &mut probe.memory)
+            .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"));
         let image_frames = probe.frames.stats().allocated - before;
         image
             .destroy(&mut probe.frames)
@@ -591,7 +576,6 @@ mod tests {
         let mut frames =
             unsafe { FrameAllocator::<16>::new(0x1000, (image_frames + 2) * PAGE_SIZE).unwrap() };
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<64>::new();
 
         let bytes = valid_riscv64_elf();
         let failure = Process::spawn(
@@ -600,7 +584,6 @@ mod tests {
             &[],
             &mut frames,
             &mut memory,
-            &mut storage,
             core::iter::empty(),
         )
         .expect_err("starved allocator must fail spawn");
@@ -608,7 +591,6 @@ mod tests {
         assert_eq!(failure.error, SpawnError::OutOfFrames);
         assert!(failure.image.is_none());
         assert_eq!(frames.stats().allocated, 0);
-        assert!(storage.is_empty());
     }
 
     // Catches reclaim dropping only part of a process: every owned frame must
@@ -616,16 +598,14 @@ mod tests {
     #[test]
     fn reclaim_releases_all_owned_frames() {
         let mut fixture = SpawnFixture::new();
-        let mut storage = AddressSpaceStorage::<64>::new();
         let before = fixture.baseline();
-        let mut process = fixture.spawn(&mut storage, "proc-c");
+        let mut process = fixture.spawn("proc-c");
 
         process
             .reclaim(&mut fixture.frames)
             .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
 
         assert_eq!(fixture.baseline(), before);
-        assert!(storage.is_empty());
     }
 
     // Catches round-robin order drifting: picks must cycle over live slots and
@@ -633,13 +613,11 @@ mod tests {
     #[test]
     fn table_cycles_over_live_slots() {
         let mut fixture = SpawnFixture::new();
-        let mut storages = [const { AddressSpaceStorage::<64>::new() }; MAX_PROCS];
-        let [s0, s1, s2, _] = storages.each_mut();
-        let mut table = ProcessTable::<64>::new();
+        let mut table = ProcessTable::new();
 
-        let p0 = fixture.spawn(s0, "p0");
-        let p1 = fixture.spawn(s1, "p1");
-        let p2 = fixture.spawn(s2, "p2");
+        let p0 = fixture.spawn("p0");
+        let p1 = fixture.spawn("p1");
+        let p2 = fixture.spawn("p2");
         assert_eq!(table.insert(p0).expect("insert p0"), 0);
         assert_eq!(table.insert(p1).expect("insert p1"), 1);
         assert_eq!(table.insert(p2).expect("insert p2"), 2);
@@ -663,24 +641,21 @@ mod tests {
     #[test]
     fn table_rejects_overflow_and_returns_process() {
         let mut fixture = SpawnFixture::new();
-        let mut storages = [const { AddressSpaceStorage::<64>::new() }; MAX_PROCS];
-        let mut extra_storage = AddressSpaceStorage::<64>::new();
-        let mut table = ProcessTable::<64>::new();
+        let mut table = ProcessTable::new();
 
-        for (index, storage) in storages.iter_mut().enumerate() {
-            let process = fixture.spawn(storage, "slot");
+        for index in 0..MAX_PROCS {
+            let process = fixture.spawn("slot");
             assert_eq!(table.insert(process).expect("insert process"), index);
         }
         assert_eq!(table.len(), MAX_PROCS);
 
-        let extra = fixture.spawn(&mut extra_storage, "extra");
+        let extra = fixture.spawn("extra");
         let mut rejected = table
             .insert(extra)
             .expect_err("table must reject a fifth process");
         rejected
             .reclaim(&mut fixture.frames)
             .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
-        assert!(extra_storage.is_empty());
     }
 
     // Catches the scheduler running a process after its slot was taken, or
@@ -688,12 +663,10 @@ mod tests {
     #[test]
     fn table_reports_empty_after_all_exit() {
         let mut fixture = SpawnFixture::new();
-        let mut storages = [const { AddressSpaceStorage::<64>::new() }; 2];
-        let [s0, s1] = storages.each_mut();
-        let mut table = ProcessTable::<64>::new();
+        let mut table = ProcessTable::new();
 
-        let p0 = fixture.spawn(s0, "p0");
-        let p1 = fixture.spawn(s1, "p1");
+        let p0 = fixture.spawn("p0");
+        let p1 = fixture.spawn("p1");
         table.insert(p0).expect("insert p0");
         table.insert(p1).expect("insert p1");
 
@@ -714,12 +687,10 @@ mod tests {
     #[test]
     fn blocked_slots_are_skipped_and_woken() {
         let mut fixture = SpawnFixture::new();
-        let mut storages = [const { AddressSpaceStorage::<64>::new() }; 2];
-        let [s0, s1] = storages.each_mut();
-        let mut table = ProcessTable::<64>::new();
+        let mut table = ProcessTable::new();
 
-        let p0 = fixture.spawn(s0, "p0");
-        let p1 = fixture.spawn(s1, "p1");
+        let p0 = fixture.spawn("p0");
+        let p1 = fixture.spawn("p1");
         table.insert(p0).expect("insert p0");
         table.insert(p1).expect("insert p1");
 
@@ -739,10 +710,9 @@ mod tests {
     #[test]
     fn all_blocked_slots_still_report_live() {
         let mut fixture = SpawnFixture::new();
-        let mut storage = AddressSpaceStorage::<64>::new();
-        let mut table = ProcessTable::<64>::new();
+        let mut table = ProcessTable::new();
 
-        let p0 = fixture.spawn(&mut storage, "p0");
+        let p0 = fixture.spawn("p0");
         table.insert(p0).expect("insert p0");
         table.get_mut(0).expect("slot 0 is live").block_on_stdin();
 

@@ -17,8 +17,8 @@ MiniContainerの最初の実行単位に必要なのは、QEMU `virt`上で一�
 
 この順序変更は「Device Treeとヒープが不要になった」ことを意味しませんでした。
 Device Tree対応は完了しており、`kernel_main`はOpenSBIが`a1`へ渡すDTBからRAM範囲、UARTベース、timebaseを発見し、固定アドレスへの依存をmachine記述へ置き換えました。
-汎用ヒープも導入済みであり、managed RAM末尾の固定領域をfree-listで管理して`alloc` crateの`Box`と`Vec`を利用できます。
-残る固定容量を複数processや動的な実行数へ広げる段階では、このヒープをフレームアロケーターから成長させる拡張が必要になります。
+汎用ヒープも導入済みであり、managed RAM末尾からfree-listで始まり、枯渇時にはフレームアロケーターから隣接ページを得て下方向へ成長します。
+このヒープを使い、address spaceごとの所有フレーム台帳`AddressSpaceStorage`は固定容量の静的arenaから可変長の`Vec`へ置き換わりました。
 
 ## 実装
 

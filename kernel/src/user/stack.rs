@@ -37,8 +37,8 @@ pub struct InitialStack {
 /// layout (低位→高位): `argc`、argv pointer列、NULL終端、空のenvp、
 /// `AT_NULL` (typeとvalueの二語)、各文字列 (NUL終端)。spは16 byteへ整列する。
 /// 書き込みはpage単位で権限を検証しながら行われ、stack領域を下回るblockは拒否される。
-pub fn write_initial_argv<const N: usize, M: FrameStore>(
-    space: &AddressSpace<'_, N>,
+pub fn write_initial_argv<M: FrameStore>(
+    space: &AddressSpace,
     memory: &mut M,
     program_name: &str,
     arguments: &[&str],
@@ -145,8 +145,8 @@ pub fn write_initial_argv<const N: usize, M: FrameStore>(
 }
 
 /// user仮想rangeへ、pageごとにU=1かつW=1を確認しながらcopyする。
-fn copy_to_user<const N: usize, M: FrameStore>(
-    space: &AddressSpace<'_, N>,
+fn copy_to_user<M: FrameStore>(
+    space: &AddressSpace,
     memory: &mut M,
     start: u64,
     bytes: &[u8],
@@ -191,7 +191,7 @@ mod tests {
         elf::{USER_STACK_TOP, fixture::valid_riscv64_elf, load_image},
         memory::frame::{FrameAllocator, PAGE_SIZE},
         user::context::UserContext,
-        vm::{AddressSpace, AddressSpaceStorage, FrameStore, VirtAddr},
+        vm::{AddressSpace, FrameStore, VirtAddr},
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,29 +289,19 @@ mod tests {
         }
     }
 
-    // storageだけをimageへborrowし、memoryは独立にborrowできるようにする。
     macro_rules! loaded_fixture {
-        () => {{
-            let frames = unsafe { FrameAllocator::<16>::new(0x1000, 0x181_000) }.unwrap();
-            let storage = AddressSpaceStorage::<2688>::new();
-            (frames, storage)
-        }};
+        () => {{ unsafe { FrameAllocator::<16>::new(0x1000, 0x181_000) }.unwrap() }};
     }
 
     macro_rules! load_image_from {
-        ($frames:expr, $memory:expr, $storage:expr) => {{
+        ($frames:expr, $memory:expr) => {{
             let bytes = valid_riscv64_elf();
-            load_image(&bytes, $frames, $memory, $storage)
+            load_image(&bytes, $frames, $memory)
                 .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"))
         }};
     }
 
-    fn read_user<const N: usize>(
-        space: &AddressSpace<'_, N>,
-        memory: &TestFrameStore,
-        address: u64,
-        output: &mut [u8],
-    ) {
+    fn read_user(space: &AddressSpace, memory: &TestFrameStore, address: u64, output: &mut [u8]) {
         let mut done = 0usize;
         while done < output.len() {
             let at = address + done as u64;
@@ -335,18 +325,14 @@ mod tests {
         }
     }
 
-    fn read_word<const N: usize>(
-        space: &AddressSpace<'_, N>,
-        memory: &TestFrameStore,
-        address: u64,
-    ) -> u64 {
+    fn read_word(space: &AddressSpace, memory: &TestFrameStore, address: u64) -> u64 {
         let mut word = [0u8; 8];
         read_user(space, memory, address, &mut word);
         u64::from_le_bytes(word)
     }
 
-    fn read_cstr<const N: usize>(
-        space: &AddressSpace<'_, N>,
+    fn read_cstr(
+        space: &AddressSpace,
         memory: &TestFrameStore,
         address: u64,
         max: usize,
@@ -367,9 +353,9 @@ mod tests {
     // missing terminators, or wrong argument registers.
     #[test]
     fn argv_block_lays_out_strings_pointers_and_registers() {
-        let (mut frames, mut storage) = loaded_fixture!();
+        let mut frames = loaded_fixture!();
         let mut memory = TestFrameStore::default();
-        let image = load_image_from!(&mut frames, &mut memory, &mut storage);
+        let image = load_image_from!(&mut frames, &mut memory);
         let initial = write_initial_argv(
             image.address_space(),
             &mut memory,
@@ -417,9 +403,9 @@ mod tests {
     #[test]
     fn argv_block_spans_page_boundaries() {
         let long = "x".repeat(5000);
-        let (mut frames, mut storage) = loaded_fixture!();
+        let mut frames = loaded_fixture!();
         let mut memory = TestFrameStore::default();
-        let image = load_image_from!(&mut frames, &mut memory, &mut storage);
+        let image = load_image_from!(&mut frames, &mut memory);
         let initial = write_initial_argv(
             image.address_space(),
             &mut memory,
@@ -440,9 +426,9 @@ mod tests {
     #[test]
     fn oversized_arguments_are_rejected() {
         let huge = "y".repeat(70_000);
-        let (mut frames, mut storage) = loaded_fixture!();
+        let mut frames = loaded_fixture!();
         let mut memory = TestFrameStore::default();
-        let image = load_image_from!(&mut frames, &mut memory, &mut storage);
+        let image = load_image_from!(&mut frames, &mut memory);
         assert_eq!(
             write_initial_argv(
                 image.address_space(),

@@ -30,7 +30,7 @@ headerの`total_len`が予約windowを超えないことを確認してから、
 単一image (manifest v1) では終了を`Exit` frameで通知し、複数image (v2) では`ProcExit` frameでprocess indexと終了codeを個別に通知します。
 
 `Process`はuser address space、4ページのkernel trap stack、中断時の`UserContext`を所有し、allocatorやframe memoryへの参照はdispatchのたびに呼び出し側が渡します。
-processごとのaddress space所有権は、最大4個の静的な`AddressSpaceStorage` arenaが担います。
+processごとのaddress space所有権は、各`AddressSpace`が内部に持つヒープ上の可変長`AddressSpaceStorage`が担います。
 U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類され、handlerが次のtickを再アームしてkernelへ戻ると、`ProcessTable`が前回pidの次から時計回りに次のprocessを選びます。
 `read`は入力未到着のとき`Blocked`としてkernelへ戻り、processはstdin待ちで再選対象から外れます。
 入力が届くとecallがやり直されて完了するため、block中も他processが進みます。
