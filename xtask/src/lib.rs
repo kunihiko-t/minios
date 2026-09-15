@@ -365,7 +365,9 @@ fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
         unreachable!("non-QEMU phases returned above")
     };
     // 起動遅延は許容しつつ、停止したゲストを早期に診断できる統一期限を使う。
-    qemu::run_test(kind, std::time::Duration::from_secs(5)).map_err(XtaskError::Qemu)
+    // QEMU起動+guest build直後のカーネル起動はホスト負荷で揺れるため、
+    // 5秒で踏んだ観測済みflakeを避けるために10秒を上限とする。
+    qemu::run_test(kind, std::time::Duration::from_secs(10)).map_err(XtaskError::Qemu)
 }
 
 fn run_phase_plan(phases: &[Phase]) -> Result<(), XtaskError> {
