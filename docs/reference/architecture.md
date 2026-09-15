@@ -189,4 +189,14 @@ RV64の仕組みをそのまま縮小した構成ではなく、UARTとシェル
 IMEM契約は実効32 KiBであり、RV32 buildは`opt-level=z`で収めます。
 詳細は[NEORV32 read-only FAT32設計](sd-fat32.md)を参照してください。
 
+## QEMU read-only storage
+
+- `storage/virtio_blk.rs`：virtio-mmio v2のblock driverであり、feature negotiation、単一queue、3-desc chainによるsector読み取り、used ringのpollを行います。
+- `drivers/virtio_mmio.rs`：register fileへのvolatile 32-bitアクセスを`Mmio` traitとして実装し、host testはfake deviceへ差し替えます。
+- `MachineSpec::virtio_mmio`：FDTの`virtio,mmio` nodeからMMIOベースを発見し、`with_device_pages`でS-modeの`R+W`へ写像します。
+- `cargo xtask test virtio`：FAT32 disk imageを`virtio-blk-device`として接続し、`HELLO.TXT`のmount・列挙・読み取りをQEMU上で検証します。
+
+queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`として所有し、恒等写像済みのため物理アドレスをそのままdeviceへ渡します。
+`storage::fat32`は`SectorReader`境界で`VirtioBlk`へ差し替わるため、parser本体はRV32経路と共有です。
+
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

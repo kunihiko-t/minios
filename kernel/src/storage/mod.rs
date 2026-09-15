@@ -1,5 +1,6 @@
 pub mod fat32;
 pub mod sd;
+pub mod virtio_blk;
 
 /// 512 byte固定のsector読み取り境界。FAT32 parserをMMIOから切り離し、
 /// host testではfixture readerを差し込むための最小抽象である。

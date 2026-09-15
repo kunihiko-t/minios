@@ -15,7 +15,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -30,7 +31,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -44,7 +46,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -57,7 +60,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -69,7 +73,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -80,7 +85,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -90,7 +96,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -99,7 +106,8 @@
             feature = "qemu-test-user-syscall",
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(
@@ -107,11 +115,16 @@
         any(
             feature = "qemu-test-user-exit",
             feature = "qemu-test-fdt",
-            feature = "qemu-test-heap"
+            feature = "qemu-test-heap",
+            feature = "qemu-test-virtio"
         )
     ),
     all(feature = "qemu-test-user-exit", feature = "qemu-test-fdt"),
-    all(feature = "qemu-test-fdt", feature = "qemu-test-heap")
+    all(
+        feature = "qemu-test-fdt",
+        feature = "qemu-test-heap",
+        feature = "qemu-test-virtio"
+    )
 ))]
 compile_error!("QEMU kernel test features are mutually exclusive; enable at most one");
 
@@ -375,6 +388,64 @@ impl minios_kernel::memory::frame::FrameSource for GlobalFrames {
     }
 }
 
+/// virtio queue/request領域。frame poolの1 pageを所有し、dropで返す。
+/// managed RAMは恒等map済みなので、frameの物理アドレスがそのまま
+/// deviceへ渡すDMAアドレスになる。
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+struct VirtioRegionPage {
+    frame: Option<PhysFrame>,
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+impl VirtioRegionPage {
+    fn new(frame: PhysFrame) -> Self {
+        // Safety: frame poolが管理する物理pageは`KernelMapPlan`で恒等map
+        // 済み。used.idx等の初期値が不定だと完了判定を誤るため、page全域を
+        // 0で初期化してから`VirtioRegion`として使う。
+        unsafe { core::ptr::write_bytes(frame.start() as *mut u8, 0, PAGE_SIZE) };
+        Self { frame: Some(frame) }
+    }
+
+    fn start(&self) -> usize {
+        self.frame
+            .as_ref()
+            .expect("region frame is held until drop")
+            .start()
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+impl core::ops::Deref for VirtioRegionPage {
+    type Target = minios_kernel::storage::virtio_blk::VirtioRegion;
+
+    fn deref(&self) -> &Self::Target {
+        // Safety: `frame.start()`は4 KiB整列の恒等map済みpageであり、
+        // `new`で全byteを初期化済み。`VirtioRegion`はpage全域を占有する。
+        unsafe { &*(self.start() as *const Self::Target) }
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+impl core::ops::DerefMut for VirtioRegionPage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Safety: `deref`と同じ領域。`VirtioBlk`が生存中はこのwrapperが
+        // 領域の唯一のaliasである。
+        unsafe { &mut *(self.start() as *mut Self::Target) }
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+impl Drop for VirtioRegionPage {
+    fn drop(&mut self) {
+        // `VirtioBlk::init`が失敗した場合にframeをpoolへ返す。
+        // device確立後のdropはkernel終了時のみで、その際poolへ戻す意味は
+        // ないが、所有権の行き先を明示するため同じ経路を通す。
+        if let Some(frame) = self.frame.take() {
+            let _ = GlobalFrames.deallocate(frame);
+        }
+    }
+}
+
 #[cfg(target_arch = "riscv64")]
 // Safety: `GlobalAlloc`の契約により、返すポインターはlayoutの整列を満たす
 // 有効な領域であり、`dealloc`は`alloc`が返したポインターだけを受け取る。
@@ -603,6 +674,11 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
             .unwrap_or_else(|error| panic!("invalid payload mapping plan: {error:?}")),
         None => plan,
     };
+    // FDTが報告したvirtio-mmio領域をS-mode R+Wで1pageずつmapする。
+    // deviceが存在しないslotはprobeで弾かれるだけなので全slotをmapしてよい。
+    let plan = plan
+        .with_device_pages(&machine.virtio_mmio[..machine.virtio_mmio_count])
+        .unwrap_or_else(|error| panic!("invalid device mapping plan: {error:?}"));
     // Safety: QEMU virt exposes managed_memory_start..machine.managed_end()
     // as valid RAM. Bare translation reaches it by identity before satp
     // changes, and `plan` identity-maps the complete range afterward. This
@@ -683,6 +759,11 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         run_heap_test();
     }
 
+    #[cfg(feature = "qemu-test-virtio")]
+    {
+        run_virtio_test(machine, &mut frames);
+    }
+
     if let Some(payload) = payload {
         run_boot_payload(&kernel_space, &plan, &mut frames, &mut memory, payload);
     }
@@ -733,6 +814,87 @@ fn run_fdt_test(spec: &minios_kernel::fdt::MachineSpec) {
         spec.timebase_hz
     );
     crate::println!("[MINIOS_TEST] fdt: ok");
+    successful_qemu_test_shutdown()
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+// FDTが報告するvirtio-mmio slotからblock deviceをprobeし、FAT32 volumeを
+// mountして既知fileの内容を検証する。
+fn run_virtio_test(spec: &minios_kernel::fdt::MachineSpec, frames: &mut dyn FrameSource) {
+    use minios_kernel::storage::fat32::Fat32;
+    use minios_kernel::storage::virtio_blk::{VirtioBlk, VirtioError};
+
+    let mut blk = None;
+    for &base in &spec.virtio_mmio[..spec.virtio_mmio_count] {
+        // Safety: `base`はFDTが報告したMMIO領域で、`with_device_pages`が
+        // S-mode R+Wとしてmap済み。
+        let mmio = unsafe { drivers::virtio_mmio::MmioRegs::new(base) };
+        let Some(frame) = frames.allocate() else {
+            fatal_qemu_test(format_args!("virtio: region frame allocation failed"));
+        };
+        match VirtioBlk::init(mmio, VirtioRegionPage::new(frame)) {
+            Ok(device) => {
+                crate::println!(
+                    "[MINIOS_TEST] virtio: block at 0x{base:x} capacity={} sectors",
+                    device.capacity_sectors()
+                );
+                blk = Some(device);
+                break;
+            }
+            // 空slot (BadMagic) かblock以外のdeviceなら次のslotを試す。
+            // 失敗したregionはdropでframeがpoolへ返る。
+            Err(
+                VirtioError::BadMagic
+                | VirtioError::NotBlockDevice(_)
+                | VirtioError::UnsupportedVersion(_),
+            ) => {}
+            Err(error) => {
+                fatal_qemu_test(format_args!("virtio: init failed at 0x{base:x}: {error:?}"));
+            }
+        }
+    }
+    let Some(blk) = blk else {
+        fatal_qemu_test(format_args!("virtio: no block device found"));
+    };
+
+    let mut fs = match Fat32::mount(blk) {
+        Ok(fs) => fs,
+        Err(error) => fatal_qemu_test(format_args!("virtio: mount failed: {error:?}")),
+    };
+
+    let mut listed = false;
+    if fs
+        .for_each_root_entry(|entry| {
+            if entry.name() == "HELLO.TXT" {
+                listed = true;
+            }
+        })
+        .is_err()
+    {
+        fatal_qemu_test(format_args!("virtio: root listing failed"));
+    }
+    if !listed {
+        fatal_qemu_test(format_args!("virtio: HELLO.TXT not in root listing"));
+    }
+
+    // disk image builderが書き込む固定内容と照合する。
+    const EXPECTED: &[u8] = b"hello from virtio\n";
+    let mut collected = [0u8; 64];
+    let mut len = 0usize;
+    if fs
+        .read_root_file("HELLO.TXT", |chunk| {
+            let end = (len + chunk.len()).min(collected.len());
+            collected[len..end].copy_from_slice(&chunk[..end - len]);
+            len = end;
+        })
+        .is_err()
+    {
+        fatal_qemu_test(format_args!("virtio: read HELLO.TXT failed"));
+    }
+    if &collected[..len] != EXPECTED {
+        fatal_qemu_test(format_args!("virtio: HELLO.TXT content mismatch len={len}"));
+    }
+    crate::println!("[MINIOS_TEST] virtio: ok");
     successful_qemu_test_shutdown()
 }
 
@@ -2252,7 +2414,8 @@ fn successful_payload_shutdown() -> ! {
         feature = "qemu-test-user-syscall",
         feature = "qemu-test-user-exit",
         feature = "qemu-test-fdt",
-        feature = "qemu-test-heap"
+        feature = "qemu-test-heap",
+        feature = "qemu-test-virtio"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -2271,7 +2434,8 @@ fn successful_qemu_test_shutdown() -> ! {
         feature = "qemu-test-user-trap",
         feature = "qemu-test-user-syscall",
         feature = "qemu-test-user-exit",
-        feature = "qemu-test-heap"
+        feature = "qemu-test-heap",
+        feature = "qemu-test-virtio"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {

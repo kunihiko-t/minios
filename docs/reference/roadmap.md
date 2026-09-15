@@ -68,7 +68,7 @@ Stdin frameの受信は`StdinStaging`の再開可能なdecoderが担い、frame�
 
 汎用heapの動的拡張は実装済みで、ヒープはOOM時にframe allocatorの最上位pageを取り込んで下方へ成長します。
 次はこの成長経路を使う可変個のkernel object管理を、固定容量の単一address spaceを越える段階で導入します。
-その後にVirtIO block、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
+その後にfile systemの拡充、network、multi-hart、NEORV32以外の実機対応を進めます。
 
 OCI image、Linux binary互換、multi-tenant isolationはこの実装の目標に含めません。
 

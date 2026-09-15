@@ -1,6 +1,7 @@
 pub mod bundle;
 pub mod cargo;
 pub mod cli;
+pub mod disk;
 pub mod docs;
 pub mod guest;
 pub mod qemu;
@@ -212,6 +213,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::UserExit) => "QEMU user-exit test".to_owned(),
             Self::Qemu(qemu::TestKind::Fdt) => "QEMU fdt test".to_owned(),
             Self::Qemu(qemu::TestKind::Heap) => "QEMU heap test".to_owned(),
+            Self::Qemu(qemu::TestKind::Virtio) => "QEMU virtio test".to_owned(),
             Self::Qemu(qemu::TestKind::Payload) => "QEMU payload test".to_owned(),
             Self::Qemu(qemu::TestKind::PayloadArgs) => "QEMU payload-args test".to_owned(),
             Self::Qemu(qemu::TestKind::PayloadStdin) => "QEMU payload-stdin test".to_owned(),
@@ -240,6 +242,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserExit),
         Phase::Qemu(qemu::TestKind::Fdt),
         Phase::Qemu(qemu::TestKind::Heap),
+        Phase::Qemu(qemu::TestKind::Virtio),
         Phase::Qemu(qemu::TestKind::Payload),
         Phase::Qemu(qemu::TestKind::PayloadArgs),
         Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -279,6 +282,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserExit),
         Phase::Qemu(qemu::TestKind::Fdt),
         Phase::Qemu(qemu::TestKind::Heap),
+        Phase::Qemu(qemu::TestKind::Virtio),
         Phase::Qemu(qemu::TestKind::Payload),
         Phase::Qemu(qemu::TestKind::PayloadArgs),
         Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -393,6 +397,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::UserExit) => Some(vec![Phase::Qemu(qemu::TestKind::UserExit)]),
         Command::Test(TestFilter::Fdt) => Some(vec![Phase::Qemu(qemu::TestKind::Fdt)]),
         Command::Test(TestFilter::Heap) => Some(vec![Phase::Qemu(qemu::TestKind::Heap)]),
+        Command::Test(TestFilter::Virtio) => Some(vec![Phase::Qemu(qemu::TestKind::Virtio)]),
         Command::Test(TestFilter::Payload) => Some(vec![Phase::Qemu(qemu::TestKind::Payload)]),
         Command::Test(TestFilter::PayloadArgs) => {
             Some(vec![Phase::Qemu(qemu::TestKind::PayloadArgs)])
@@ -476,6 +481,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::UserExit),
                 Phase::Qemu(qemu::TestKind::Fdt),
                 Phase::Qemu(qemu::TestKind::Heap),
+                Phase::Qemu(qemu::TestKind::Virtio),
                 Phase::Qemu(qemu::TestKind::Payload),
                 Phase::Qemu(qemu::TestKind::PayloadArgs),
                 Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -537,6 +543,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserExit),
             Phase::Qemu(qemu::TestKind::Fdt),
             Phase::Qemu(qemu::TestKind::Heap),
+            Phase::Qemu(qemu::TestKind::Virtio),
             Phase::Qemu(qemu::TestKind::Payload),
             Phase::Qemu(qemu::TestKind::PayloadArgs),
             Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -591,6 +598,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserExit),
             Phase::Qemu(qemu::TestKind::Fdt),
             Phase::Qemu(qemu::TestKind::Heap),
+            Phase::Qemu(qemu::TestKind::Virtio),
             Phase::Qemu(qemu::TestKind::Payload),
             Phase::Qemu(qemu::TestKind::PayloadArgs),
             Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -599,8 +607,8 @@ mod tests {
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 19], expected);
-        assert_eq!(plan.len(), 34);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 20], expected);
+        assert_eq!(plan.len(), 35);
     }
 
     #[test]
