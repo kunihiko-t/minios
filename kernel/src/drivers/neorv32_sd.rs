@@ -1,7 +1,8 @@
 use minios_kernel::storage::sd::{Bus, SdError};
 
+use crate::arch::riscv32::SYSTEM_CLOCK_HZ;
+
 const GPIO_BASE: usize = 0xfffc_0000;
-const SYSTEM_CLOCK_HZ: u32 = 96_000_000;
 const CYCLES_PER_MILLISECOND: u32 = SYSTEM_CLOCK_HZ / 1_000;
 const GPIO_SCK: u32 = 1 << 0;
 const GPIO_MOSI: u32 = 1 << 1;

@@ -1,11 +1,22 @@
 # 発展ロードマップ
 
 この文書は、実装済みの範囲、次の受け入れ単位、その後の方向を区別します。
-現在のrelease gateは、RV64とRV32のクロスビルド、host test、14個のQEMU経路を含む29段階を実行します。
+現在のrelease gateは、RV64とRV32のクロスビルド、host test、16個のQEMU経路を含む31段階を実行します。
 
 ## 実装済み
 
-物理フレームアロケーターは、boot payload予約領域を除く`align_up(__kernel_end, 0x1000)..0x8780_0000`を管理します。
+物理フレームアロケーターは、ヒープ領域、boot payload予約領域、FDT予約領域を除く`align_up(__kernel_end, 0x1000)..0x8770_0000`を管理します。
+
+汎用ヒープの第一歩も完了しています。
+managed RAM末尾の1 MiB固定領域を16バイト粒度のfirst-fit free-listで管理し、`#[global_allocator]`経由で`alloc` crateの`Box`や`Vec`を利用できます。
+解放時はaddress昇順のlistで隣接ブロックを併合し、二重解放と領域外ポインターを実行時に拒否します。
+`cargo xtask test heap`は、`Vec`の成長、`Box`の割り当てと解放、統計値の整合をQEMU上で確認します。
+現段階ではヒープ領域は固定であり、単一ハートかつ割り込み内で割り当てない規約を前提とします。
+
+Device Tree対応も完了しています。
+`kernel_main`はOpenSBIが`a1`へ渡すDTBをbare modeで解析し、RAM範囲、16550 UARTベース、`/cpus`の`timebase-frequency`を`fdt::MachineSpec`として発見します。
+QEMU `virt`の配置契約に合わせてRAM最後の2 MiBをFDT予約領域とし、その直下の6 MiBをboot payload窓へ置きます。
+`cargo xtask test fdt`は、発見したmachine記述がhost側の期待値と一致することをQEMU上で確認します。
 
 Sv39の節目は完了しています。
 カーネルは4 KiB leafだけを使う三段page tableを構築し、section、managed RAM、UARTをS-mode専用で恒等写像します。
@@ -46,8 +57,7 @@ RV32IMEM契約は実効32 KiBへ更新し、RV32 buildは`opt-level=z`で収め�
 
 ## 次
 
-Device TreeはRAM、UART、timebaseの固定値をmachine記述へ置き換えるときに導入します。
-汎用heapは固定容量の単一address spaceを越え、可変個のkernel objectとprocessを管理するときに導入します。
+汎用heapの動的拡張（フレームアロケーターからの成長）と、それを使う可変個のkernel object・process管理は、固定容量の単一address spaceを越える段階で導入します。
 その後にscheduler、VirtIO block、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
 
 OCI image、Linux binary互換、multi-tenant isolationはこの実装の目標に含めません。

@@ -11,9 +11,10 @@ QEMU `virt`のRAM全体である`0x8000_0000..0x8800_0000`にはOpenSBIとカー
 
 ## 実装
 
-[`FrameAllocator`](../../kernel/src/memory/frame.rs)は、`align_up(__kernel_end, 4096)..0x8780_0000`だけを管理します。
-現在の定数名`PHYSICAL_MEMORY_END`は、物理RAM全体の上端ではなく、アロケーターへ渡す管理範囲の上端`0x8780_0000`を表します。
-続く`0x8780_0000..0x8800_0000`はboot payloadの予約領域であり、`0x8800_0000`がQEMU `-m 128M`で構成したRAMの排他的な上端です。
+[`FrameAllocator`](../../kernel/src/memory/frame.rs)は、`align_up(__kernel_end, 4096)..0x8770_0000`だけを管理します。
+現在の定数名`PHYSICAL_MEMORY_END`は、物理RAM全体の上端ではなく、managed RAMの上端であるpayload窓の開始位置`0x8780_0000`を表します。
+直前の`0x8770_0000..0x8780_0000`は汎用ヒープ領域、続く`0x8780_0000..0x87e0_0000`はboot payloadの予約領域、最後の`0x87e0_0000..0x8800_0000`はQEMUがDTBを置くFDT予約領域であり、`0x8800_0000`がQEMU `-m 128M`で構成したRAMの排他的な上端です。
+これらの境界は実行時に`MachineSpec`がDTBから導きます。
 128 MiBには最大32,768ページがあるため、512個の`u64`、合計4 KiBのビットマップで表せます。
 ビットマップ自体はカーネルイメージ内にあります。
 
@@ -25,7 +26,7 @@ QEMU `virt`のRAM全体である`0x8000_0000..0x8800_0000`にはOpenSBIとカー
 呼び出し側は、成功時の全範囲が未所有かつ排他的であり、アロケーターが生存している間は別の所有者が取得しないことを保証します。
 
 カーネルの入口では、OpenSBI領域`0x8000_0000..0x8020_0000`と、リンカーが示すカーネルイメージの末尾までを除外します。
-残る`align_up(__kernel_end, 4096)..0x8780_0000`を、局所的な`FrameAllocator<512>`だけが管理します。
+残る`align_up(__kernel_end, 4096)..0x8770_0000`を、局所的な`FrameAllocator<512>`だけが管理します。
 グローバルアロケーターと別のメモリーマネージャーは初期化しません。
 
 払い出す`PhysFrame`は`Clone`でも`Copy`でもなく、`start(&self)`は所有権を消費せずにアドレスだけを読みます。
@@ -54,8 +55,8 @@ $ cargo xtask test memory
 - リンカー領域との重複やファームウェアの破壊が起こる：開始位置を固定値にせず、`__kernel_end`から上へそろえます。
 - 同じアドレスが二度返る：ビットマップの更新と、`unsafe`な範囲取得で所有権が重複していないかを調べます。
 - `free`が減らない：`allocated`の更新と`total = allocated + free`を状態遷移ごとに確認します。
-- payload予約領域へframeを割り当てる：現在の`PHYSICAL_MEMORY_END`はallocator ceilingの`0x8780_0000`です。
-  QEMU `-m 128M`が示すRAM endの`0x8800_0000`を設定すると、予約領域まで管理対象に含めてしまいます。
+- payload予約領域へframeを割り当てる：現在の`PHYSICAL_MEMORY_END`はmanaged RAMの上端`0x8780_0000`ですが、`FrameAllocator`へ渡す上端はヒープ領域を除いた`0x8770_0000`です。
+  QEMU `-m 128M`が示すRAM endの`0x8800_0000`を設定すると、ヒープ領域、payload窓、FDT予約領域まで管理対象に含めてしまいます。
 
 ## 演習
 

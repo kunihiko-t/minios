@@ -13,7 +13,9 @@
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
             feature = "qemu-test-user-syscall",
-            feature = "qemu-test-user-exit"
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
         )
     ),
     all(
@@ -26,7 +28,9 @@
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
             feature = "qemu-test-user-syscall",
-            feature = "qemu-test-user-exit"
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
         )
     ),
     all(
@@ -38,7 +42,9 @@
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
             feature = "qemu-test-user-syscall",
-            feature = "qemu-test-user-exit"
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
         )
     ),
     all(
@@ -49,7 +55,9 @@
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
             feature = "qemu-test-user-syscall",
-            feature = "qemu-test-user-exit"
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
         )
     ),
     all(
@@ -59,7 +67,9 @@
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
             feature = "qemu-test-user-syscall",
-            feature = "qemu-test-user-exit"
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
         )
     ),
     all(
@@ -68,7 +78,9 @@
             feature = "qemu-test-user-entry",
             feature = "qemu-test-user-trap",
             feature = "qemu-test-user-syscall",
-            feature = "qemu-test-user-exit"
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
         )
     ),
     all(
@@ -76,14 +88,30 @@
         any(
             feature = "qemu-test-user-trap",
             feature = "qemu-test-user-syscall",
-            feature = "qemu-test-user-exit"
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
         )
     ),
     all(
         feature = "qemu-test-user-trap",
-        any(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
+        any(
+            feature = "qemu-test-user-syscall",
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
+        )
     ),
-    all(feature = "qemu-test-user-syscall", feature = "qemu-test-user-exit")
+    all(
+        feature = "qemu-test-user-syscall",
+        any(
+            feature = "qemu-test-user-exit",
+            feature = "qemu-test-fdt",
+            feature = "qemu-test-heap"
+        )
+    ),
+    all(feature = "qemu-test-user-exit", feature = "qemu-test-fdt"),
+    all(feature = "qemu-test-fdt", feature = "qemu-test-heap")
 ))]
 compile_error!("QEMU kernel test features are mutually exclusive; enable at most one");
 
@@ -103,10 +131,15 @@ mod drivers;
 mod storage {
     pub use minios_kernel::storage::{fat32, sd};
 }
+#[cfg(target_arch = "riscv64")]
+mod machine;
 #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 mod shell;
 #[cfg(target_arch = "riscv64")]
 mod time;
+
+#[cfg(target_arch = "riscv64")]
+extern crate alloc;
 
 #[cfg(target_arch = "riscv64")]
 mod control;
@@ -131,7 +164,7 @@ use minios_kernel::elf::load::load_image_with_kernel_mappings;
 use minios_kernel::memory::frame::{FrameStats, PhysFrame};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::memory::{
-    BOOT_PAYLOAD_START, KernelSections, PHYSICAL_MEMORY_END,
+    KERNEL_HEAP_LEN, KernelSections,
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
 #[cfg(target_arch = "riscv64")]
@@ -168,6 +201,86 @@ use minios_kernel::{
 const UNKNOWN_HART_ID: usize = usize::MAX;
 #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(UNKNOWN_HART_ID);
+
+/// `Heap`をspin lockで包んだglobal allocator。
+/// 単一ハートかつ「割り込みハンドラー内では割り当てない」規約を前提にする。
+/// 割り込み内で割り当てると、lock保持者を待つspinがそのままdeadlockする。
+#[cfg(target_arch = "riscv64")]
+struct KernelHeap {
+    locked: core::sync::atomic::AtomicBool,
+    heap: core::cell::UnsafeCell<minios_kernel::memory::heap::Heap>,
+}
+
+#[cfg(target_arch = "riscv64")]
+// Safety: 単一ハート上で`locked`が排他アクセスを保証する。
+unsafe impl Sync for KernelHeap {}
+
+#[cfg(target_arch = "riscv64")]
+impl KernelHeap {
+    const fn empty() -> Self {
+        Self {
+            locked: core::sync::atomic::AtomicBool::new(false),
+            heap: core::cell::UnsafeCell::new(minios_kernel::memory::heap::Heap::empty()),
+        }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut minios_kernel::memory::heap::Heap) -> R) -> R {
+        while self
+            .locked
+            .swap(true, core::sync::atomic::Ordering::Acquire)
+        {
+            core::hint::spin_loop();
+        }
+        // Safety: `locked`を取得したためheapへの排他アクセスが成り立つ。
+        let result = f(unsafe { &mut *self.heap.get() });
+        self.locked
+            .store(false, core::sync::atomic::Ordering::Release);
+        result
+    }
+
+    /// ヒープ領域を登録する。起動直後の一度だけ呼ぶ。
+    ///
+    /// # Safety
+    ///
+    /// `Heap::init`と同じ排他性の契約を呼び出し側が保証する。
+    unsafe fn init(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> Result<(), minios_kernel::memory::heap::HeapError> {
+        self.with(|heap| unsafe { heap.init(start, len) })
+    }
+
+    #[cfg(feature = "qemu-test-heap")]
+    fn stats(&self) -> minios_kernel::memory::heap::HeapStats {
+        self.with(|heap| heap.stats())
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+// Safety: `GlobalAlloc`の契約により、返すポインターはlayoutの整列を満たす
+// 有効な領域であり、`dealloc`は`alloc`が返したポインターだけを受け取る。
+// OOM時はnullを返し、`alloc`crateの既定handlerがpanicへ変換する。
+unsafe impl core::alloc::GlobalAlloc for KernelHeap {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        self.with(|heap| match heap.alloc(layout) {
+            Ok(ptr) => ptr.as_ptr(),
+            Err(_) => core::ptr::null_mut(),
+        })
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
+        if let Some(ptr) = core::ptr::NonNull::new(ptr) {
+            // spanの検証失敗（領域外・二重解放）は安全側の見逃しとして
+            // 解放せずに残す。破壊よりリークを選ぶ。
+            let _ = self.with(|heap| unsafe { heap.dealloc(ptr) });
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+#[global_allocator]
+static KERNEL_HEAP: KernelHeap = KernelHeap::empty();
 
 #[cfg(target_arch = "riscv64")]
 static mut KERNEL_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
@@ -285,59 +398,85 @@ unsafe extern "C" {
 pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     // パニック診断が起動ハートを識別できるよう、ほかの初期化より前に記録する。
     BOOT_HART_ID.store(hart_id, Ordering::Relaxed);
+    // OpenSBIがa1で渡すDTBからRAM、UART、timebaseを発見する。
+    // 失敗時はQEMU `virt`既定値のUART経由でpanic診断を出して停止する。
+    let machine = match machine::discover(dtb) {
+        Ok(spec) => spec,
+        Err(error) => panic!("MiniOS fdt: {error:?}"),
+    };
+    let managed_memory_start = kernel_memory_start();
+    if machine.managed_end() <= managed_memory_start || !machine.ram.contains(&managed_memory_start)
+    {
+        panic!("MiniOS fdt: machine RAM does not contain the kernel image");
+    }
     // ターゲット固有のコンソール初期化。QEMUでは何もしない。
     console::init();
-    // DTB は後のハードウェア検出で使うまで保持する OpenSBI の ABI 引数である。
-    let _ = dtb;
     arch::riscv64::trap::init();
     crate::println!("[ok] traps");
 
-    let managed_memory_start = kernel_memory_start();
+    // managed RAMの末尾をヒープ領域として切り出し、FrameAllocatorの
+    // 管理上端をヒープの直下へ下げる。
+    let heap_start = machine
+        .managed_end()
+        .checked_sub(KERNEL_HEAP_LEN)
+        .filter(|start| *start > managed_memory_start)
+        .unwrap_or_else(|| panic!("MiniOS heap: managed RAM too small"));
+    // Safety: `heap_start..machine.managed_end()`はmachine記述が導くRAM内の
+    // 排他的領域であり、FrameAllocator、payload窓、FDT予約とは重ならない。
+    unsafe { KERNEL_HEAP.init(heap_start, KERNEL_HEAP_LEN) }
+        .unwrap_or_else(|error| panic!("MiniOS heap: invalid region: {error:?}"));
+
     // Safety: OpenSBIが使う`0x8000_0000..0x8020_0000`と、リンカーが配置する
     // `0x8020_0000..managed_memory_start`のカーネルイメージを除外している。
-    // boot payloadの開始`0x8780_0000`までを所有するのは、この局所アロケーターだけである。
+    // machine記述が導くヒープ領域の直下までを所有するのは、この局所アロケーターだけである。
     // このアロケーターが生存している間は、同じ範囲を管理する別の所有者を作らない。
-    let mut frames =
-        match unsafe { FrameAllocator::<512>::new(managed_memory_start, PHYSICAL_MEMORY_END) } {
-            Ok(frames) => frames,
-            Err(error) => fatal_memory_error(error),
-        };
+    let mut frames = match unsafe { FrameAllocator::<512>::new(managed_memory_start, heap_start) } {
+        Ok(frames) => frames,
+        Err(error) => fatal_memory_error(error),
+    };
 
     let sections = kernel_sections();
     // 予約窓はこの時点ではまだaddress spaceをactivateしていないbare mode
     // (VA==PA) にあるため、物理addressから直接検証できる。loaderがpayloadを
     // 置いていない場合はNoneとなり、shellへ抜ける。
-    let payload = if unsafe { BootPayload::reserved_window_has_bundle() } {
-        // Safety: `-m 128M`と`-device loader`が予約窓を有効RAMとして配置する。
-        match unsafe { BootPayload::from_reserved_window() } {
-            Ok(payload) => Some(payload),
-            Err(error) => fatal_payload_error(format_args!(
-                "MiniOS payload: invalid bundle, {error:?}\r\n"
-            )),
-        }
-    } else {
-        None
-    };
-    let plan = match KernelMapPlan::new(&sections, managed_memory_start, PHYSICAL_MEMORY_END) {
+    let payload =
+        if unsafe { BootPayload::reserved_window_has_bundle(machine.payload_window().start) } {
+            // Safety: `-m 128M`と`-device loader`が予約窓を有効RAMとして配置する。
+            match unsafe { BootPayload::from_reserved_window(machine.payload_window()) } {
+                Ok(payload) => Some(payload),
+                Err(error) => fatal_payload_error(format_args!(
+                    "MiniOS payload: invalid bundle, {error:?}\r\n"
+                )),
+            }
+        } else {
+            None
+        };
+    let plan = match KernelMapPlan::new(
+        &sections,
+        managed_memory_start,
+        machine.managed_end(),
+        machine.uart_base,
+    ) {
         Ok(plan) => plan,
         Err(error) => panic!("invalid kernel mapping plan: {error:?}"),
     };
     // payloadが存在するときだけ、使用page (切り上げ) をS-mode read-onlyで
-    // kernel空間とuser空間のborrowed mappingへ加える。全8 MiBはmapしない。
+    // kernel空間とuser空間のborrowed mappingへ加える。窓全体はmapしない。
     let plan = match payload.as_ref() {
         Some(payload) => plan
-            .with_payload_pages(BOOT_PAYLOAD_START, payload.total_len() as usize)
+            .with_payload_pages(machine.payload_window(), payload.total_len() as usize)
             .unwrap_or_else(|error| panic!("invalid payload mapping plan: {error:?}")),
         None => plan,
     };
-    // Safety: QEMU virt exposes managed_memory_start..PHYSICAL_MEMORY_END as
-    // valid RAM. Bare translation reaches it by identity before satp changes,
-    // and `plan` identity-maps the complete range afterward. This boot hart
-    // creates the only IdentityFrameStore, and all byte access to allocator-
-    // issued frames goes through it for the rest of kernel_main. The allocator
-    // only tracks/assigns frames and never dereferences their memory itself.
+    // Safety: QEMU virt exposes managed_memory_start..machine.managed_end()
+    // as valid RAM. Bare translation reaches it by identity before satp
+    // changes, and `plan` identity-maps the complete range afterward. This
+    // boot hart creates the only IdentityFrameStore, and all byte access to
+    // allocator-issued frames goes through it for the rest of kernel_main.
+    // The allocator only tracks/assigns frames and never dereferences their
+    // memory itself.
     let mut memory =
-        match unsafe { IdentityFrameStore::new(managed_memory_start, PHYSICAL_MEMORY_END) } {
+        match unsafe { IdentityFrameStore::new(managed_memory_start, machine.managed_end()) } {
             Ok(memory) => memory,
             Err(error) => panic!("invalid identity frame-store range: {error:?}"),
         };
@@ -368,7 +507,7 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     // table. `root` belongs to this address space and remains live forever.
     unsafe { arch::riscv64::csr::activate_sv39(root) };
 
-    if let Err(error) = time::init() {
+    if let Err(error) = time::init(machine.timebase_hz) {
         fatal_timer_error("initial schedule", error);
     }
     crate::println!("[ok] timer");
@@ -401,6 +540,16 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     #[cfg(feature = "qemu-test-memory")]
     {
         run_memory_test(&mut frames);
+    }
+
+    #[cfg(feature = "qemu-test-fdt")]
+    {
+        run_fdt_test(machine);
+    }
+
+    #[cfg(feature = "qemu-test-heap")]
+    {
+        run_heap_test();
     }
 
     if let Some(payload) = payload {
@@ -439,6 +588,59 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     }
 
     shell::run(hart_id, &mut frames)
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-fdt"))]
+// FDTから発見したmachine記述をhostが期待するQEMU `virt`の値と照合する。
+// 値そのものをmarkerに載せ、違いがあればMissingMarkerとして検出される。
+fn run_fdt_test(spec: &minios_kernel::fdt::MachineSpec) {
+    crate::println!(
+        "[MINIOS_TEST] fdt: ram=0x{:x}..0x{:x} uart=0x{:x} timebase={}",
+        spec.ram.start,
+        spec.ram.end,
+        spec.uart_base,
+        spec.timebase_hz
+    );
+    crate::println!("[MINIOS_TEST] fdt: ok");
+    successful_qemu_test_shutdown()
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-heap"))]
+// `GlobalAlloc`経由の`alloc`crate型と、ヒープ統計の整合をゲスト上で確認する。
+fn run_heap_test() {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+
+    // Vecの成長が再割り当てと既存内容の保持を繰り返すことを確認する。
+    let mut values: Vec<u64> = Vec::new();
+    for i in 0..512u64 {
+        values.push(i * 3);
+    }
+    let sum: u64 = values.iter().sum();
+    if values.len() != 512 || sum != 512 * 511 / 2 * 3 {
+        fatal_qemu_test(format_args!("heap: vec contents mismatch"));
+    }
+    drop(values);
+
+    // 解放後の新規割り当てが再利用と`dealloc`経路を通ることを確認する。
+    let boxed = Box::new(0x5a5a_u64);
+    if *boxed != 0x5a5a {
+        fatal_qemu_test(format_args!("heap: box readback mismatch"));
+    }
+    drop(boxed);
+
+    let stats = KERNEL_HEAP.stats();
+    if stats.total != KERNEL_HEAP_LEN || stats.free == 0 || stats.allocated != 0 {
+        fatal_qemu_test(format_args!("heap: unexpected stats {stats:?}"));
+    }
+    crate::println!(
+        "[MINIOS_TEST] heap: total={} largest_free={} blocks={}",
+        stats.total,
+        stats.largest_free,
+        stats.free_blocks
+    );
+    crate::println!("[MINIOS_TEST] heap: ok");
+    successful_qemu_test_shutdown()
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -511,12 +713,13 @@ fn run_vm_test<const N: usize>(kernel_space: &AddressSpace<'_, N>, memory: &Iden
         kernel_space,
         memory,
         "UART",
-        0x1000_0000,
-        0x1000_0000 + PAGE_SIZE,
+        machine::spec().uart_base,
+        machine::spec().uart_base + PAGE_SIZE,
         (true, true, false, false),
     );
 
-    let payload = VirtAddr::try_new(0x8780_0000).expect("payload start is an Sv39 address");
+    let payload = VirtAddr::try_new(machine::spec().payload_window().start as u64)
+        .expect("payload start is an Sv39 address");
     let actual = kernel_space.translate(memory, payload);
     if !matches!(actual, Err(VmError::NotMapped)) {
         fatal_qemu_test(format_args!(
@@ -1247,8 +1450,9 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-trap"))]
 fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
     const STORE_PAGE_FAULT: usize = 15;
-    const SUPERVISOR_UART_PAGE: usize = 0x1000_0000;
-    if scause != STORE_PAGE_FAULT || stval != SUPERVISOR_UART_PAGE {
+    // fixtureがstoreを試すのはmachine記述が発見したUART pageである。
+    let supervisor_uart_page = machine::spec().uart_base;
+    if scause != STORE_PAGE_FAULT || stval != supervisor_uart_page {
         crate::console::emergency_print(format_args!(
             "[MINIOS_TEST] failed: user-trap expected supervisor UART denial, scause={scause:#018x} stval={stval:#018x}\r\n"
         ));
@@ -1781,7 +1985,9 @@ fn successful_payload_shutdown() -> ! {
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
         feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
+        feature = "qemu-test-user-exit",
+        feature = "qemu-test-fdt",
+        feature = "qemu-test-heap"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -1799,7 +2005,8 @@ fn successful_qemu_test_shutdown() -> ! {
         feature = "qemu-test-user-entry",
         feature = "qemu-test-user-trap",
         feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
+        feature = "qemu-test-user-exit",
+        feature = "qemu-test-heap"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {

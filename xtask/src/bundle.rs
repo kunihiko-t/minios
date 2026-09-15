@@ -26,7 +26,7 @@ pub enum BundleError {
         arguments: usize,
         source: ManifestError,
     },
-    /// bundle全体が8 MiB上限を超えた。
+    /// bundle全体が6 MiB上限を超えた。
     TooLarge { total_len: u64, max_len: u64 },
     /// bundle fileの書き出しに失敗した。
     Write { path: PathBuf, message: String },

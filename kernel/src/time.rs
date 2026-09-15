@@ -1,11 +1,18 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
+// QEMU `virt`のtimebase-frequencyの参照値。実行時はFDTの`/cpus`から得た
+// 値を`init`へ渡して使う。
 pub const TIMEBASE_HZ: u64 = 10_000_000;
 pub const TICKS_PER_SECOND: u64 = 100;
 pub const CYCLES_PER_TICK: u64 = 100_000;
 
-// QEMU virtのタイムベースと選んだティック周波数が固定周期と一致することを、コンパイル時に確かめる。
+// 参照値のtimebaseと選んだティック周波数が固定周期と一致することを、コンパイル時に確かめる。
 const _: () = assert!(TIMEBASE_HZ / TICKS_PER_SECOND == CYCLES_PER_TICK);
+
+// FDTから発見したtimebase。`init`が一度だけ書き、タイマー割り込みの
+// デッドライン計算だけが読む。
+#[cfg(target_arch = "riscv64")]
+static TIMEBASE: AtomicU64 = AtomicU64::new(TIMEBASE_HZ);
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
@@ -22,8 +29,15 @@ pub fn ticks_to_millis(ticks: u64) -> u64 {
     ticks.saturating_mul(1_000) / TICKS_PER_SECOND
 }
 
+/// `timebase_hz`はFDTの`/cpus` `timebase-frequency`が示す`time` CSRの周波数。
+/// ティック周期は`timebase_hz / TICKS_PER_SECOND`サイクルへ丸める。
 #[cfg(target_arch = "riscv64")]
-pub fn init() -> Result<(), minios_kernel::sbi::SbiError> {
+pub fn init(timebase_hz: u64) -> Result<(), minios_kernel::sbi::SbiError> {
+    assert!(
+        timebase_hz >= TICKS_PER_SECOND,
+        "timebase too slow for 100 Hz ticks"
+    );
+    TIMEBASE.store(timebase_hz, Ordering::Relaxed);
     schedule_next()?;
 
     let sie = crate::arch::riscv64::csr::read_sie();
@@ -47,7 +61,8 @@ pub fn handle_interrupt() -> Result<(), minios_kernel::sbi::SbiError> {
 
 #[cfg(target_arch = "riscv64")]
 fn schedule_next() -> Result<(), minios_kernel::sbi::SbiError> {
-    let deadline = crate::arch::riscv64::csr::read_time().wrapping_add(CYCLES_PER_TICK);
+    let cycles_per_tick = TIMEBASE.load(Ordering::Relaxed) / TICKS_PER_SECOND;
+    let deadline = crate::arch::riscv64::csr::read_time().wrapping_add(cycles_per_tick);
     crate::arch::riscv64::sbi::set_timer(deadline).map(|_| ())
 }
 

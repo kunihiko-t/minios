@@ -210,6 +210,8 @@ impl Phase {
             Self::Qemu(qemu::TestKind::UserTrap) => "QEMU user-trap test".to_owned(),
             Self::Qemu(qemu::TestKind::UserSyscall) => "QEMU user-syscall test".to_owned(),
             Self::Qemu(qemu::TestKind::UserExit) => "QEMU user-exit test".to_owned(),
+            Self::Qemu(qemu::TestKind::Fdt) => "QEMU fdt test".to_owned(),
+            Self::Qemu(qemu::TestKind::Heap) => "QEMU heap test".to_owned(),
             Self::Qemu(qemu::TestKind::Payload) => "QEMU payload test".to_owned(),
             Self::Qemu(qemu::TestKind::PayloadArgs) => "QEMU payload-args test".to_owned(),
             Self::Qemu(qemu::TestKind::PayloadStdin) => "QEMU payload-stdin test".to_owned(),
@@ -233,6 +235,8 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserTrap),
         Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::UserExit),
+        Phase::Qemu(qemu::TestKind::Fdt),
+        Phase::Qemu(qemu::TestKind::Heap),
         Phase::Qemu(qemu::TestKind::Payload),
         Phase::Qemu(qemu::TestKind::PayloadArgs),
         Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -267,6 +271,8 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserTrap),
         Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::UserExit),
+        Phase::Qemu(qemu::TestKind::Fdt),
+        Phase::Qemu(qemu::TestKind::Heap),
         Phase::Qemu(qemu::TestKind::Payload),
         Phase::Qemu(qemu::TestKind::PayloadArgs),
         Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -374,6 +380,8 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
             Some(vec![Phase::Qemu(qemu::TestKind::UserSyscall)])
         }
         Command::Test(TestFilter::UserExit) => Some(vec![Phase::Qemu(qemu::TestKind::UserExit)]),
+        Command::Test(TestFilter::Fdt) => Some(vec![Phase::Qemu(qemu::TestKind::Fdt)]),
+        Command::Test(TestFilter::Heap) => Some(vec![Phase::Qemu(qemu::TestKind::Heap)]),
         Command::Test(TestFilter::Payload) => Some(vec![Phase::Qemu(qemu::TestKind::Payload)]),
         Command::Test(TestFilter::PayloadArgs) => {
             Some(vec![Phase::Qemu(qemu::TestKind::PayloadArgs)])
@@ -448,6 +456,8 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::UserTrap),
                 Phase::Qemu(qemu::TestKind::UserSyscall),
                 Phase::Qemu(qemu::TestKind::UserExit),
+                Phase::Qemu(qemu::TestKind::Fdt),
+                Phase::Qemu(qemu::TestKind::Heap),
                 Phase::Qemu(qemu::TestKind::Payload),
                 Phase::Qemu(qemu::TestKind::PayloadArgs),
                 Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -504,6 +514,8 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserTrap),
             Phase::Qemu(qemu::TestKind::UserSyscall),
             Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::Fdt),
+            Phase::Qemu(qemu::TestKind::Heap),
             Phase::Qemu(qemu::TestKind::Payload),
             Phase::Qemu(qemu::TestKind::PayloadArgs),
             Phase::Qemu(qemu::TestKind::PayloadStdin),
@@ -553,13 +565,15 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserTrap),
             Phase::Qemu(qemu::TestKind::UserSyscall),
             Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::Fdt),
+            Phase::Qemu(qemu::TestKind::Heap),
             Phase::Qemu(qemu::TestKind::Payload),
             Phase::Qemu(qemu::TestKind::PayloadArgs),
             Phase::Qemu(qemu::TestKind::PayloadStdin),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 14], expected);
-        assert_eq!(plan.len(), 29);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 16], expected);
+        assert_eq!(plan.len(), 31);
     }
 
     #[test]

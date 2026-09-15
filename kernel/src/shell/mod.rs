@@ -14,6 +14,38 @@ const INPUT_CAPACITY: usize = 128;
 #[cfg(target_arch = "riscv32")]
 const INPUT_CAPACITY: usize = 128;
 
+#[cfg(target_arch = "riscv32")]
+// `linker_neorv32.ld`が必ず定義するIMEM/DMEM境界のC ABIシンボルである。
+// `addr_of!`でアドレスだけを得て、外部staticの内容は読み書きしない。
+unsafe extern "C" {
+    static __data_load: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+    static __kernel_end: u8;
+}
+
+// `linker_neorv32.ld`の`MEMORY`宣言と一致させたNEORV32の内蔵メモリー容量である。
+#[cfg(target_arch = "riscv32")]
+const IMEM_LEN: usize = 32_768;
+#[cfg(target_arch = "riscv32")]
+const DMEM_LEN: usize = 16_192;
+#[cfg(target_arch = "riscv32")]
+const DMEM_BASE: usize = 0x8000_0000;
+
+#[cfg(target_arch = "riscv32")]
+fn imem_used() -> usize {
+    // IMEMの占有末尾は、`.text`に続いて配置される`.data`ロードイメージの終端である。
+    let data_len =
+        core::ptr::addr_of!(__data_end) as usize - core::ptr::addr_of!(__data_start) as usize;
+    core::ptr::addr_of!(__data_load) as usize + data_len
+}
+
+#[cfg(target_arch = "riscv32")]
+fn dmem_used() -> usize {
+    // `__kernel_end`は`.bss`末尾の、カーネルが占有するDMEMの境界である。
+    core::ptr::addr_of!(__kernel_end) as usize - DMEM_BASE
+}
+
 /// RV32 shellが保持する単一のSD/FAT32 session。初回の`ls`/`cat`でmountし、
 /// 以降は作り直さず使い回す。heapもcacheも持たない。
 #[cfg(target_arch = "riscv32")]
@@ -166,13 +198,27 @@ fn execute32(input: &str, hart_id: usize, storage: &mut Option<Rv32Storage>) {
         Command::Help => {
             crate::println!("help      Show available commands");
             crate::println!("info      Show system information");
+            crate::println!("uptime    Show elapsed time");
+            crate::println!("memory    Show memory usage");
             crate::println!("echo      Echo text");
             crate::println!("ls        List root directory");
             crate::println!("cat       Read a root file");
+            crate::println!("clear     Clear the terminal");
+            crate::println!("shutdown  Halt the CPU");
         }
         Command::Info => {
             crate::println!("MiniOS 0.1.0 on RV32 (NEORV32)");
             crate::println!("hart id: {hart_id}");
+        }
+        Command::Uptime => {
+            let cycles = crate::arch::riscv32::cycles();
+            let millis = cycles / (crate::arch::riscv32::SYSTEM_CLOCK_HZ as u64 / 1_000);
+            crate::println!("uptime: {millis} ms");
+            crate::println!("cycles: {cycles}");
+        }
+        Command::Memory => {
+            crate::println!("imem: {} / {} bytes", imem_used(), IMEM_LEN);
+            crate::println!("dmem: {} / {} bytes", dmem_used(), DMEM_LEN);
         }
         Command::Echo(payload) => {
             crate::println!("{payload}");
@@ -182,8 +228,15 @@ fn execute32(input: &str, hart_id: usize, storage: &mut Option<Rv32Storage>) {
             crate::println!("sd: usage: cat NAME.EXT");
         }
         Command::Cat(name) => read_root_file(storage, name),
-        Command::Uptime | Command::Memory | Command::Clear | Command::Shutdown => {
-            crate::println!("command unavailable on RV32");
+        Command::Clear => {
+            crate::print!("\x1b[2J\x1b[H");
+        }
+        Command::Shutdown => {
+            crate::println!("shutting down");
+            // NEORV32に電源切断はない。有効な割り込みを持たないため、`wfi`で恒久的に停止する。
+            loop {
+                crate::arch::riscv32::wfi();
+            }
         }
         Command::Unknown(input) => {
             crate::println!("unknown command: {input}; try 'help'");
