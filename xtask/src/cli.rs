@@ -15,6 +15,8 @@ pub enum Command {
 pub struct BundleOptions {
     pub name: Option<String>,
     pub args: Vec<String>,
+    /// 複数image (manifest v2) bundleのguest bin名。空なら単一image v1を生成する。
+    pub images: Vec<String>,
     pub output: Option<PathBuf>,
 }
 
@@ -52,6 +54,7 @@ pub fn help() -> &'static str {
   cargo xtask build\n\
   cargo xtask run\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
+  cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
   cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|shell]\n\
   cargo xtask check"
 }
@@ -122,7 +125,7 @@ fn parse_bundle_options(options: &[String]) -> Result<BundleOptions, CliError> {
     while index < options.len() {
         let flag = options[index].as_str();
         match flag {
-            "--name" | "--arg" | "--output" => {
+            "--name" | "--arg" | "--output" | "--image" => {
                 let Some(value) = options.get(index + 1) else {
                     return Err(CliError::InvalidBundleOptions(format!(
                         "bundle option {flag} requires a value"
@@ -137,6 +140,7 @@ fn parse_bundle_options(options: &[String]) -> Result<BundleOptions, CliError> {
                         }
                     }
                     "--arg" => parsed.args.push(value.clone()),
+                    "--image" => parsed.images.push(value.clone()),
                     _ => {
                         if parsed.output.replace(PathBuf::from(value)).is_some() {
                             return Err(CliError::InvalidBundleOptions(
@@ -153,6 +157,19 @@ fn parse_bundle_options(options: &[String]) -> Result<BundleOptions, CliError> {
                 )));
             }
         }
+    }
+    // 複数imageモードでは`--name`/`--arg`は単一image専用のため併用不可にし、
+    // image数はmanifest format上限と同じ4までに制限する。
+    if !parsed.images.is_empty() && (parsed.name.is_some() || !parsed.args.is_empty()) {
+        return Err(CliError::InvalidBundleOptions(
+            "--image cannot be combined with --name or --arg".to_owned(),
+        ));
+    }
+    if parsed.images.len() > minios_abi::manifest::IMAGE_MAX_COUNT {
+        return Err(CliError::InvalidBundleOptions(format!(
+            "too many --image options (max {})",
+            minios_abi::manifest::IMAGE_MAX_COUNT
+        )));
     }
     Ok(parsed)
 }
@@ -221,6 +238,7 @@ mod tests {
             "cargo xtask build",
             "cargo xtask run",
             "cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]",
+            "cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]",
             "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|shell]",
             "cargo xtask check",
         ] {
@@ -253,8 +271,58 @@ mod tests {
             Ok(Command::Bundle(BundleOptions {
                 name: Some("hello".to_owned()),
                 args: vec!["alpha".to_owned(), "bravo".to_owned()],
+                images: vec![],
                 output: Some(PathBuf::from("target/hello.mcb")),
             }))
+        );
+    }
+
+    #[test]
+    fn parses_bundle_with_multiple_images() {
+        assert_eq!(
+            parse(&owned(&[
+                "bundle",
+                "--image",
+                "sched-a",
+                "--image",
+                "sched-b",
+                "--output",
+                "target/multi.mcb",
+            ])),
+            Ok(Command::Bundle(BundleOptions {
+                name: None,
+                args: vec![],
+                images: vec!["sched-a".to_owned(), "sched-b".to_owned()],
+                output: Some(PathBuf::from("target/multi.mcb")),
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_mixing_images_with_single_image_options() {
+        for extra in ["--name", "--arg"] {
+            assert_eq!(
+                parse(&owned(&["bundle", "--image", "a", extra, "x"])),
+                Err(CliError::InvalidBundleOptions(
+                    "--image cannot be combined with --name or --arg".to_owned()
+                )),
+                "extra={extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_more_images_than_the_manifest_limit() {
+        let mut args = vec!["bundle"];
+        for name in ["a", "b", "c", "d", "e"] {
+            args.push("--image");
+            args.push(name);
+        }
+        assert_eq!(
+            parse(&owned(&args)),
+            Err(CliError::InvalidBundleOptions(
+                "too many --image options (max 4)".to_owned()
+            ))
         );
     }
 

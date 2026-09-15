@@ -1,5 +1,7 @@
+mod proc_exit;
 mod ready;
 
+pub use proc_exit::{PROC_EXIT_PAYLOAD_LEN, ProcExitPayload, ProcExitPayloadError};
 pub use ready::{READY_PAYLOAD_LEN, ReadyPayload, ReadyPayloadError};
 
 pub const FRAME_MAGIC: [u8; 4] = *b"MCF1";
@@ -16,6 +18,7 @@ pub enum FrameKind {
     GuestError = 5,
     Diagnostic = 6,
     Stdin = 7,
+    ProcExit = 8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,9 +58,12 @@ impl FrameHeader {
         if payload_len > FRAME_MAX_PAYLOAD_LEN {
             return Err(ControlError::PayloadTooLarge);
         }
-        if matches!(kind, FrameKind::Ready | FrameKind::Exit)
-            && payload_len != READY_PAYLOAD_LEN as u32
-        {
+        let fixed_payload_len = match kind {
+            FrameKind::Ready | FrameKind::Exit => Some(READY_PAYLOAD_LEN as u32),
+            FrameKind::ProcExit => Some(PROC_EXIT_PAYLOAD_LEN as u32),
+            _ => None,
+        };
+        if fixed_payload_len.is_some_and(|len| payload_len != len) {
             return Err(ControlError::WrongFixedPayloadLength);
         }
         // Stdinはkernel staging（read上限と同じ4 KiB）へ一度に載る長さだけ受理する。
@@ -88,6 +94,7 @@ impl FrameKind {
             5 => Some(Self::GuestError),
             6 => Some(Self::Diagnostic),
             7 => Some(Self::Stdin),
+            8 => Some(Self::ProcExit),
             _ => None,
         }
     }
@@ -140,7 +147,7 @@ mod tests {
     #[test]
     fn rejects_unknown_kind() {
         let mut bytes = valid_header_bytes();
-        bytes[4] = 8;
+        bytes[4] = 9;
 
         assert_eq!(FrameHeader::decode(&bytes), Err(ControlError::UnknownKind));
     }
@@ -243,6 +250,33 @@ mod tests {
         };
         assert_eq!(exit_payload, [42, 0, 0, 0]);
         assert_eq!(FrameHeader::decode(&exit_header.encode()), Ok(exit_header));
+    }
+
+    #[test]
+    fn proc_exit_payload_round_trips_and_has_fixed_length() {
+        let payload = ProcExitPayload { pid: 3, code: 42 };
+        let encoded = payload.encode();
+
+        assert_eq!(ProcExitPayload::decode(&encoded), Ok(payload));
+        assert_eq!(
+            ProcExitPayload::decode(&encoded[..4]),
+            Err(ProcExitPayloadError::WrongLength)
+        );
+
+        let header = FrameHeader {
+            kind: FrameKind::ProcExit,
+            payload_len: PROC_EXIT_PAYLOAD_LEN as u32,
+        };
+        assert_eq!(FrameHeader::decode(&header.encode()), Ok(header));
+
+        let wrong = FrameHeader {
+            kind: FrameKind::ProcExit,
+            payload_len: READY_PAYLOAD_LEN as u32,
+        };
+        assert_eq!(
+            FrameHeader::decode(&wrong.encode()),
+            Err(ControlError::WrongFixedPayloadLength)
+        );
     }
 
     #[test]

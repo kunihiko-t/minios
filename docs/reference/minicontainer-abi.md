@@ -60,6 +60,30 @@ arg=first
 arg=second
 ```
 
+### Manifest v2
+
+複数のELF imageを1つのbundleへ格納するmanifestです。
+`header.elf`領域はすべてのimageのELFを隙間なく連結したもので、各imageは`elf=`行でその領域内の相対rangeを宣言します。
+
+```text
+manifest     = "version=2" LF 1*4section
+section      = "image=" name LF { "arg=" argument LF } "elf=" range LF
+range        = offset "," length    ; いずれも10進数。offsetはheader.elf先頭からの相対
+```
+
+`arg=`はimageごとに0個から16個まで置け、`elf=`の前にだけ置けます。
+`elf=`は各sectionにちょうど1行必要で、`length`が0のrange、`offset + length`の桁あふれ、image間で重なり合うrange、`header.elf`領域からはみ出すrangeは受理しません。
+imageは4個までで、`version=1`のmanifestは`header.elf`領域全体を占める単一imageとして扱います。
+
+```text
+version=2
+image=spin
+arg=slow
+elf=0,4096
+image=cat
+elf=4096,2048
+```
+
 ## UART Control ABI v1
 
 OpenSBIとMiniOSの起動診断は、control protocol開始前のテキストとして扱います。
@@ -84,8 +108,9 @@ MiniOSが同期magicを送った後、UARTは長さ付きbinary frameとしてde
 | 5 | `GUEST_ERROR` | UTF-8診断 | guest→host |
 | 6 | `DIAGNOSTIC` | UTF-8診断 | guest→host |
 | 7 | `STDIN` | 入力バイト列。長さ0はEOF | host→guest |
+| 8 | `PROC_EXIT` | 8バイト。process idと終了コード | guest→host |
 
-`READY`と`EXIT`の`payload_len`は必ず4です。
+`READY`と`EXIT`の`payload_len`は必ず4で、`PROC_EXIT`の`payload_len`は必ず8です。
 `STDIN`の`payload_len`は4 KiB以下であり、長さ0のframeがEOFを表します。
 EOFはstickyであり、EOF以後の`STDIN` frameが届いても入力は戻りません。
 
@@ -98,6 +123,14 @@ EOFはstickyであり、EOF以後の`STDIN` frameが届いても入力は戻り�
 
 したがって、ABI 1.1の`READY` payloadは`01 00 01 00`です。
 ホストは`READY`のminorが1以上のときだけ`STDIN` frameを送ります。
+
+`PROC_EXIT` payloadの8バイトは、次の順序で符号なし整数を格納します。
+`pid`はmanifest内のimage index（0始まり）で、複数image bundleでは各processの終了ごとに1 frameを送ります。
+
+| offset | size | field | encoding |
+| ---: | ---: | --- | --- |
+| 0 | 4 | `pid` | `u32` little-endian |
+| 4 | 4 | `code` | `u32` little-endian |
 
 未定義の`kind`、非ゼロの`flags`または`reserved`、上限を超える長さ、固定長payloadの不一致は受理しません。
 同期後にheaderまたはpayload長の規約が壊れたとき、ホストはbyte streamを推測で再同期せず、protocol failureとしてinstanceを停止します。
@@ -159,7 +192,7 @@ guestは書き換え前のスタックを読み取り専用の初期データと
 BootHeader decoderは`abi_major=1`かつ自身以下の`abi_minor`を受理します。
 現行kernelは1.0と1.1のbundleをどちらも実行でき、既存ホストの1.0 bundleと共存します。
 header長、magic、flags、reserved、range layoutは表の値と規約どおりでなければなりません。
-Control frame decoderは定義済みの七つのkindだけを受理します。
+Control frame decoderは定義済みの八つのkindだけを受理します。
 この文書にないfield、syscall番号、frame種別、非ゼロの予約値は推測して解釈しません。
 ホストは`READY`のminorで対応ABIを判定し、minor 0の相手へ`STDIN`を送りません。
 MiniOS release候補とMiniContainer release候補は、固定した相手のrelease artifactに対するABI互換性試験を通過してから公開します。
