@@ -36,22 +36,22 @@ pub enum RunBuildError<E> {
 }
 
 /// `UserRun`構築失敗と、必要ならcallerへ返すretryable image。
-pub struct RunBuildFailure<'storage, const N: usize, E> {
+pub struct RunBuildFailure<E> {
     error: RunBuildError<E>,
-    image: Option<LoadedImage<'storage, N>>,
+    image: Option<LoadedImage>,
 }
 
-impl<'storage, const N: usize, E> RunBuildFailure<'storage, N, E> {
+impl<E> RunBuildFailure<E> {
     pub const fn error(&self) -> &RunBuildError<E> {
         &self.error
     }
 
-    pub fn into_parts(self) -> (RunBuildError<E>, Option<LoadedImage<'storage, N>>) {
+    pub fn into_parts(self) -> (RunBuildError<E>, Option<LoadedImage>) {
         (self.error, self.image)
     }
 }
 
-impl<const N: usize, E: fmt::Debug> fmt::Debug for RunBuildFailure<'_, N, E> {
+impl<E: fmt::Debug> fmt::Debug for RunBuildFailure<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RunBuildFailure")
@@ -114,8 +114,8 @@ pub enum RunCompletion {
 ///
 /// `LoadedImage`はinactiveなELFとaddress spaceを所有し、`UserRun`は実行中だけ
 /// 必要なkernel trap stack、allocator、frame memoryの排他的borrowを加える。
-pub struct UserRun<'run, const N: usize, M: FrameStore> {
-    image: Option<LoadedImage<'run, N>>,
+pub struct UserRun<'run, M: FrameStore> {
+    image: Option<LoadedImage>,
     allocator: &'run mut dyn FrameSource,
     memory: &'run mut M,
     kernel_stack: [Option<PhysFrame>; KERNEL_STACK_PAGES],
@@ -125,7 +125,7 @@ pub struct UserRun<'run, const N: usize, M: FrameStore> {
     executed: bool,
 }
 
-impl<const N: usize, M: FrameStore> fmt::Debug for UserRun<'_, N, M> {
+impl<M: FrameStore> fmt::Debug for UserRun<'_, M> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UserRun")
@@ -136,16 +136,16 @@ impl<const N: usize, M: FrameStore> fmt::Debug for UserRun<'_, N, M> {
     }
 }
 
-impl<'run, const N: usize, M: FrameStore> UserRun<'run, N, M> {
+impl<'run, M: FrameStore> UserRun<'run, M> {
     /// inactive imageへ実行時resourceを加える。
     ///
     /// 途中で失敗した場合は、この関数がtrap stackとimageを両方回収する。
     pub fn new(
-        image: LoadedImage<'run, N>,
+        image: LoadedImage,
         allocator: &'run mut dyn FrameSource,
         memory: &'run mut M,
         kernel_root: PhysPageNum,
-    ) -> Result<Self, RunBuildFailure<'run, N, M::Error>> {
+    ) -> Result<Self, RunBuildFailure<M::Error>> {
         if image.allocator_id() != allocator.allocator_id() {
             return Err(RunBuildFailure {
                 error: RunBuildError::WrongAllocator,
@@ -200,7 +200,7 @@ impl<'run, const N: usize, M: FrameStore> UserRun<'run, N, M> {
         })
     }
 
-    pub const fn address_space(&self) -> &AddressSpace<'run, N> {
+    pub const fn address_space(&self) -> &AddressSpace {
         self.image
             .as_ref()
             .expect("live run retains its loaded image")
@@ -308,12 +308,12 @@ impl<'run, const N: usize, M: FrameStore> UserRun<'run, N, M> {
     }
 }
 
-fn build_failure<'storage, const N: usize, E>(
-    image: LoadedImage<'storage, N>,
+fn build_failure<E>(
+    image: LoadedImage,
     stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
     allocator: &mut dyn FrameSource,
     primary: RunBuildError<E>,
-) -> RunBuildFailure<'storage, N, E> {
+) -> RunBuildFailure<E> {
     reclaim_stack(stack, allocator);
     match image.destroy(allocator) {
         Ok(()) => RunBuildFailure {
@@ -355,7 +355,7 @@ mod tests {
         elf::{fixture::valid_riscv64_elf, load_image},
         memory::frame::{FrameAllocator, FrameStats, PAGE_SIZE},
         user::syscall::ControlSink,
-        vm::{AddressSpaceStorage, FrameStore, PhysPageNum},
+        vm::{FrameStore, PhysPageNum},
     };
     use minios_abi::control::FrameKind;
 
@@ -492,7 +492,6 @@ mod tests {
     struct RunFixture {
         frames: FrameAllocator<16>,
         memory: TestFrameStore,
-        storage: AddressSpaceStorage<2688>,
     }
 
     impl RunFixture {
@@ -505,12 +504,7 @@ mod tests {
             // 検査が成立することを確かめる。
             frames.allocate();
             frames.allocate();
-            let storage = AddressSpaceStorage::<2688>::new();
-            Self {
-                frames,
-                memory,
-                storage,
-            }
+            Self { frames, memory }
         }
 
         fn baseline(&self) -> FrameStats {
@@ -521,30 +515,20 @@ mod tests {
             let mut fixture = Self::new();
             let before = fixture.frames.stats().allocated;
             let bytes = valid_riscv64_elf();
-            let image = load_image(
-                &bytes,
-                &mut fixture.frames,
-                &mut fixture.memory,
-                &mut fixture.storage,
-            )
-            .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"));
+            let image = load_image(&bytes, &mut fixture.frames, &mut fixture.memory)
+                .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"));
             let count = fixture.frames.stats().allocated - before;
             image
                 .destroy(&mut fixture.frames)
                 .unwrap_or_else(|error| panic!("fixture image must be reclaimable: {error:?}"));
-            assert!(fixture.storage.is_empty());
+
             count
         }
 
-        fn build_run(&mut self) -> UserRun<'_, 2688, TestFrameStore> {
+        fn build_run(&mut self) -> UserRun<'_, TestFrameStore> {
             let bytes = valid_riscv64_elf();
-            let image = load_image(
-                &bytes,
-                &mut self.frames,
-                &mut self.memory,
-                &mut self.storage,
-            )
-            .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"));
+            let image = load_image(&bytes, &mut self.frames, &mut self.memory)
+                .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"));
             let kernel_root =
                 PhysPageNum::from_start(SYNTHETIC_KERNEL_ROOT).expect("kernel root is valid");
             UserRun::new(image, &mut self.frames, &mut self.memory, kernel_root)
@@ -567,7 +551,6 @@ mod tests {
 
         assert_eq!(code, 42);
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches dropping the exit code or sending a payload other than the
@@ -586,7 +569,6 @@ mod tests {
             vec![(FrameKind::Exit, Vec::from(42_u32.to_le_bytes()))]
         );
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches skipping reclamation when the control sink rejects the Exit
@@ -605,7 +587,6 @@ mod tests {
         assert_eq!(outcome, Err(RunError::Sink(SinkError::Injected)));
         assert!(sink.frames.is_empty());
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches leaking the run when execution reports a fatal user trap and no
@@ -621,7 +602,6 @@ mod tests {
         assert_eq!(completion, RunCompletion::Fatal);
         assert!(sink.frames.is_empty());
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches launching again with the stale SATP and trap-stack addresses
@@ -646,7 +626,6 @@ mod tests {
         assert_eq!(second, Err(RunError::AlreadyExecuted));
         assert!(!entered_again);
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches explicitly reclaiming an inactive run and then launching with
@@ -668,7 +647,6 @@ mod tests {
         assert_eq!(outcome, Err(RunError::AlreadyExecuted));
         assert!(!entered);
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches consuming the loaded image when no frame remains for the first
@@ -678,13 +656,7 @@ mod tests {
         let mut fixture = RunFixture::new();
         let before_load = fixture.frames.stats().allocated;
         let bytes = valid_riscv64_elf();
-        let image = load_image(
-            &bytes,
-            &mut fixture.frames,
-            &mut fixture.memory,
-            &mut fixture.storage,
-        )
-        .unwrap();
+        let image = load_image(&bytes, &mut fixture.frames, &mut fixture.memory).unwrap();
         let image_frames = fixture.frames.stats().allocated - before_load;
         let mut held = Vec::new();
         while let Some(frame) = fixture.frames.allocate() {
@@ -700,7 +672,7 @@ mod tests {
             fixture.frames.stats().allocated,
             allocated_when_full - image_frames
         );
-        assert!(fixture.storage.is_empty());
+
         assert!(!held.is_empty());
     }
 
@@ -711,13 +683,7 @@ mod tests {
         let mut fixture = RunFixture::new();
         let before = fixture.baseline();
         let bytes = valid_riscv64_elf();
-        let image = load_image(
-            &bytes,
-            &mut fixture.frames,
-            &mut fixture.memory,
-            &mut fixture.storage,
-        )
-        .unwrap();
+        let image = load_image(&bytes, &mut fixture.frames, &mut fixture.memory).unwrap();
         fixture.memory.fail_next_zero();
         let kernel_root = PhysPageNum::from_start(SYNTHETIC_KERNEL_ROOT).unwrap();
 
@@ -728,7 +694,6 @@ mod tests {
             &RunBuildError::Memory(TestStoreError::InjectedZero)
         );
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches consuming a retryable image when the caller pairs it with a
@@ -738,13 +703,7 @@ mod tests {
         let mut fixture = RunFixture::new();
         let before = fixture.baseline();
         let bytes = valid_riscv64_elf();
-        let image = load_image(
-            &bytes,
-            &mut fixture.frames,
-            &mut fixture.memory,
-            &mut fixture.storage,
-        )
-        .unwrap();
+        let image = load_image(&bytes, &mut fixture.frames, &mut fixture.memory).unwrap();
         let loaded = fixture.frames.stats();
         let mut wrong_allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x181_000) }.unwrap();
         let wrong_before = wrong_allocator.stats();
@@ -768,7 +727,6 @@ mod tests {
 
         assert_eq!(wrong_allocator.stats(), wrong_before);
         assert_eq!(fixture.frames.stats(), before);
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches a trap stack that is not page-granular, not the configured page
@@ -792,7 +750,6 @@ mod tests {
         );
 
         run.reclaim().unwrap();
-        assert!(fixture.storage.is_empty());
     }
 
     // Catches duplicating the Sv39 encoding with a different MODE or PPN.

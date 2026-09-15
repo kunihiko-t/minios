@@ -7,6 +7,12 @@
 
 // ホストテストでは、純粋なトラップ原因の解読を`arch::riscv64`から検証する。
 // RISC-Vバイナリー側は`main.rs`の`arch`を使い、起動シンボルの二重定義を避ける。
+// heap-backedの所有権台帳が`Vec`を使う。global allocatorは最終binary
+// (RV64: main.rsのKernelHeap、host test: std) が供給する。
+// RV32 lib buildは対象外（vm/user/processをコンパイルしない）。
+#[cfg(not(target_arch = "riscv32"))]
+extern crate alloc;
+
 // RV32ターゲット追加後は`not(riscv64)`がRV32のlibビルドにも一致してしまうため、
 // ホストテスト用モジュールは`test`に限定する。RISC-Vのlib側には置かない。
 #[cfg(test)]

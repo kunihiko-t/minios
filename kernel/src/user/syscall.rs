@@ -65,9 +65,9 @@ pub enum SyscallFlow<E, SE = E> {
 /// 再開時の再実行に委ねる。
 /// userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは呼び出し側が
 /// 1個だけ持ち、多重frameへ4 KiBを複製しない。
-pub fn dispatch_syscall<const N: usize, M: FrameStore, S: ControlSink, R: ControlSource>(
+pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
     context: &mut UserContext,
-    space: &AddressSpace<'_, N>,
+    space: &AddressSpace,
     memory: &M,
     sink: &mut S,
     source: &mut R,
@@ -86,9 +86,9 @@ pub fn dispatch_syscall<const N: usize, M: FrameStore, S: ControlSink, R: Contro
     }
 }
 
-fn dispatch_read<const N: usize, M: FrameStore, E, R: ControlSource>(
+fn dispatch_read<M: FrameStore, E, R: ControlSource>(
     context: &mut UserContext,
-    space: &AddressSpace<'_, N>,
+    space: &AddressSpace,
     memory: &M,
     source: &mut R,
     read_scratch: &mut [u8; MAX_READ_LEN],
@@ -140,9 +140,9 @@ pub unsafe fn complete_read(context: &mut UserContext, start: u64, len: usize, d
     context.set_register(10, len);
 }
 
-fn dispatch_write<const N: usize, M: FrameStore, S: ControlSink, SE>(
+fn dispatch_write<M: FrameStore, S: ControlSink, SE>(
     context: &mut UserContext,
-    space: &AddressSpace<'_, N>,
+    space: &AddressSpace,
     memory: &M,
     sink: &mut S,
 ) -> SyscallFlow<S::Error, SE> {
@@ -195,7 +195,7 @@ mod tests {
     use crate::{
         memory::frame::{FrameAllocator, PAGE_SIZE},
         user::context::UserContext,
-        vm::{AddressSpaceBuilder, AddressSpaceStorage, FrameStore, PageFlags, VirtPage},
+        vm::{AddressSpaceBuilder, FrameStore, PageFlags, VirtPage},
     };
     use minios_abi::{
         control::FrameKind,
@@ -396,9 +396,7 @@ mod tests {
     ) -> (UserContext, SyscallFlow<SinkError>) {
         let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut memory, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
         let page = builder
             .map_new_zeroed(
                 VirtPage::from_start(MESSAGE_PAGE as u64).unwrap(),
@@ -426,9 +424,7 @@ mod tests {
     ) -> (UserContext, SyscallFlow<SinkError>) {
         let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut memory, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
         let page = builder
             .map_new_zeroed(
                 VirtPage::from_start(MESSAGE_PAGE as u64).unwrap(),

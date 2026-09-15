@@ -4,8 +4,8 @@ use crate::{
     elf::{ElfError, ElfImage, LoadPlan, LoadSegment, USER_STACK_BOTTOM, USER_STACK_TOP},
     memory::frame::{FrameError, FrameSource, PAGE_SIZE},
     vm::{
-        AddressSpace, AddressSpaceBuilder, AddressSpaceStorage, FrameKind, FrameStore,
-        KernelMapping, PageFlags, VirtAddr, VirtPage, VmError,
+        AddressSpace, AddressSpaceBuilder, FrameKind, FrameStore, KernelMapping, PageFlags,
+        VirtAddr, VirtPage, VmError,
     },
 };
 
@@ -23,31 +23,31 @@ pub enum LoadError<E> {
 }
 
 /// An inactive user image together with its owned address space and metadata.
-pub struct LoadedImage<'storage, const N: usize> {
-    address_space: AddressSpace<'storage, N>,
+pub struct LoadedImage {
+    address_space: AddressSpace,
     entry: VirtAddr,
     user_stack_top: VirtAddr,
 }
 
 /// A failed destruction that retains the complete image for a safe retry.
-pub struct LoadedImageDestroyError<'storage, const N: usize> {
+pub struct LoadedImageDestroyError {
     frame_error: FrameError,
-    image: LoadedImage<'storage, N>,
+    image: LoadedImage,
 }
 
-impl<'storage, const N: usize> LoadedImageDestroyError<'storage, N> {
+impl LoadedImageDestroyError {
     /// Returns the allocator rejection without consuming retryable ownership.
     pub const fn frame_error(&self) -> FrameError {
         self.frame_error
     }
 
     /// Returns both the rejection and the complete image for another attempt.
-    pub fn into_parts(self) -> (FrameError, LoadedImage<'storage, N>) {
+    pub fn into_parts(self) -> (FrameError, LoadedImage) {
         (self.frame_error, self.image)
     }
 }
 
-impl<const N: usize> fmt::Debug for LoadedImageDestroyError<'_, N> {
+impl fmt::Debug for LoadedImageDestroyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LoadedImageDestroyError")
@@ -56,7 +56,7 @@ impl<const N: usize> fmt::Debug for LoadedImageDestroyError<'_, N> {
     }
 }
 
-impl<'storage, const N: usize> LoadedImage<'storage, N> {
+impl LoadedImage {
     /// Returns the validated executable entry address.
     pub const fn entry(&self) -> VirtAddr {
         self.entry
@@ -68,7 +68,7 @@ impl<'storage, const N: usize> LoadedImage<'storage, N> {
     }
 
     /// Borrows the inactive address space for translation and inspection.
-    pub const fn address_space(&self) -> &AddressSpace<'storage, N> {
+    pub const fn address_space(&self) -> &AddressSpace {
         &self.address_space
     }
 
@@ -77,10 +77,7 @@ impl<'storage, const N: usize> LoadedImage<'storage, N> {
     }
 
     /// Returns every owned frame, retaining this image if the allocator rejects it.
-    pub fn destroy(
-        self,
-        allocator: &mut dyn FrameSource,
-    ) -> Result<(), LoadedImageDestroyError<'storage, N>> {
+    pub fn destroy(self, allocator: &mut dyn FrameSource) -> Result<(), LoadedImageDestroyError> {
         let Self {
             address_space,
             entry,
@@ -108,13 +105,12 @@ impl<'storage, const N: usize> LoadedImage<'storage, N> {
 /// Host unit tests use this entry point with an empty kernel-mapping iterator;
 /// the U-mode runtime borrows the kernel identity pages through
 /// [`load_image_with_kernel_mappings`] instead.
-pub fn load_image<'storage, const N: usize, M: FrameStore>(
+pub fn load_image<M: FrameStore>(
     bytes: &[u8],
     allocator: &mut dyn FrameSource,
     memory: &mut M,
-    storage: &'storage mut AddressSpaceStorage<N>,
-) -> Result<LoadedImage<'storage, N>, LoadError<M::Error>> {
-    load_image_with_kernel_mappings(bytes, allocator, memory, storage, core::iter::empty())
+) -> Result<LoadedImage, LoadError<M::Error>> {
+    load_image_with_kernel_mappings(bytes, allocator, memory, core::iter::empty())
 }
 
 /// Validates an ELF completely, then materializes it into an inactive address
@@ -124,26 +120,19 @@ pub fn load_image<'storage, const N: usize, M: FrameStore>(
 /// U-mode entry, trap stack, and console stay reachable the moment `sret`
 /// switches `satp`. A mapping with `U=1` is rejected before it can become a
 /// borrowed leaf, so only user-image pages can be user-accessible.
-pub fn load_image_with_kernel_mappings<
-    'storage,
-    const N: usize,
-    M: FrameStore,
-    I: IntoIterator<Item = KernelMapping>,
->(
+pub fn load_image_with_kernel_mappings<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
     bytes: &[u8],
     allocator: &mut dyn FrameSource,
     memory: &mut M,
-    storage: &'storage mut AddressSpaceStorage<N>,
     kernel_mappings: I,
-) -> Result<LoadedImage<'storage, N>, LoadError<M::Error>> {
+) -> Result<LoadedImage, LoadError<M::Error>> {
     let image = ElfImage::parse(bytes).map_err(LoadError::Elf)?;
     let plan = LoadPlan::new(&image).map_err(LoadError::Elf)?;
     let entry = plan.entry();
     let user_stack_top =
         VirtAddr::try_new(USER_STACK_TOP).map_err(|_| LoadError::Elf(ElfError::RangeOverflow))?;
 
-    let mut builder =
-        AddressSpaceBuilder::new(allocator, memory, storage).map_err(LoadError::Vm)?;
+    let mut builder = AddressSpaceBuilder::new(allocator, memory).map_err(LoadError::Vm)?;
     for mapping in kernel_mappings {
         if mapping.flags().user() {
             return Err(LoadError::UserAccessibleKernelMapping);
@@ -173,9 +162,9 @@ pub fn load_image_with_kernel_mappings<
     })
 }
 
-fn materialize_segment<const N: usize, M: FrameStore>(
+fn materialize_segment<M: FrameStore>(
     bytes: &[u8],
-    builder: &mut AddressSpaceBuilder<'_, '_, '_, N, M>,
+    builder: &mut AddressSpaceBuilder<'_, '_, M>,
     segment: &LoadSegment,
 ) -> Result<(), LoadError<M::Error>> {
     let file_len =
@@ -250,8 +239,8 @@ mod tests {
             frame::{FrameAllocator, FrameError, PAGE_SIZE},
         },
         vm::{
-            AddressSpaceStorage, FrameStore, KernelMapPlan, KernelMapping, PageFlags, PhysAddr,
-            VirtAddr, VirtPage, VmError,
+            FrameStore, KernelMapPlan, KernelMapping, PageFlags, PhysAddr, VirtAddr, VirtPage,
+            VmError,
         },
     };
 
@@ -431,16 +420,10 @@ mod tests {
         let plan = kernel_plan_fixture();
         let mut allocator = test_allocator::<16>(0x1000, 0x181_000);
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
-        let image = load_image_with_kernel_mappings(
-            &bytes,
-            &mut allocator,
-            &mut memory,
-            &mut storage,
-            plan.mappings(),
-        )
-        .unwrap();
+        let image =
+            load_image_with_kernel_mappings(&bytes, &mut allocator, &mut memory, plan.mappings())
+                .unwrap();
 
         for (region, address) in [
             ("kernel text", 0x8020_0000u64),
@@ -470,7 +453,6 @@ mod tests {
 
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats().allocated, 0);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches accepting a caller-supplied borrowed kernel mapping with U=1,
@@ -485,22 +467,15 @@ mod tests {
         );
         let mut allocator = test_allocator::<16>(0x1000, 0x181_000);
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
         assert!(matches!(
-            load_image_with_kernel_mappings(
-                &bytes,
-                &mut allocator,
-                &mut memory,
-                &mut storage,
-                [mapping],
-            ),
+            load_image_with_kernel_mappings(&bytes, &mut allocator, &mut memory, [mapping],),
             Err(LoadError::UserAccessibleKernelMapping)
         ));
     }
 
-    fn read_virtual<const N: usize>(
-        image: &LoadedImage<'_, N>,
+    fn read_virtual(
+        image: &LoadedImage,
         memory: &TestFrameStore,
         start: u64,
         len: usize,
@@ -543,9 +518,8 @@ mod tests {
         let bytes = fixture::valid_riscv64_elf();
         let mut allocator = fixture_allocator();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
-        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
 
         assert_eq!(image.entry().as_u64(), 0x0010_0000);
         assert_eq!(image.user_stack_top().as_u64(), USER_STACK_TOP);
@@ -611,14 +585,12 @@ mod tests {
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
-        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
 
         assert_eq!(allocator.stats().allocated - before.allocated, 23);
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches page-copy arithmetic that assumes aligned segments or uses the
@@ -636,9 +608,8 @@ mod tests {
         }
         let mut allocator = fixture_allocator();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
-        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
 
         assert_eq!(
             read_virtual(&image, &memory, 0x0010_0ff0, 32),
@@ -660,14 +631,12 @@ mod tests {
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
         assert!(matches!(
-            load_image(&bytes, &mut allocator, &mut memory, &mut storage),
+            load_image(&bytes, &mut allocator, &mut memory),
             Err(LoadError::Elf(_))
         ));
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
         assert_eq!(memory.zeroes, 0);
     }
 
@@ -680,14 +649,12 @@ mod tests {
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
         assert!(matches!(
-            load_image(&bytes, &mut allocator, &mut memory, &mut storage),
+            load_image(&bytes, &mut allocator, &mut memory),
             Err(LoadError::Elf(_))
         ));
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
         assert_eq!(memory.zeroes, 0);
     }
 
@@ -699,23 +666,20 @@ mod tests {
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::fail_copy_after(1);
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
         assert_eq!(
-            load_image(&bytes, &mut allocator, &mut memory, &mut storage)
+            load_image(&bytes, &mut allocator, &mut memory)
                 .err()
                 .unwrap(),
             LoadError::Memory(TestStoreError::InjectedCopyFailure)
         );
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
 
         memory.clear_failures();
-        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
         assert_eq!(read_virtual(&image, &memory, 0x0020_0000, 4), b"MCB1");
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches dropping the builder without recovering frames after a zeroing
@@ -726,16 +690,14 @@ mod tests {
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::fail_zero_after(2);
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
         assert_eq!(
-            load_image(&bytes, &mut allocator, &mut memory, &mut storage)
+            load_image(&bytes, &mut allocator, &mut memory)
                 .err()
                 .unwrap(),
             LoadError::Vm(VmError::Store(TestStoreError::InjectedZeroFailure))
         );
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches treating page-table writes as direct memory-copy failures or
@@ -746,36 +708,31 @@ mod tests {
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::fail_write_after(1);
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
         assert_eq!(
-            load_image(&bytes, &mut allocator, &mut memory, &mut storage)
+            load_image(&bytes, &mut allocator, &mut memory)
                 .err()
                 .unwrap(),
             LoadError::Vm(VmError::Store(TestStoreError::InjectedWriteFailure))
         );
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
-    // Catches losing already allocated frames when fixed ownership storage is
-    // too small to record the next page-table/user frame.
+    // Catches the ownership ledger still behaving like a fixed-capacity
+    // array: a normal image owns more frames than the old minimal arena
+    // held, and every one must be returned on destroy.
     #[test]
-    fn ownership_capacity_failure_rolls_back_every_frame() {
+    fn owned_frame_ledger_grows_past_the_old_arena_and_reclaims_all() {
         let bytes = fixture::valid_riscv64_elf();
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2>::new();
 
-        assert_eq!(
-            load_image(&bytes, &mut allocator, &mut memory, &mut storage)
-                .err()
-                .unwrap(),
-            LoadError::Vm(VmError::CapacityExceeded)
-        );
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
+
+        assert!(image.address_space().owned_frames() > 2);
+        image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches leaking the root or intermediate frame when physical frames run
@@ -786,16 +743,14 @@ mod tests {
         let mut allocator = test_allocator::<1>(0x1000, 0x3000);
         let before = allocator.stats();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
 
         assert_eq!(
-            load_image(&bytes, &mut allocator, &mut memory, &mut storage)
+            load_image(&bytes, &mut allocator, &mut memory)
                 .err()
                 .unwrap(),
             LoadError::Vm(VmError::OutOfFrames)
         );
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches normal destruction retaining any frame/storage token and proves
@@ -806,10 +761,9 @@ mod tests {
         let mut allocator = fixture_allocator();
         let before = allocator.stats();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
         let entry = VirtAddr::try_new(0x0010_0000).unwrap();
 
-        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
         let first_text_frame = image.address_space().translate(&memory, entry).unwrap().0;
         assert_eq!(
             read_virtual(&image, &memory, 0x0010_0000, 4),
@@ -818,11 +772,10 @@ mod tests {
         assert!(allocator.stats().allocated > 0);
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
 
         let mut replacement = fixture::valid_riscv64_elf();
         replacement[0x1000..0x1004].copy_from_slice(&0x0010_0073_u32.to_le_bytes());
-        let second = load_image(&replacement, &mut allocator, &mut memory, &mut storage).unwrap();
+        let second = load_image(&replacement, &mut allocator, &mut memory).unwrap();
         let second_text_frame = second.address_space().translate(&memory, entry).unwrap().0;
         assert_eq!(second_text_frame, first_text_frame);
         assert_eq!(
@@ -831,7 +784,6 @@ mod tests {
         );
         second.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches consuming LoadedImage metadata/ownership on a different-range
@@ -843,8 +795,7 @@ mod tests {
         let before = allocator.stats();
         let mut other = test_allocator::<1>(0x80_000, 0x81_000);
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
-        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
         let loaded = allocator.stats();
 
         let failure = image.destroy(&mut other).unwrap_err();
@@ -859,7 +810,6 @@ mod tests {
         assert_eq!(read_virtual(&image, &memory, 0x0020_0000, 4), b"MCB1");
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     // Catches accepting an allocator merely because its numeric range matches;
@@ -873,8 +823,7 @@ mod tests {
         // without dereferencing its synthetic addresses to exercise provenance.
         let mut same_range = unsafe { FrameAllocator::<1>::new(0x1000, 0x41_000) }.unwrap();
         let mut memory = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<2688>::new();
-        let image = load_image(&bytes, &mut allocator, &mut memory, &mut storage).unwrap();
+        let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
         let loaded = allocator.stats();
 
         let failure = image.destroy(&mut same_range).unwrap_err();
@@ -893,6 +842,5 @@ mod tests {
         );
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 }

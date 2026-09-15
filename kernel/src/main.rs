@@ -188,10 +188,7 @@ use minios_kernel::user::{RunExit, SSTATUS_SIE, SSTATUS_SUM, UserContext};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::AddressSpace;
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::vm::{
-    AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, MAX_OWNED_FRAMES,
-    PhysPageNum,
-};
+use minios_kernel::vm::{AddressSpaceBuilder, IdentityFrameStore, KernelMapPlan, PhysPageNum};
 #[cfg(all(
     target_arch = "riscv64",
     any(feature = "qemu-test-vm", feature = "qemu-test-elf")
@@ -424,23 +421,6 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
 #[global_allocator]
 static KERNEL_HEAP: KernelHeap = KernelHeap::empty();
 
-#[cfg(target_arch = "riscv64")]
-static mut KERNEL_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
-
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
-static mut ELF_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
-
-#[cfg(all(
-    target_arch = "riscv64",
-    any(
-        feature = "qemu-test-user-entry",
-        feature = "qemu-test-user-trap",
-        feature = "qemu-test-user-syscall",
-        feature = "qemu-test-user-exit"
-    )
-))]
-static mut USER_PROBE_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
-
 #[cfg(all(
     target_arch = "riscv64",
     any(
@@ -484,14 +464,6 @@ static mut USER_PROBE_TRAP_STACK: UserProbeTrapStack =
 static mut USER_SYSCALL_PROBE_SPACE: usize = 0;
 #[cfg(target_arch = "riscv64")]
 static mut USER_SYSCALL_PROBE_MEMORY: usize = 0;
-
-/// processごとのaddress space所有権arena。`AddressSpaceStorage`は1 address
-/// space専用の排他借用を要求するため、生存中のprocessごとに1つずつ静的に持つ。
-/// slot indexは`ProcessTable`のpidと対応する。
-#[cfg(target_arch = "riscv64")]
-static mut PROCESS_STORAGES: [AddressSpaceStorage<MAX_OWNED_FRAMES>;
-    minios_kernel::process::MAX_PROCS] =
-    [const { AddressSpaceStorage::new() }; minios_kernel::process::MAX_PROCS];
 
 #[cfg(target_arch = "riscv64")]
 static USER_EXIT_CODE: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -637,13 +609,9 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
             Ok(memory) => memory,
             Err(error) => panic!("invalid identity frame-store range: {error:?}"),
         };
-    // Safety: this is the boot hart's sole access to the static ownership
-    // table, and kernel_main never returns or constructs another mutable
-    // reference to it.
-    let storage_pointer = &raw mut KERNEL_ADDRESS_SPACE_STORAGE;
-    let storage = unsafe { storage_pointer.as_mut() }
-        .expect("a static address-space storage pointer is never null");
-    let mut builder = match AddressSpaceBuilder::new(&mut frames, &mut memory, storage) {
+    // builderが所有権台帳をheap上に内部所有し、kernel spaceがそのまま
+    // 引き継ぐ。静的arenaは要らない。
+    let mut builder = match AddressSpaceBuilder::new(&mut frames, &mut memory) {
         Ok(builder) => builder,
         Err(error) => panic!("kernel address-space root allocation failed: {error:?}"),
     };
@@ -786,13 +754,16 @@ fn run_heap_test() {
     }
     drop(boxed);
 
+    // kernel address spaceの所有権台帳などがすでにheap上にあるため、
+    // 検査はtest自身の割り当てが解放へ戻るかの差分で行う。
+    let baseline = KERNEL_HEAP.stats();
     let stats = KERNEL_HEAP.stats();
-    if stats.total != KERNEL_HEAP_LEN || stats.free == 0 || stats.allocated != 0 {
+    if stats.total != KERNEL_HEAP_LEN || stats.free == 0 || stats.allocated != baseline.allocated {
         fatal_qemu_test(format_args!("heap: unexpected stats {stats:?}"));
     }
 
-    // 固定領域を超える割り当てはframe poolからの成長で賄われる。
-    // 要求量は初期領域より大きく、必ず隣接pageの取り込みを伴う。
+    // 初期領域を超える割り当てはframe poolからの成長で賄われる。
+    // 台帳spanがheap下端に居座るため、要求は拡張側の空きだけで賄う。
     let frames_before = GlobalFrames.stats();
     let mut large: Vec<u8> = Vec::new();
     if large
@@ -814,7 +785,7 @@ fn run_heap_test() {
         frames_after.free
     );
     drop(large);
-    if KERNEL_HEAP.stats().allocated != 0 {
+    if KERNEL_HEAP.stats().allocated != baseline.allocated {
         fatal_qemu_test(format_args!("heap: grown allocation was not released"));
     }
 
@@ -861,7 +832,7 @@ fn align_up_to_page(address: usize) -> usize {
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-vm"))]
-fn run_vm_test<const N: usize>(kernel_space: &AddressSpace<'_, N>, memory: &IdentityFrameStore) {
+fn run_vm_test(kernel_space: &AddressSpace, memory: &IdentityFrameStore) {
     expect_kernel_range(
         kernel_space,
         memory,
@@ -918,8 +889,8 @@ fn run_vm_test<const N: usize>(kernel_space: &AddressSpace<'_, N>, memory: &Iden
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-vm"))]
-fn expect_kernel_range<const N: usize>(
-    kernel_space: &AddressSpace<'_, N>,
+fn expect_kernel_range(
+    kernel_space: &AddressSpace,
     memory: &IdentityFrameStore,
     region: &str,
     start: usize,
@@ -960,44 +931,27 @@ fn expect_kernel_range<const N: usize>(
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
-fn run_elf_test<const N: usize>(
-    kernel_space: &AddressSpace<'_, N>,
+fn run_elf_test(
+    kernel_space: &AddressSpace,
     frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
 ) {
     let before = frames.stats();
-    // Safety: this feature path runs only on the single boot hart, obtains the
-    // static once, and destroys the loaded image before inspecting it again.
-    let storage_pointer = &raw mut ELF_ADDRESS_SPACE_STORAGE;
-    let storage = unsafe { storage_pointer.as_mut() }
-        .expect("a static ELF address-space storage pointer is never null");
-    if !storage.is_empty() {
-        fatal_qemu_test(format_args!(
-            "elf precondition: expected empty storage, actual len={}",
-            storage.len()
-        ));
-    }
-
     dirty_reusable_elf_frames(frames, memory, before);
-    if frames.stats() != before || !storage.is_empty() {
+    if frames.stats() != before {
         fatal_qemu_test(format_args!(
-            "elf dirty-frame recovery: allocator expected={before:?} actual={:?}; storage expected len=0 actual len={}",
-            frames.stats(),
-            storage.len()
+            "elf dirty-frame recovery: allocator expected={before:?} actual={:?}",
+            frames.stats()
         ));
     }
 
-    // The deterministic fixture is 8,196 bytes. It is intentionally the only
-    // large automatic value here; the much larger 2,688-entry ownership table
-    // above resides in static kernel storage, not on the 64 KiB boot stack.
     let fixture = valid_riscv64_elf();
-    let image = match load_image(&fixture, frames, memory, storage) {
+    let image = match load_image(&fixture, frames, memory) {
         Ok(image) => image,
         Err(error) => {
             fatal_qemu_test(format_args!(
-                "elf load: {error:?}; allocator expected={before:?} actual={:?}; storage len={}",
-                frames.stats(),
-                storage.len()
+                "elf load: {error:?}; allocator expected={before:?} actual={:?}",
+                frames.stats()
             ));
         }
     };
@@ -1012,20 +966,14 @@ fn run_elf_test<const N: usize>(
     }
 
     let after = frames.stats();
-    let storage_len = storage.len();
     if let Err(error) = inspection {
         fatal_qemu_test(format_args!(
-            "elf inspection: {error:?}; recovery allocator expected={before:?} actual={after:?}; storage len={storage_len}"
+            "elf inspection: {error:?}; recovery allocator expected={before:?} actual={after:?}"
         ));
     }
     if after != before {
         fatal_qemu_test(format_args!(
-            "elf recovery allocator: expected={before:?}, actual={after:?}; storage len={storage_len}"
-        ));
-    }
-    if storage_len != 0 {
-        fatal_qemu_test(format_args!(
-            "elf recovery storage: expected len=0, actual len={storage_len}; allocator={after:?}"
+            "elf recovery allocator: expected={before:?}, actual={after:?}"
         ));
     }
 
@@ -1193,9 +1141,9 @@ impl core::fmt::Display for ElfTestFailure {
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
-fn inspect_loaded_elf<const IMAGE_N: usize, const KERNEL_N: usize>(
-    image: &LoadedImage<'_, IMAGE_N>,
-    kernel_space: &AddressSpace<'_, KERNEL_N>,
+fn inspect_loaded_elf(
+    image: &LoadedImage,
+    kernel_space: &AddressSpace,
     memory: &IdentityFrameStore,
 ) -> Result<(), ElfTestFailure> {
     const ENTRY: u64 = 0x0010_0000;
@@ -1286,8 +1234,8 @@ fn inspect_loaded_elf<const IMAGE_N: usize, const KERNEL_N: usize>(
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
-fn expect_elf_mapping<const N: usize>(
-    image: &LoadedImage<'_, N>,
+fn expect_elf_mapping(
+    image: &LoadedImage,
     memory: &IdentityFrameStore,
     region: &'static str,
     address: u64,
@@ -1307,8 +1255,8 @@ fn expect_elf_mapping<const N: usize>(
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
-fn copy_virtual<const N: usize>(
-    image: &LoadedImage<'_, N>,
+fn copy_virtual(
+    image: &LoadedImage,
     memory: &IdentityFrameStore,
     region: &'static str,
     address: u64,
@@ -1336,8 +1284,8 @@ fn copy_virtual<const N: usize>(
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
-fn expect_zero_virtual<const N: usize>(
-    image: &LoadedImage<'_, N>,
+fn expect_zero_virtual(
+    image: &LoadedImage,
     memory: &IdentityFrameStore,
     region: &'static str,
     start: u64,
@@ -1455,7 +1403,7 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     }
     // Safety: runnerが`__run_user`の直前に設定した単一hart静的参照である。
     // handlerの実行中はrunnerがassembly内で待機しているため、同時にaliasしない。
-    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
+    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace) };
     let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
     // Safety: 実行窓のhandlerが1 trapにつき1回だけ借り、外へ持ち出さない。
     let staging = unsafe { borrow_stdin_staging() };
@@ -1582,7 +1530,7 @@ fn user_trap_system_call(_context: &mut UserContext) -> RunExit {
 fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     // Safety: probe runnerが`__run_user`の前に設定した単一hart静的参照である。
     // handlerの実行中はrunnerがassembly内で待機しているため、同時にaliasしない。
-    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
+    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace) };
     let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
     // Safety: 実行窓のhandlerが1 trapにつき1回だけ借り、外へ持ち出さない。
     let staging = unsafe { borrow_stdin_staging() };
@@ -1645,7 +1593,7 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
 fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     // Safety: user-exit runnerが`__run_user`の直前に設定し、assemblyが
     // kernelへ戻るまで所有する単一hart静的参照である。
-    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace<'_, 2688>) };
+    let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace) };
     let memory = unsafe { &*(USER_SYSCALL_PROBE_MEMORY as *const IdentityFrameStore) };
     // Safety: 実行窓のhandlerが1 trapにつき1回だけ借り、外へ持ち出さない。
     let staging = unsafe { borrow_stdin_staging() };
@@ -1824,35 +1772,22 @@ fn user_trap_fault_elf() -> [u8; USER_PROBE_ELF_LEN] {
         feature = "qemu-test-user-syscall"
     )
 ))]
-fn run_user_mode_probe_test<const KERNEL_N: usize>(
-    kernel_space: &AddressSpace<'_, KERNEL_N>,
+fn run_user_mode_probe_test(
+    kernel_space: &AddressSpace,
     plan: &KernelMapPlan,
     frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
 ) -> ! {
-    // Safety: this feature path runs only on the single boot hart and obtains
-    // the static ownership table once before loading the probe image.
-    let storage_pointer = &raw mut USER_PROBE_ADDRESS_SPACE_STORAGE;
-    let storage = unsafe { storage_pointer.as_mut() }
-        .expect("a static user-probe storage pointer is never null");
-    if !storage.is_empty() {
-        fatal_qemu_test(format_args!(
-            "user probe precondition: expected empty storage, actual len={}",
-            storage.len()
-        ));
-    }
-
     #[cfg(feature = "qemu-test-user-entry")]
     let fixture = user_entry_ecall_elf();
     #[cfg(feature = "qemu-test-user-trap")]
     let fixture = user_trap_fault_elf();
     #[cfg(feature = "qemu-test-user-syscall")]
     let fixture = user_syscall_probe_elf();
-    let image =
-        match load_image_with_kernel_mappings(&fixture, frames, memory, storage, plan.mappings()) {
-            Ok(image) => image,
-            Err(error) => fatal_qemu_test(format_args!("user probe load: {error:?}")),
-        };
+    let image = match load_image_with_kernel_mappings(&fixture, frames, memory, plan.mappings()) {
+        Ok(image) => image,
+        Err(error) => fatal_qemu_test(format_args!("user probe load: {error:?}")),
+    };
 
     let mut context = UserContext::new(image.entry(), image.user_stack_top());
     let user_root = PhysPageNum::from_start(image.address_space().root().as_u64())
@@ -1928,31 +1863,18 @@ fn run_user_mode_probe_test<const KERNEL_N: usize>(
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
-fn run_user_exit_test<const KERNEL_N: usize>(
-    kernel_space: &AddressSpace<'_, KERNEL_N>,
+fn run_user_exit_test(
+    kernel_space: &AddressSpace,
     plan: &KernelMapPlan,
     frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
 ) {
     let before = frames.stats();
-    // Safety: このfeatureは単一boot hartでだけ実行し、このstorageを一度だけ
-    // 取得する。runを破棄するまで別の参照を作らない。
-    let storage_pointer = &raw mut USER_PROBE_ADDRESS_SPACE_STORAGE;
-    let storage = unsafe { storage_pointer.as_mut() }
-        .expect("a static user-exit storage pointer is never null");
-    if !storage.is_empty() {
-        fatal_qemu_test(format_args!(
-            "user-exit precondition: expected empty storage, actual len={}",
-            storage.len()
-        ));
-    }
-
     let fixture = user_exit_probe_elf();
-    let image =
-        match load_image_with_kernel_mappings(&fixture, frames, memory, storage, plan.mappings()) {
-            Ok(image) => image,
-            Err(error) => fatal_qemu_test(format_args!("user-exit load: {error:?}")),
-        };
+    let image = match load_image_with_kernel_mappings(&fixture, frames, memory, plan.mappings()) {
+        Ok(image) => image,
+        Err(error) => fatal_qemu_test(format_args!("user-exit load: {error:?}")),
+    };
     let mut context = UserContext::new(image.entry(), image.user_stack_top());
     let kernel_root = PhysPageNum::from_start(kernel_space.root().as_u64())
         .expect("kernel root page number is valid");
@@ -2027,10 +1949,9 @@ fn run_user_exit_test<const KERNEL_N: usize>(
     drop(run);
 
     let after = frames.stats();
-    let storage_len = storage.len();
-    if after != before || storage_len != 0 {
+    if after != before {
         fatal_qemu_test(format_args!(
-            "user-exit recovery: allocator expected={before:?} actual={after:?}; storage expected len=0 actual len={storage_len}"
+            "user-exit recovery: allocator expected={before:?} actual={after:?}"
         ));
     }
 
@@ -2079,11 +2000,7 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
 /// 終了したprocessをtableから取り出して全所有frameを回収する。
 /// 回収に失敗した場合は一回だけ再試行し、それでも駄目ならpayload全体を中止する。
 #[cfg(target_arch = "riscv64")]
-fn reclaim_process_slot(
-    table: &mut ProcessTable<'_, MAX_OWNED_FRAMES>,
-    pid: usize,
-    frames: &mut dyn FrameSource,
-) {
+fn reclaim_process_slot(table: &mut ProcessTable, pid: usize, frames: &mut dyn FrameSource) {
     let Some(mut process) = table.take(pid) else {
         return;
     };
@@ -2094,10 +2011,7 @@ fn reclaim_process_slot(
 
 /// tableに残る全processを回収する。spawn途中の失敗経路で使う。
 #[cfg(target_arch = "riscv64")]
-fn reclaim_process_table(
-    table: &mut ProcessTable<'_, MAX_OWNED_FRAMES>,
-    frames: &mut dyn FrameSource,
-) {
+fn reclaim_process_table(table: &mut ProcessTable, frames: &mut dyn FrameSource) {
     for pid in 0..MAX_PROCS {
         let _ = table.take(pid).map(|mut process| process.reclaim(frames));
     }
@@ -2112,8 +2026,8 @@ fn reclaim_process_table(
 /// frame途中でbyteが尽きても`WouldBlock`として再び`Blocked`へ戻るため、
 /// 受信途中の間も他processが進み続ける。
 #[cfg(target_arch = "riscv64")]
-fn run_boot_payload<const KERNEL_N: usize>(
-    kernel_space: &AddressSpace<'_, KERNEL_N>,
+fn run_boot_payload(
+    kernel_space: &AddressSpace,
     plan: &KernelMapPlan,
     frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
@@ -2129,23 +2043,9 @@ fn run_boot_payload<const KERNEL_N: usize>(
     let multi = payload.manifest().version() >= 2;
 
     // image宣言順にspawnし、slot index (=pid) をmanifest順と一致させる。
-    let mut table = ProcessTable::<MAX_OWNED_FRAMES>::new();
+    // 所有権台帳は各processが内部所有する。静的arenaは要らない。
+    let mut table = ProcessTable::new();
     for (index, spec) in payload.images().enumerate() {
-        // Safety: 単一boot hartであり、manifest parserがimage数をMAX_PROCS以下に
-        // 制限済み。各storageはこのprocess専用に一度だけ貸し出す。
-        let storage = unsafe {
-            (&raw mut PROCESS_STORAGES)
-                .cast::<AddressSpaceStorage<MAX_OWNED_FRAMES>>()
-                .add(index)
-                .as_mut()
-        }
-        .expect("a static storage pointer is never null");
-        if !storage.is_empty() {
-            fatal_payload_error(format_args!(
-                "MiniOS payload: storage precondition failed, len={}\r\n",
-                storage.len()
-            ));
-        }
         let mut argv: [&str; minios_abi::manifest::ARG_MAX_COUNT] =
             [""; minios_abi::manifest::ARG_MAX_COUNT];
         let mut argc = 0usize;
@@ -2159,7 +2059,6 @@ fn run_boot_payload<const KERNEL_N: usize>(
             &argv[..argc],
             frames,
             memory,
-            storage,
             plan.mappings(),
         ) {
             Ok(process) => {
@@ -2316,22 +2215,6 @@ fn run_boot_payload<const KERNEL_N: usize>(
             "MiniOS payload: recovery, allocator expected={before:?} actual={after:?}\r\n"
         ));
     }
-    // Safety: 全processが終了済みで、storageを触るものは残っていない。
-    let storages = unsafe {
-        core::slice::from_raw_parts(
-            (&raw const PROCESS_STORAGES).cast::<AddressSpaceStorage<MAX_OWNED_FRAMES>>(),
-            MAX_PROCS,
-        )
-    };
-    for (index, storage) in storages.iter().enumerate() {
-        let len = storage.len();
-        if len != 0 {
-            fatal_payload_error(format_args!(
-                "MiniOS payload: recovery, storage {index} len={len}\r\n"
-            ));
-        }
-    }
-
     if failed > 0 {
         fatal_payload_error(format_args!(
             "MiniOS payload: failed processes={failed}\r\n"

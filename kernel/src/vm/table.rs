@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::fmt;
 
 use crate::{
@@ -7,8 +8,6 @@ use crate::{
         VirtAddr, VirtPage,
     },
 };
-
-pub const MAX_OWNED_FRAMES: usize = 2688;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameKind {
@@ -23,56 +22,51 @@ pub struct OwnedFrame {
     kind: FrameKind,
 }
 
-pub struct AddressSpaceStorage<const N: usize> {
-    frames: [Option<OwnedFrame>; N],
-    len: usize,
+/// 1つのaddress spaceが所有するframeのLIFO台帳。heap上の`Vec`で持ち、
+/// 件数はframe poolとheap成長が許す限り可変である。
+/// `destroy`/rollback経路がpop順にframeを返す。
+pub struct AddressSpaceStorage {
+    frames: Vec<OwnedFrame>,
 }
 
-impl<const N: usize> AddressSpaceStorage<N> {
+impl AddressSpaceStorage {
     pub const fn new() -> Self {
-        Self {
-            frames: [const { None }; N],
-            len: 0,
-        }
+        Self { frames: Vec::new() }
     }
 
-    pub const fn len(&self) -> usize {
-        self.len
+    pub fn len(&self) -> usize {
+        self.frames.len()
     }
 
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
     }
 
+    /// 台帳への追記はheap割り当てを伴うため失敗しうる。失敗時はframeを
+    /// 呼び出し側へ返し、callerがallocatorへ解放する。
     fn push<E>(
         &mut self,
         frame: PhysFrame,
         kind: FrameKind,
     ) -> Result<(), (VmError<E>, PhysFrame)> {
-        if self.len == N {
+        if self.frames.try_reserve(1).is_err() {
             return Err((VmError::CapacityExceeded, frame));
         }
-        self.frames[self.len] = Some(OwnedFrame { frame, kind });
-        self.len += 1;
+        self.frames.push(OwnedFrame { frame, kind });
         Ok(())
     }
 
     fn pop(&mut self) -> Option<OwnedFrame> {
-        if self.len == 0 {
-            return None;
-        }
-        self.len -= 1;
-        self.frames[self.len].take()
+        self.frames.pop()
     }
 
+    /// pop直後の再格納専用。popがcapacityを残すため失敗しない。
     fn restore_last(&mut self, owned: OwnedFrame) {
-        debug_assert!(self.len < N);
-        self.frames[self.len] = Some(owned);
-        self.len += 1;
+        self.frames.push(owned);
     }
 }
 
-impl<const N: usize> Default for AddressSpaceStorage<N> {
+impl Default for AddressSpaceStorage {
     fn default() -> Self {
         Self::new()
     }
@@ -93,7 +87,6 @@ impl MappedFrame {
 pub enum VmError<E> {
     OutOfFrames,
     CapacityExceeded,
-    StorageInUse,
     AlreadyMapped,
     NotMapped,
     Address(AddressError),
@@ -101,26 +94,22 @@ pub enum VmError<E> {
     Store(E),
 }
 
-pub struct AddressSpaceBuilder<'alloc, 'memory, 'storage, const N: usize, M: FrameStore> {
+pub struct AddressSpaceBuilder<'alloc, 'memory, M: FrameStore> {
     allocator: &'alloc mut dyn FrameSource,
     memory: &'memory mut M,
-    storage: Option<&'storage mut AddressSpaceStorage<N>>,
+    storage: Option<AddressSpaceStorage>,
     root: PhysAddr,
     allocator_id: u64,
 }
 
-impl<'alloc, 'memory, 'storage, const N: usize, M: FrameStore>
-    AddressSpaceBuilder<'alloc, 'memory, 'storage, N, M>
-{
+impl<'alloc, 'memory, M: FrameStore> AddressSpaceBuilder<'alloc, 'memory, M> {
+    /// 空の所有権台帳を内部に作り、root page table frameを割り当てる。
+    /// 台帳はspace専用にbuilderが所有するため、共有arenaの事前検査は要らない。
     pub fn new(
         allocator: &'alloc mut dyn FrameSource,
         memory: &'memory mut M,
-        storage: &'storage mut AddressSpaceStorage<N>,
     ) -> Result<Self, VmError<M::Error>> {
-        if !storage.is_empty() {
-            return Err(VmError::StorageInUse);
-        }
-
+        let mut storage = AddressSpaceStorage::new();
         let frame = allocator.allocate().ok_or(VmError::OutOfFrames)?;
         let frame_start = frame.start();
         let root = match PhysAddr::try_new(frame_start as u64) {
@@ -219,7 +208,7 @@ impl<'alloc, 'memory, 'storage, const N: usize, M: FrameStore>
             .map_err(VmError::Store)
     }
 
-    pub fn finish(mut self) -> AddressSpace<'storage, N> {
+    pub fn finish(mut self) -> AddressSpace {
         let storage = self
             .storage
             .take()
@@ -303,47 +292,43 @@ impl<'alloc, 'memory, 'storage, const N: usize, M: FrameStore>
         let _ = self.allocator.deallocate(owned.frame);
     }
 
-    fn storage_mut(&mut self) -> &mut AddressSpaceStorage<N> {
+    fn storage_mut(&mut self) -> &mut AddressSpaceStorage {
         self.storage
-            .as_deref_mut()
+            .as_mut()
             .expect("unfinished builder retains its storage")
     }
 }
 
-impl<const N: usize, M: FrameStore> Drop for AddressSpaceBuilder<'_, '_, '_, N, M> {
+impl<M: FrameStore> Drop for AddressSpaceBuilder<'_, '_, M> {
     fn drop(&mut self) {
-        while let Some(owned) = self
-            .storage
-            .as_deref_mut()
-            .and_then(AddressSpaceStorage::pop)
-        {
+        while let Some(owned) = self.storage.as_mut().and_then(AddressSpaceStorage::pop) {
             let _ = self.allocator.deallocate(owned.frame);
         }
     }
 }
 
-pub struct AddressSpace<'storage, const N: usize> {
+pub struct AddressSpace {
     root: PhysAddr,
-    storage: &'storage mut AddressSpaceStorage<N>,
+    storage: AddressSpaceStorage,
     allocator_id: u64,
 }
 
-pub struct DestroyError<'storage, const N: usize> {
+pub struct DestroyError {
     frame_error: FrameError,
-    space: AddressSpace<'storage, N>,
+    space: AddressSpace,
 }
 
-impl<'storage, const N: usize> DestroyError<'storage, N> {
+impl DestroyError {
     pub const fn frame_error(&self) -> FrameError {
         self.frame_error
     }
 
-    pub fn into_parts(self) -> (FrameError, AddressSpace<'storage, N>) {
+    pub fn into_parts(self) -> (FrameError, AddressSpace) {
         (self.frame_error, self.space)
     }
 }
 
-impl<const N: usize> fmt::Debug for DestroyError<'_, N> {
+impl fmt::Debug for DestroyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DestroyError")
@@ -352,13 +337,18 @@ impl<const N: usize> fmt::Debug for DestroyError<'_, N> {
     }
 }
 
-impl<'storage, const N: usize> AddressSpace<'storage, N> {
+impl AddressSpace {
     pub const fn root(&self) -> PhysAddr {
         self.root
     }
 
     pub(crate) const fn allocator_id(&self) -> u64 {
         self.allocator_id
+    }
+
+    /// 台帳が記録する所有frame数。回収経路の診断とhost testの検査に使う。
+    pub fn owned_frames(&self) -> usize {
+        self.storage.len()
     }
 
     pub fn translate<M: FrameStore>(
@@ -395,7 +385,7 @@ impl<'storage, const N: usize> AddressSpace<'storage, N> {
         ))
     }
 
-    pub fn destroy(self, allocator: &mut dyn FrameSource) -> Result<(), DestroyError<'storage, N>> {
+    pub fn destroy(mut self, allocator: &mut dyn FrameSource) -> Result<(), DestroyError> {
         if allocator.allocator_id() != self.allocator_id {
             return Err(DestroyError {
                 frame_error: FrameError::WrongAllocator,
@@ -434,7 +424,7 @@ mod tests {
 
     use std::{boxed::Box, cell::Cell, collections::BTreeMap, vec::Vec};
 
-    use super::{AddressSpaceBuilder, AddressSpaceStorage, VmError};
+    use super::{AddressSpaceBuilder, VmError};
     use crate::{
         memory::frame::{FrameAllocator, FrameError, FrameStats},
         vm::{FrameStore, PageFlags, PhysAddr, VirtAddr, VirtPage},
@@ -585,11 +575,9 @@ mod tests {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
 
         let error = {
-            let mut builder =
-                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
             builder
                 .map_new_zeroed(
                     VirtPage::from_start(0x0010_0000).unwrap(),
@@ -606,16 +594,13 @@ mod tests {
 
         assert_eq!(error, VmError::AlreadyMapped);
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
     fn translate_preserves_leaf_permissions() {
         let mut allocator = test_allocator::<16>(0x1000, 0x41_000);
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<16>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
 
         let user = VirtPage::from_start(0x0010_0000).unwrap();
         let flags = PageFlags::new(true, false, true, true).unwrap();
@@ -638,9 +623,7 @@ mod tests {
     fn borrowed_kernel_mapping_remains_supervisor_only() {
         let mut allocator = test_allocator::<16>(0x1000, 0x41_000);
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<16>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         let page = VirtPage::from_start(0xffff_ffc0_0020_0000).unwrap();
         let physical = PhysAddr::try_new(0x8020_0000).unwrap();
         let flags = PageFlags::new(true, false, true, false).unwrap();
@@ -655,27 +638,30 @@ mod tests {
         assert!(!space.translate(&store, page.start()).unwrap().1.user());
     }
 
+    // Catches the ledger silently capping ownership at a fixed capacity:
+    // a space must keep recording frames as long as the heap keeps growing,
+    // well past the arena sizes the previous array storage allowed.
     #[test]
-    fn storage_capacity_failure_returns_every_allocated_frame() {
-        let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
-        let before = allocator.stats();
+    fn storage_grows_beyond_the_old_fixed_capacity() {
+        let mut allocator = test_allocator::<256>(0x1000, 0x101_000);
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<3>::new();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
 
-        let error = {
-            let mut builder =
-                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        // 1 GiB刻みの8領域へmapすると、領域ごとに中間table+leafが必要に
+        // なり、所有frameは旧fixture容量(3)を大きく超える。
+        for index in 0..8u64 {
             builder
                 .map_new_zeroed(
-                    VirtPage::from_start(0x0020_0000).unwrap(),
+                    VirtPage::from_start(0x0010_0000 + index * 0x4000_0000).unwrap(),
                     PageFlags::new(true, true, false, true).unwrap(),
                 )
-                .unwrap_err()
-        };
+                .unwrap();
+        }
+        let space = builder.finish();
 
-        assert_eq!(error, VmError::CapacityExceeded);
-        assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
+        assert!(space.owned_frames() > 3 * 8);
+        space.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats().allocated, 0);
     }
 
     #[test]
@@ -683,11 +669,9 @@ mod tests {
         let mut allocator = test_allocator::<1>(0x1000, 0x4000);
         let before = allocator.stats();
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
 
         let error = {
-            let mut builder =
-                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
             builder
                 .map_new_zeroed(
                     VirtPage::from_start(0x0030_0000).unwrap(),
@@ -698,7 +682,6 @@ mod tests {
 
         assert_eq!(error, VmError::OutOfFrames);
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
@@ -707,11 +690,9 @@ mod tests {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
         let mut store = TestFrameStore::fail_on_zero_frame(2);
-        let mut storage = AddressSpaceStorage::<8>::new();
 
         let error = {
-            let mut builder =
-                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
             builder
                 .map_new_zeroed(
                     VirtPage::from_start(0x0040_0000).unwrap(),
@@ -722,11 +703,9 @@ mod tests {
 
         assert_eq!(error, VmError::Store(TestStoreError::InjectedFailure));
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
-        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         assert_eq!(retry.root().as_u64(), 0x1000);
         drop(retry);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
@@ -735,11 +714,9 @@ mod tests {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
         let mut store = TestFrameStore::fail_on_read_u64(1);
-        let mut storage = AddressSpaceStorage::<8>::new();
 
         let error = {
-            let mut builder =
-                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
             builder
                 .map_new_zeroed(
                     VirtPage::from_start(0x0040_0000).unwrap(),
@@ -750,11 +727,9 @@ mod tests {
 
         assert_eq!(error, VmError::Store(TestStoreError::InjectedFailure));
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
-        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         assert_eq!(retry.root().as_u64(), 0x1000);
         drop(retry);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
@@ -763,11 +738,9 @@ mod tests {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
         let mut store = TestFrameStore::fail_on_write(3);
-        let mut storage = AddressSpaceStorage::<8>::new();
 
         let error = {
-            let mut builder =
-                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
             builder
                 .map_new_zeroed(
                     VirtPage::from_start(0x0040_0000).unwrap(),
@@ -778,19 +751,16 @@ mod tests {
 
         assert_eq!(error, VmError::Store(TestStoreError::InjectedFailure));
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
-        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         assert_eq!(retry.root().as_u64(), 0x1000);
         drop(retry);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
     fn translate_reports_an_unmapped_page() {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
-        let builder = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         let space = builder.finish();
 
         assert_eq!(
@@ -804,9 +774,7 @@ mod tests {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         builder
             .map_borrowed(
                 VirtPage::from_start(0xffff_ffc0_0040_0000).unwrap(),
@@ -820,18 +788,15 @@ mod tests {
         space.destroy(&mut allocator).unwrap();
 
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
     fn destroyed_storage_can_build_a_new_address_space() {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
 
         {
-            let mut first =
-                AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+            let mut first = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
             first
                 .map_new_zeroed(
                     VirtPage::from_start(0x0010_0000).unwrap(),
@@ -841,10 +806,9 @@ mod tests {
             first.finish().destroy(&mut allocator).unwrap();
         }
 
-        let second = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let second = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         assert_eq!(second.root().as_u64(), 0x1000);
         drop(second);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
@@ -875,9 +839,7 @@ mod tests {
     fn mapped_user_page_uses_four_owned_frames() {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         let mapped = builder
             .map_new_zeroed(
                 VirtPage::from_start(0x0010_0000).unwrap(),
@@ -896,7 +858,6 @@ mod tests {
             }
         );
         space.destroy(&mut allocator).unwrap();
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
@@ -904,9 +865,7 @@ mod tests {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
-        let mut builder =
-            AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         builder
             .map_new_zeroed(
                 VirtPage::from_start(0x0010_0000).unwrap(),
@@ -933,12 +892,10 @@ mod tests {
         );
         space.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
 
-        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage).unwrap();
+        let retry = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         assert_eq!(retry.root().as_u64(), 0x1000);
         drop(retry);
-        assert_eq!(storage.len(), 0);
     }
 
     #[test]
@@ -946,8 +903,7 @@ mod tests {
         let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
         let before = allocator.stats();
         let mut store = TestFrameStore::default();
-        let mut storage = AddressSpaceStorage::<8>::new();
-        let space = AddressSpaceBuilder::new(&mut allocator, &mut store, &mut storage)
+        let space = AddressSpaceBuilder::new(&mut allocator, &mut store)
             .unwrap()
             .finish();
         let mut same_range = test_allocator::<8>(0x1000, 0x21_000);
@@ -960,6 +916,5 @@ mod tests {
         let (_, space) = failure.into_parts();
         space.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
-        assert_eq!(storage.len(), 0);
     }
 }

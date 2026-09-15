@@ -11,6 +11,6 @@ pub use pte::{PageFlags, PageTableEntry, PteError};
 pub use storage::IdentityFrameStore;
 pub use storage::{FrameStore, IdentityFrameStoreError};
 pub use table::{
-    AddressSpace, AddressSpaceBuilder, AddressSpaceStorage, DestroyError, FrameKind,
-    MAX_OWNED_FRAMES, MappedFrame, OwnedFrame, VmError,
+    AddressSpace, AddressSpaceBuilder, AddressSpaceStorage, DestroyError, FrameKind, MappedFrame,
+    OwnedFrame, VmError,
 };

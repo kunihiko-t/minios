@@ -66,8 +66,8 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
 - `vm/address.rs`：Sv39の正規仮想アドレス、4 KiBページ、VPN、44 bit PPNを型の生成時に検査します。
 - `vm/pte.rs`：branchとleafのencodeとdecode、`R/W/X/U`権限、書き込みだけのleafと`W+X`の拒否を担当します。
 - `vm/storage.rs`：テスト用またはQEMUの物理フレームへ、ページ境界を越えないゼロ化、PTEの読み書き、byte copyを提供します。
-- `vm/table.rs`：三段page walk、新規写像、変換、固定容量の所有フレーム記録、構築途中と正常破棄の回収を担当します。
-  `AddressSpaceStorage`は最大2,688個の所有フレームを記録し、別のallocatorが破棄を拒否した場合は再試行可能な`AddressSpace`を失いません。
+- `vm/table.rs`：三段page walk、新規写像、変換、ヒープ上の可変長な所有フレーム記録、構築途中と正常破棄の回収を担当します。
+  `AddressSpaceStorage`は所有フレームを`Vec`で記録し、別のallocatorが破棄を拒否した場合は再試行可能な`AddressSpace`を失いません。
 - `vm/kernel.rs`：`.text`、`.rodata`、writable section、起動用stack、管理対象RAM、UARTのS-mode専用恒等写像を列挙します。
   カーネルイメージとUARTの物理フレームは借用し、page tableの物理フレームだけを`AddressSpace`が所有します。
 
