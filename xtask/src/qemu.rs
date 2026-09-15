@@ -77,6 +77,7 @@ pub enum TestKind {
     PayloadStdin,
     Sched,
     SchedIo,
+    SchedIoPartial,
     Shell,
 }
 
@@ -100,6 +101,9 @@ impl TestKind {
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
             Self::SchedIo => unreachable!("the sched-io test boots the normal kernel"),
+            Self::SchedIoPartial => {
+                unreachable!("the sched-io-partial test boots the normal kernel")
+            }
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -126,6 +130,9 @@ impl TestKind {
             Self::Sched => unreachable!("the sched test verifies interleaved control frames"),
             Self::SchedIo => {
                 unreachable!("the sched-io test verifies a blocked reader's control frames")
+            }
+            Self::SchedIoPartial => {
+                unreachable!("the sched-io-partial test verifies a split frame's control frames")
             }
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
@@ -350,6 +357,15 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         return verify_sched_io_result(&command_line, completed.status.code(), &completed.output);
     }
 
+    if kind == TestKind::SchedIoPartial {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_sched_io()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_sched_io_partial_command(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_sched_io_result(&command_line, completed.status.code(), &completed.output);
+    }
+
     if kind == TestKind::Shell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let (command, command_line) = qemu_command(&kernel);
@@ -515,13 +531,56 @@ fn run_stdin_command(
 /// marker待ち後の送信なので、reader processは必ず一度blockする。
 const SCHED_IO_STDIN_FRAME: &[u8] = b"MCF1\x07\0\0\0\x01\0\0\0z";
 
+/// 分割送信の間にguestが前のchunkをconsumeするための待機時間。
+/// scheduler loopは常時`stdin_pending`をpollするため、100 msあれば
+/// 到着byteは必ずstagingへ吸い込まれる。
+const SCHED_IO_PARTIAL_SETTLE: Duration = Duration::from_millis(100);
+
 /// sched-io検査: Readyを待ち、quick processの`b3\n`が出力へ現れてから
 /// Stdin frameを送り、終了まで出力を集める。readerがblock中に他processが
 /// 進むことを`b3 < r2`の順序で検証するため、入力は必ずmarker観測後に送る。
 fn run_sched_io_command(
+    command: Command,
+    command_line: String,
+    deadline: Duration,
+) -> Result<CompletedProcess, QemuError> {
+    run_sched_io_script(
+        command,
+        command_line,
+        deadline,
+        &[(Some("b3\n"), SCHED_IO_STDIN_FRAME)],
+    )
+}
+
+/// sched-io-partial検査: Stdin frameをheader途中と残りに分けて送る。
+/// `b3`観測後に最初の5 byte（magic + kind、length未着）を送り、settleして
+/// guestがpartial headerをconsume・再blockしたことを確実にしてから残りを送る。
+/// 再開可能でないdecoderなら続きを先頭からdecodeしてdesync→fatalとなるため、
+/// `r2`到達と正常終了がそのままresume経路の証明になる。
+fn run_sched_io_partial_command(
+    command: Command,
+    command_line: String,
+    deadline: Duration,
+) -> Result<CompletedProcess, QemuError> {
+    run_sched_io_script(
+        command,
+        command_line,
+        deadline,
+        &[
+            (Some("b3\n"), &SCHED_IO_STDIN_FRAME[..5]),
+            (Some("a1\n"), &SCHED_IO_STDIN_FRAME[5..]),
+        ],
+    )
+}
+
+/// `(marker, chunk)`列を順に送るsched-io系の実行。各chunkは対応するmarkerが
+/// 出力へ現れてから書き込み、最後でなければ`SCHED_IO_PARTIAL_SETTLE`待って
+/// guest側のconsumeを確実にする。
+fn run_sched_io_script(
     mut command: Command,
     command_line: String,
     deadline: Duration,
+    steps: &[(Option<&str>, &[u8])],
 ) -> Result<CompletedProcess, QemuError> {
     let mut child = command
         .stdin(Stdio::piped())
@@ -540,28 +599,34 @@ fn run_sched_io_command(
     {
         return finish_stdin_failure(child, readers, command_line, deadline, failure);
     }
-    // quick processの最終出力を待ってからstdinを送る。この時点でreaderは
-    // 必ずblock済みであり、spinはまだbusy-waitの途中である。
-    if let Err(failure) = wait_for_output(&mut child, &readers, "b3\n", started, deadline) {
-        return finish_stdin_failure(child, readers, command_line, deadline, failure);
-    }
 
-    let write_result = child
+    let mut stdin = child
         .stdin
         .take()
-        .expect("sched-io test stdin must be piped")
-        .write_all(SCHED_IO_STDIN_FRAME);
-    if let Err(error) = write_result {
-        let cleanup = terminate_and_reap(&mut child);
-        let mut output = readers.join().unwrap_or_else(|join_error| join_error);
-        if let Err(cleanup_error) = cleanup {
-            output.push_str("\nQEMU cleanup error: ");
-            output.push_str(&cleanup_error);
+        .expect("sched-io test stdin must be piped");
+    for (index, (marker, chunk)) in steps.iter().enumerate() {
+        // quick processの最終出力などのmarkerを待ってからstdinを送る。
+        // この時点でreaderは必ずblock済みであり、spinはまだbusy-waitの途中である。
+        if let Some(marker) = marker
+            && let Err(failure) = wait_for_output(&mut child, &readers, marker, started, deadline)
+        {
+            return finish_stdin_failure(child, readers, command_line, deadline, failure);
         }
-        return Err(QemuError::Wait {
-            command: command_line,
-            error: format!("could not write stdin frames: {error}\n{output}"),
-        });
+        if let Err(error) = stdin.write_all(chunk) {
+            let cleanup = terminate_and_reap(&mut child);
+            let mut output = readers.join().unwrap_or_else(|join_error| join_error);
+            if let Err(cleanup_error) = cleanup {
+                output.push_str("\nQEMU cleanup error: ");
+                output.push_str(&cleanup_error);
+            }
+            return Err(QemuError::Wait {
+                command: command_line,
+                error: format!("could not write stdin frames: {error}\n{output}"),
+            });
+        }
+        if index + 1 < steps.len() {
+            std::thread::sleep(SCHED_IO_PARTIAL_SETTLE);
+        }
     }
 
     let remaining = deadline.saturating_sub(started.elapsed());

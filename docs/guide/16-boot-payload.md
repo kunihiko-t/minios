@@ -34,7 +34,7 @@ processごとのaddress space所有権は、最大4個の静的な`AddressSpaceS
 U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類され、handlerが次のtickを再アームしてkernelへ戻ると、`ProcessTable`が前回pidの次から時計回りに次のprocessを選びます。
 `read`は入力未到着のとき`Blocked`としてkernelへ戻り、processはstdin待ちで再選対象から外れます。
 入力が届くとecallがやり直されて完了するため、block中も他processが進みます。
-残る制限として、Stdin frameの途中受信（headerやpayloadのbyte待ち）はtrap内で同期pollingするため、その間だけ他processが進みません。
+Stdin frameの受信は`StdinStaging`内の再開可能なdecoderがbyte単位で蓄積するため、frame途中でbyteが尽きてもprocessは再びstdin待ちへ戻り、他processが進み続けます。
 
 [`qemu_command_with_payload`](../../xtask/src/qemu.rs)は一時MiniBundleをQEMUの`-device loader`へ渡します。
 loader argumentは`addr=0x87800000,force-raw=on`を指定し、kernelが検証する予約windowの先頭へraw byteを置きます。

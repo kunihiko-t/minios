@@ -1947,8 +1947,9 @@ fn reclaim_process_table(
 ///
 /// `read`は入力未到着のとき`Blocked`としてkernelへ戻り、processはstdin待ち
 /// 状態で再選対象から外れる。入力が届くとecallがやり直されて完了する。
-/// 残る制限として、frameの途中受信 (header/payloadのbyte待ち) はtrap内で
-/// 同期pollingするため、その間は他processが進まない。
+/// Stdin frameの受信は`StdinStaging`の再開可能なdecoderがbyte単位で蓄積し、
+/// frame途中でbyteが尽きても`WouldBlock`として再び`Blocked`へ戻るため、
+/// 受信途中の間も他processが進み続ける。
 #[cfg(target_arch = "riscv64")]
 fn run_boot_payload<const KERNEL_N: usize>(
     kernel_space: &AddressSpace<'_, KERNEL_N>,

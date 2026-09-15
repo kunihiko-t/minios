@@ -26,13 +26,11 @@ pub trait ControlSink {
 pub trait ControlSource {
     type Error;
 
-    /// 次の入力を`output`へ移す。戻り値はbyte数であり、0はEOFである。
-    fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error>;
-
-    /// `read_stdin`が入力待ちで停まらずに進めるか。staging済みbyteの存在、
-    /// EOF到達済み、または受信側に未読byteがあれば`true`を返す。
-    /// `false`のとき`read_stdin`は入力待ちで停まる可能性がある。
-    fn stdin_ready(&mut self) -> bool;
+    /// 次の入力を`output`へ移す。`Ok(Some(n))`は受信byte数であり、0はEOF。
+    /// `Ok(None)`は現時点で入力がないことを意味し、呼び出し側はprocessを
+    /// `Blocked`へ回して後でやり直す。この契約によりsourceは受信待ちで
+    /// 停まってはならない。
+    fn read_stdin(&mut self, output: &mut [u8]) -> Result<Option<usize>, Self::Error>;
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -62,8 +60,9 @@ pub enum SyscallFlow<E, SE = E> {
 /// guest pointerをRust参照として解することなく、`write`は1回の検証付きcopyと
 /// 1回の`sink.frame`で処理し、戻り値を`a0`へ書き込む。descriptorは1と2だけを
 /// 許可し、4,096 byteを超える長さは拒否する。`read`はdescriptor 0だけを許可し、
-/// 書き込み検証を通してから`source.stdin_ready`を確認し、未到着なら`Blocked`、
-/// 到着済みなら1回の`source.read_stdin`で`read_scratch`へ受信する。
+/// 書き込み検証を通してから1回の`source.read_stdin`で`read_scratch`へ受信する。
+/// sourceが`Ok(None)`を返す未到着では`Blocked`を返し、`sepc`をecallへ戻して
+/// 再開時の再実行に委ねる。
 /// userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは呼び出し側が
 /// 1個だけ持ち、多重frameへ4 KiBを複製しない。
 pub fn dispatch_syscall<const N: usize, M: FrameStore, S: ControlSink, R: ControlSource>(
@@ -113,15 +112,14 @@ fn dispatch_read<const N: usize, M: FrameStore, E, R: ControlSource>(
         context.set_register(10, EFAULT as usize);
         return SyscallFlow::Resume;
     }
-    // 入力未到着ならここで停まる代わりにBlockedを返す。`sepc`はclassifyが
-    // ecallの次へ進めてあるため、4 byte戻して再開時に同じecallをやり直す。
-    if !source.stdin_ready() {
-        context.set_sepc(context.sepc() - 4);
-        return SyscallFlow::Blocked;
-    }
-
+    // `Ok(None)`は入力未到着である。`sepc`はclassifyがecallの次へ進めて
+    // あるため、4 byte戻して再開時に同じecallをやり直す。
     match source.read_stdin(&mut read_scratch[..len]) {
-        Ok(count) => SyscallFlow::ReadComplete { start, len: count },
+        Ok(Some(count)) => SyscallFlow::ReadComplete { start, len: count },
+        Ok(None) => {
+            context.set_sepc(context.sepc() - 4);
+            SyscallFlow::Blocked
+        }
         Err(error) => SyscallFlow::SourceFatal(error),
     }
 }
@@ -361,20 +359,19 @@ mod tests {
     impl ControlSource for FakeSource {
         type Error = SinkError;
 
-        fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        fn read_stdin(&mut self, output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
             self.reads += 1;
             if self.fail {
                 return Err(SinkError::Injected);
+            }
+            if !self.ready {
+                return Ok(None);
             }
             let available = &self.script[self.position..];
             let count = core::cmp::min(available.len(), output.len());
             output[..count].copy_from_slice(&available[..count]);
             self.position += count;
-            Ok(count)
-        }
-
-        fn stdin_ready(&mut self) -> bool {
-            self.ready
+            Ok(Some(count))
         }
     }
 
@@ -611,7 +608,7 @@ mod tests {
     // Catches wiring mistakes between dispatch and the real Stdin frame parser.
     #[test]
     fn read_serves_real_stdin_frames_through_staging() {
-        use crate::user::stdin::{ByteReader, StdinStaging};
+        use crate::user::stdin::{ByteReader, StdinError, StdinStaging};
 
         struct VecReader<'a> {
             bytes: &'a [u8],
@@ -624,6 +621,12 @@ mod tests {
                 self.position += 1;
                 byte
             }
+
+            fn try_read_byte(&mut self) -> Option<u8> {
+                self.bytes.get(self.position).copied().inspect(|_| {
+                    self.position += 1;
+                })
+            }
         }
 
         struct StagingSource<'a> {
@@ -634,16 +637,12 @@ mod tests {
         impl ControlSource for StagingSource<'_> {
             type Error = SinkError;
 
-            fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
-                self.staging
-                    .read(&mut self.reader, output)
-                    .map_err(|_| SinkError::Injected)
-            }
-
-            fn stdin_ready(&mut self) -> bool {
-                self.staging.has_pending()
-                    || self.staging.is_eof()
-                    || self.reader.position < self.reader.bytes.len()
+            fn read_stdin(&mut self, output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+                match self.staging.read(&mut self.reader, output) {
+                    Ok(count) => Ok(Some(count)),
+                    Err(StdinError::WouldBlock) => Ok(None),
+                    Err(_) => Err(SinkError::Injected),
+                }
             }
         }
 
@@ -819,9 +818,9 @@ mod tests {
     }
 
     // Catches a blocked read consuming input state or forgetting to rewind
-    // sepc: with no input pending, dispatch must return Blocked, leave a0
-    // and the script untouched, and point sepc back at the ecall so resume
-    // retries the same syscall.
+    // sepc: with no input pending, dispatch must reach the source, get
+    // `Ok(None)`, return Blocked, leave a0 and the script position untouched,
+    // and point sepc back at the ecall so resume retries the same syscall.
     #[test]
     fn read_without_ready_input_blocks_and_rewinds_sepc() {
         let mut sink = FakeSink::default();
@@ -841,11 +840,12 @@ mod tests {
         // Blockedはその4 byte分だけ戻した位置を指す。
         assert_eq!(context.sepc(), 0x0010_0500 - 4);
         assert_eq!(context.register(10), STDIN);
-        assert_eq!(source.reads, 0);
+        assert_eq!(source.reads, 1);
+        assert_eq!(source.position, 0);
         assert!(sink.frames.is_empty());
     }
 
-    // Catches the readiness check running before argument validation: an
+    // Catches the source call running before argument validation: an
     // invalid read must keep reporting its error even when input is pending
     // or absent, and must not mark the process blocked.
     #[test]
