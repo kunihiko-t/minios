@@ -119,6 +119,9 @@ pub struct FrameAllocator<const WORDS: usize> {
 }
 
 impl<const WORDS: usize> FrameAllocator<WORDS> {
+    /// bitmapが管理できる最大frame数。これを超える範囲は`new`が拒否する。
+    pub const CAPACITY_FRAMES: usize = WORDS.saturating_mul(u64::BITS as usize);
+
     /// 指定した物理アドレス範囲を管理するアロケーターを作る。
     ///
     /// ```compile_fail
@@ -153,8 +156,7 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
 
         // 上端が`base`より大きいことを確認済みなので、この差分はオーバーフローせずページ数を表す。
         let frame_count = (end - base) / PAGE_SIZE;
-        let capacity = WORDS.saturating_mul(u64::BITS as usize);
-        if frame_count > capacity {
+        if frame_count > Self::CAPACITY_FRAMES {
             return Err(FrameError::CapacityExceeded);
         }
         let allocator_id = reserve_allocator_id()?;

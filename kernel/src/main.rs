@@ -559,7 +559,13 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     // machine記述が導くヒープ領域の直下までを所有するのは、この大域アロケーターだけである。
     // このアロケーターが生存している間は、同じ範囲を管理する別の所有者を作らない。
     // heapがOOM時に`allocate_at`で上端から成長するため、供給元は大域化する。
-    if let Err(error) = unsafe { GLOBAL_FRAMES.init(managed_memory_start, heap_start) } {
+    //
+    // bitmap容量を超えるRAMは下端側を管理対象から外し、管理範囲をheapの
+    // 直下へ寄せる。範囲外のframeは誰にも割り当たらず、`allocate_at`による
+    // heap成長は常に管理内へ届く。
+    let frames_base = managed_memory_start
+        .max(heap_start.saturating_sub(FrameAllocator::<512>::CAPACITY_FRAMES * PAGE_SIZE));
+    if let Err(error) = unsafe { GLOBAL_FRAMES.init(frames_base, heap_start) } {
         fatal_memory_error(error);
     }
     let mut frames = GlobalFrames;
