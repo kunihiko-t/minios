@@ -1,8 +1,10 @@
-//! 固定領域上のfirst-fit free-listヒープ。
+//! 連続領域上のfirst-fit free-listヒープ。
 //!
 //! `FrameAllocator`が扱う4 KiBページより細かいkernel objectを収めるため、
-//! managed RAMの末尾から切り出した固定領域を16バイト単位で分割・併合する。
-//! ヒープ自身はメモリーを所有せず、初期化時に与えられた領域だけを管理する。
+//! managed RAMの末尾から切り出した初期領域を16バイト単位で分割・併合する。
+//! ヒープ自身はメモリーを所有せず、初期化時に与えられた領域を管理する。
+//! `extend_down`は直上に隣接する領域を取り込んで下端を下げ、領域は常に
+//! 一つの連続した`[start, end)`を保つ。
 //!
 //! 各割り当ては16バイトの`Span` headerを伴う。headerはこの割り当てが占有する
 //! 領域全体（先頭のalignment端数や最小ブロック未満の末尾端数を吸収した分を
@@ -30,6 +32,8 @@ pub enum HeapError {
     InvalidPointer,
     /// 解放しようとしたspanが既存の空きブロックと重なる＝二重解放。
     DoubleFree,
+    /// `extend_down`へ渡された領域が現在のheap領域と隣接しない。
+    NotContiguous,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +176,32 @@ impl Heap {
         if !valid {
             return Err(HeapError::InvalidPointer);
         }
-        self.insert_free(span.start, span.start + span.len)
+        self.insert_free(span.start, span.start + span.len)?;
+        self.allocated -= span.len;
+        Ok(())
+    }
+
+    /// 管理領域の下端。frame供給元へ隣接pageを要求する基準番地。
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    /// `[new_start, new_start + len)`を領域の直下へ接続してheapを下方へ
+    /// 成長させる。frame allocatorの`allocate_at`で得た隣接pageを供給する
+    /// 想定で、連続でない領域は`NotContiguous`で拒否しheapを変えない。
+    /// 成長分はlive allocationではないため`allocated`は不変である。
+    pub fn extend_down(&mut self, new_start: usize, len: usize) -> Result<(), HeapError> {
+        if !new_start.is_multiple_of(GRANULE) || !len.is_multiple_of(GRANULE) || len == 0 {
+            return Err(HeapError::Misaligned);
+        }
+        if new_start.checked_add(len) != Some(self.start) {
+            return Err(HeapError::NotContiguous);
+        }
+        // 新領域は既存blockより必ず低位にあるため挿入は失敗しない。
+        // 失敗しうる順序にせず、先に繋いでから下端を更新する。
+        self.insert_free(new_start, new_start + len)?;
+        self.start = new_start;
+        Ok(())
     }
 
     pub fn stats(&self) -> HeapStats {
@@ -285,7 +314,6 @@ impl Heap {
             let prev_node = unsafe { &mut *prev.as_ptr() };
             if prev_start + prev_node.size == start {
                 prev_node.size += end - start;
-                self.allocated -= end - start;
                 self.coalesce_forward(prev);
                 return Ok(());
             }
@@ -306,7 +334,6 @@ impl Heap {
                 });
             }
             self.link_after(previous, start);
-            self.allocated -= end - start;
             return Ok(());
         }
         // Safety: `start`は解放するspanの先頭であり、最小ブロックを収める。
@@ -317,7 +344,6 @@ impl Heap {
             });
         }
         self.link_after(previous, start);
-        self.allocated -= end - start;
         Ok(())
     }
 
@@ -505,6 +531,69 @@ mod tests {
         assert_eq!(small.as_ptr() as usize, b.as_ptr() as usize);
         unsafe { heap.dealloc(small) }.unwrap();
         unsafe { heap.dealloc(a) }.unwrap();
+    }
+
+    /// `backing`の前半を成長分・後半を初期領域とする連続したheapを作る。
+    /// 実機ではframe allocatorが隣接pageを返すため、ここでは一つの
+    /// `Region`内の連続した下半分・上半分で再現する。
+    fn splittable_heap() -> (Heap, Box<Region>) {
+        let mut heap = Heap::empty();
+        let backing = Box::new(Region([0; 4096]));
+        let base = backing.0.as_ptr() as usize;
+        // Safety: `backing`はこのヒープだけが使う排他的領域である。
+        unsafe { heap.init(base + 2048, 2048) }.unwrap();
+        (heap, backing)
+    }
+
+    #[test]
+    fn extend_down_grows_the_region_contiguously() {
+        let (mut heap, backing) = splittable_heap();
+        let base = backing.0.as_ptr() as usize;
+
+        heap.extend_down(base, 2048).unwrap();
+        let stats = heap.stats();
+        assert_eq!(stats.total, 4096);
+        assert_eq!(heap.start(), base);
+        // 伸ばした領域を含めて割り当てられる。
+        let ptr = heap.alloc(layout(4000)).unwrap();
+        unsafe { heap.dealloc(ptr) }.unwrap();
+        assert_eq!(heap.stats().free_blocks, 1);
+    }
+
+    #[test]
+    fn extend_down_rejects_non_adjacent_regions() {
+        let (mut heap, _region) = fresh_heap();
+        let start = heap.start();
+
+        assert_eq!(
+            heap.extend_down(start - 8192, 4096),
+            Err(HeapError::NotContiguous)
+        );
+        assert_eq!(
+            heap.extend_down(start + 4096, 4096),
+            Err(HeapError::NotContiguous)
+        );
+        assert_eq!(
+            heap.extend_down(start - 4096, 24),
+            Err(HeapError::Misaligned)
+        );
+        assert_eq!(heap.stats().total, 4096);
+        assert_eq!(heap.start(), start);
+    }
+
+    #[test]
+    fn extended_region_coalesces_past_a_used_span() {
+        let (mut heap, backing) = splittable_heap();
+        let base = backing.0.as_ptr() as usize;
+        let used = heap.alloc(layout(64)).unwrap();
+
+        heap.extend_down(base, 2048).unwrap();
+        // 使用中spanが新旧の空きを分断している。
+        assert_eq!(heap.stats().free_blocks, 2);
+        assert_eq!(heap.stats().allocated, 80);
+        unsafe { heap.dealloc(used) }.unwrap();
+        assert_eq!(heap.stats().free_blocks, 1);
+        assert_eq!(heap.stats().free, 4096);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use core::fmt;
 
 use crate::{
     elf::LoadedImage,
-    memory::frame::{FrameAllocator, FrameError, FrameStats, PAGE_SIZE, PhysFrame},
+    memory::frame::{FrameError, FrameSource, FrameStats, PAGE_SIZE, PhysFrame},
     user::syscall::ControlSink,
     vm::{AddressSpace, FrameStore, PhysPageNum},
 };
@@ -114,9 +114,9 @@ pub enum RunCompletion {
 ///
 /// `LoadedImage`はinactiveなELFとaddress spaceを所有し、`UserRun`は実行中だけ
 /// 必要なkernel trap stack、allocator、frame memoryの排他的borrowを加える。
-pub struct UserRun<'run, const N: usize, const WORDS: usize, M: FrameStore> {
+pub struct UserRun<'run, const N: usize, M: FrameStore> {
     image: Option<LoadedImage<'run, N>>,
-    allocator: &'run mut FrameAllocator<WORDS>,
+    allocator: &'run mut dyn FrameSource,
     memory: &'run mut M,
     kernel_stack: [Option<PhysFrame>; KERNEL_STACK_PAGES],
     kernel_stack_bottom: usize,
@@ -125,7 +125,7 @@ pub struct UserRun<'run, const N: usize, const WORDS: usize, M: FrameStore> {
     executed: bool,
 }
 
-impl<const N: usize, const WORDS: usize, M: FrameStore> fmt::Debug for UserRun<'_, N, WORDS, M> {
+impl<const N: usize, M: FrameStore> fmt::Debug for UserRun<'_, N, M> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UserRun")
@@ -136,13 +136,13 @@ impl<const N: usize, const WORDS: usize, M: FrameStore> fmt::Debug for UserRun<'
     }
 }
 
-impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, WORDS, M> {
+impl<'run, const N: usize, M: FrameStore> UserRun<'run, N, M> {
     /// inactive imageへ実行時resourceを加える。
     ///
     /// 途中で失敗した場合は、この関数がtrap stackとimageを両方回収する。
     pub fn new(
         image: LoadedImage<'run, N>,
-        allocator: &'run mut FrameAllocator<WORDS>,
+        allocator: &'run mut dyn FrameSource,
         memory: &'run mut M,
         kernel_root: PhysPageNum,
     ) -> Result<Self, RunBuildFailure<'run, N, M::Error>> {
@@ -227,7 +227,7 @@ impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, W
         self.kernel_stack_bottom + KERNEL_STACK_PAGES * PAGE_SIZE
     }
 
-    pub const fn allocator_stats(&self) -> FrameStats {
+    pub fn allocator_stats(&self) -> FrameStats {
         self.allocator.stats()
     }
 
@@ -308,10 +308,10 @@ impl<'run, const N: usize, const WORDS: usize, M: FrameStore> UserRun<'run, N, W
     }
 }
 
-fn build_failure<'storage, const N: usize, const WORDS: usize, E>(
+fn build_failure<'storage, const N: usize, E>(
     image: LoadedImage<'storage, N>,
     stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
-    allocator: &mut FrameAllocator<WORDS>,
+    allocator: &mut dyn FrameSource,
     primary: RunBuildError<E>,
 ) -> RunBuildFailure<'storage, N, E> {
     reclaim_stack(stack, allocator);
@@ -330,9 +330,9 @@ fn build_failure<'storage, const N: usize, const WORDS: usize, E>(
     }
 }
 
-fn reclaim_stack<const WORDS: usize>(
+fn reclaim_stack(
     stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
-    allocator: &mut FrameAllocator<WORDS>,
+    allocator: &mut dyn FrameSource,
 ) {
     for index in (0..KERNEL_STACK_PAGES).rev() {
         let Some(frame) = stack[index].take() else {
@@ -536,7 +536,7 @@ mod tests {
             count
         }
 
-        fn build_run(&mut self) -> UserRun<'_, 2688, 16, TestFrameStore> {
+        fn build_run(&mut self) -> UserRun<'_, 2688, TestFrameStore> {
             let bytes = valid_riscv64_elf();
             let image = load_image(
                 &bytes,

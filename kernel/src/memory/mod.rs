@@ -11,9 +11,11 @@ pub const BOOT_PAYLOAD_END: usize = 0x87e0_0000;
 /// QEMU `virt`がFDTを書き込む`0x87e0_0000..0x8800_0000`の予約領域。
 pub const FDT_RESERVED_START: usize = 0x87e0_0000;
 pub const FDT_RESERVED_END: usize = 0x8800_0000;
-/// managed RAMの末尾へ切り出すヒープ領域の長さ。
+/// managed RAMの末尾へ切り出すヒープ初期領域の長さ。
 /// `FrameAllocator`の管理上端はこの分だけ`managed_end`より下になる。
-/// QEMU `virt` `-m 128M`ではヒープは`0x8770_0000..0x8780_0000`となる。
+/// ヒープはOOM時にallocatorの最上位pageを`allocate_at`で取り込み、
+/// この初期位置から下へ連続して成長する。
+/// QEMU `virt` `-m 128M`では初期領域は`0x8770_0000..0x8780_0000`となる。
 pub const KERNEL_HEAP_LEN: usize = 1024 * 1024;
 
 #[allow(dead_code)]

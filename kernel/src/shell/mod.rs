@@ -6,7 +6,7 @@ use command::{Command, parse_command};
 #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
 use line::{LineBuffer, LineError};
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::memory::frame::FrameAllocator;
+use minios_kernel::memory::frame::FrameSource;
 
 #[cfg(target_arch = "riscv64")]
 const INPUT_CAPACITY: usize = 128;
@@ -54,7 +54,7 @@ type Rv32Storage = crate::storage::fat32::Fat32<
 >;
 
 #[cfg(target_arch = "riscv64")]
-pub fn run(hart_id: usize, frames: &mut FrameAllocator<512>) -> ! {
+pub fn run(hart_id: usize, frames: &mut dyn FrameSource) -> ! {
     let mut line = LineBuffer::<INPUT_CAPACITY>::new();
     loop {
         crate::print!("minios> ");
@@ -89,7 +89,7 @@ pub fn run(hart_id: usize, frames: &mut FrameAllocator<512>) -> ! {
 }
 
 #[cfg(target_arch = "riscv64")]
-fn execute(input: &str, hart_id: usize, frames: &mut FrameAllocator<512>) {
+fn execute(input: &str, hart_id: usize, frames: &mut dyn FrameSource) {
     match parse_command(input) {
         Command::Empty => {}
         Command::Help => {

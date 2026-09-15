@@ -1,7 +1,7 @@
 use core::fmt;
 
 use crate::{
-    memory::frame::{FrameAllocator, FrameError, PhysFrame},
+    memory::frame::{FrameError, FrameSource, PhysFrame},
     vm::{
         AddressError, FrameStore, PageFlags, PageTableEntry, PhysAddr, PhysPageNum, PteError,
         VirtAddr, VirtPage,
@@ -101,26 +101,19 @@ pub enum VmError<E> {
     Store(E),
 }
 
-pub struct AddressSpaceBuilder<
-    'alloc,
-    'memory,
-    'storage,
-    const N: usize,
-    const WORDS: usize,
-    M: FrameStore,
-> {
-    allocator: &'alloc mut FrameAllocator<WORDS>,
+pub struct AddressSpaceBuilder<'alloc, 'memory, 'storage, const N: usize, M: FrameStore> {
+    allocator: &'alloc mut dyn FrameSource,
     memory: &'memory mut M,
     storage: Option<&'storage mut AddressSpaceStorage<N>>,
     root: PhysAddr,
     allocator_id: u64,
 }
 
-impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStore>
-    AddressSpaceBuilder<'alloc, 'memory, 'storage, N, WORDS, M>
+impl<'alloc, 'memory, 'storage, const N: usize, M: FrameStore>
+    AddressSpaceBuilder<'alloc, 'memory, 'storage, N, M>
 {
     pub fn new(
-        allocator: &'alloc mut FrameAllocator<WORDS>,
+        allocator: &'alloc mut dyn FrameSource,
         memory: &'memory mut M,
         storage: &'storage mut AddressSpaceStorage<N>,
     ) -> Result<Self, VmError<M::Error>> {
@@ -317,9 +310,7 @@ impl<'alloc, 'memory, 'storage, const N: usize, const WORDS: usize, M: FrameStor
     }
 }
 
-impl<const N: usize, const WORDS: usize, M: FrameStore> Drop
-    for AddressSpaceBuilder<'_, '_, '_, N, WORDS, M>
-{
+impl<const N: usize, M: FrameStore> Drop for AddressSpaceBuilder<'_, '_, '_, N, M> {
     fn drop(&mut self) {
         while let Some(owned) = self
             .storage
@@ -404,10 +395,7 @@ impl<'storage, const N: usize> AddressSpace<'storage, N> {
         ))
     }
 
-    pub fn destroy<const WORDS: usize>(
-        self,
-        allocator: &mut FrameAllocator<WORDS>,
-    ) -> Result<(), DestroyError<'storage, N>> {
+    pub fn destroy(self, allocator: &mut dyn FrameSource) -> Result<(), DestroyError<'storage, N>> {
         if allocator.allocator_id() != self.allocator_id {
             return Err(DestroyError {
                 frame_error: FrameError::WrongAllocator,
