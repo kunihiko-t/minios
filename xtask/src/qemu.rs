@@ -54,7 +54,8 @@ const USER_EXIT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
-const SHELL_SCRIPT: &[u8] = b"help\ninfo\nuptime\nmemory\nnot-a-command\nshutdown\n";
+const SHELL_SCRIPT: &[u8] =
+    b"help\ninfo\nuptime\nmemory\nls\ncat HELLO.TXT\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
@@ -291,11 +292,16 @@ impl std::error::Error for QemuError {}
 
 pub fn run_kernel() -> Result<(), QemuError> {
     let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
-    let (mut command, command_line) = qemu_command(&kernel);
+    let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+        stage: "disk image",
+        error,
+    })?;
+    let (mut command, command_line) = qemu_command_with_disk(&kernel, disk.path());
     let status = command.status().map_err(|error| QemuError::Spawn {
         command: command_line.clone(),
         error: error.to_string(),
     })?;
+    disk.remove();
     if status.success() {
         Ok(())
     } else {
@@ -372,8 +378,13 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
 
     if kind == TestKind::Shell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
-        let (command, command_line) = qemu_command(&kernel);
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) = qemu_command_with_disk(&kernel, disk.path());
         let completed = run_shell_command(command, command_line.clone(), deadline)?;
+        disk.remove();
         return verify_shell_result(&command_line, completed.status.code(), &completed.output);
     }
 
@@ -1664,6 +1675,8 @@ fn verify_shell_result(
                 "memory    Show physical memory statistics",
             )
         })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "ls        List root directory"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "cat       Read a root file"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "clear     Clear the terminal"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "shutdown  Shut down MiniOS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> info"))
@@ -1690,6 +1703,10 @@ fn verify_shell_result(
                 line_has_memory_stats,
             )
         })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat HELLO.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "hello from virtio"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
         .and_then(|()| {
             expect_shell_line(
@@ -2036,6 +2053,8 @@ mod tests {
             "info      Show system information",
             "uptime    Show elapsed time",
             "memory    Show physical memory statistics",
+            "ls        List root directory",
+            "cat       Read a root file",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "MiniOS 0.1.0 on RISC-V 64",
@@ -2262,6 +2281,8 @@ mod tests {
             "info      Show system information",
             "uptime    Show elapsed time",
             "memory    Show physical memory statistics",
+            "ls        List root directory",
+            "cat       Read a root file",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "minios> info",
@@ -2272,6 +2293,10 @@ mod tests {
             "ticks: 1",
             "minios> memory",
             "memory: total=32231 allocated=0 free=32231 pages",
+            "minios> ls",
+            "        18 HELLO.TXT",
+            "minios> cat HELLO.TXT",
+            "hello from virtio",
             "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
             "minios> shutdown",

@@ -53,8 +53,33 @@ type Rv32Storage = crate::storage::fat32::Fat32<
     crate::storage::sd::SdCard<crate::drivers::neorv32_sd::Neorv32SdBus>,
 >;
 
+/// RV64 shellが保持する単一のvirtio-blk/FAT32 session。初回の`ls`/`cat`で
+/// FDTのslotをprobeしてmountし、以降は同じsessionを使い回す。
+#[cfg(target_arch = "riscv64")]
+type Rv64Storage = crate::storage::fat32::Fat32<
+    crate::storage::virtio_blk::VirtioBlk<
+        crate::drivers::virtio_mmio::MmioRegs,
+        crate::VirtioRegionPage,
+    >,
+>;
+
+/// RV64の`mount_storage`が返す失敗。device未到達とFAT32側の失敗を分け、
+/// どちらもshellを止めない診断messageへ写像する。
+#[cfg(target_arch = "riscv64")]
+enum Rv64StorageError {
+    /// 全slotをprobeしたがblock deviceが見つからなかった。
+    NoDevice,
+    /// queue/request領域のframeを確保できなかった。
+    NoFrames,
+    /// block deviceは見つかったが初期化を完了できなかった。
+    Init(crate::storage::virtio_blk::VirtioError),
+    /// mount以降のFAT32経路の失敗。
+    Fat(crate::storage::fat32::FatError<crate::storage::virtio_blk::VirtioError>),
+}
+
 #[cfg(target_arch = "riscv64")]
 pub fn run(hart_id: usize, frames: &mut dyn FrameSource) -> ! {
+    let mut storage: Option<Rv64Storage> = None;
     let mut line = LineBuffer::<INPUT_CAPACITY>::new();
     loop {
         crate::print!("minios> ");
@@ -66,7 +91,7 @@ pub fn run(hart_id: usize, frames: &mut dyn FrameSource) -> ! {
                 b'\r' | b'\n' => {
                     crate::println!();
                     match line.finish() {
-                        Ok(input) => execute(input, hart_id, frames),
+                        Ok(input) => execute(input, hart_id, frames, &mut storage),
                         Err(LineError::Full) => {
                             crate::println!("error: input exceeds 128 bytes");
                         }
@@ -89,7 +114,12 @@ pub fn run(hart_id: usize, frames: &mut dyn FrameSource) -> ! {
 }
 
 #[cfg(target_arch = "riscv64")]
-fn execute(input: &str, hart_id: usize, frames: &mut dyn FrameSource) {
+fn execute(
+    input: &str,
+    hart_id: usize,
+    frames: &mut dyn FrameSource,
+    storage: &mut Option<Rv64Storage>,
+) {
     match parse_command(input) {
         Command::Empty => {}
         Command::Help => {
@@ -97,6 +127,8 @@ fn execute(input: &str, hart_id: usize, frames: &mut dyn FrameSource) {
             crate::println!("info      Show system information");
             crate::println!("uptime    Show elapsed time");
             crate::println!("memory    Show physical memory statistics");
+            crate::println!("ls        List root directory");
+            crate::println!("cat       Read a root file");
             crate::println!("clear     Clear the terminal");
             crate::println!("shutdown  Shut down MiniOS");
         }
@@ -119,6 +151,11 @@ fn execute(input: &str, hart_id: usize, frames: &mut dyn FrameSource) {
                 stats.free
             );
         }
+        Command::Ls => list_root(storage, frames),
+        Command::Cat("") => {
+            crate::println!("virtio: usage: cat NAME.EXT");
+        }
+        Command::Cat(name) => read_root_file(storage, name, frames),
         Command::Clear => {
             crate::print!("\x1b[2J\x1b[H");
         }
@@ -259,36 +296,98 @@ fn mount_storage(
         .ok_or(crate::storage::fat32::FatError::InvalidFilesystem)
 }
 
-#[cfg(target_arch = "riscv32")]
-fn list_root(storage: &mut Option<Rv32Storage>) {
-    let session = match mount_storage(storage) {
-        Ok(session) => session,
-        Err(error) => {
-            print_storage_error(error);
-            return;
+#[cfg(target_arch = "riscv64")]
+fn mount_storage<'a>(
+    storage: &'a mut Option<Rv64Storage>,
+    frames: &mut dyn FrameSource,
+) -> Result<&'a mut Rv64Storage, Rv64StorageError> {
+    if storage.is_none() {
+        *storage = Some(probe_and_mount(frames)?);
+    }
+    Ok(storage.as_mut().expect("mounted above"))
+}
+
+/// `MachineSpec::virtio_mmio`のslotを順にprobeし、最初に見つかった
+/// block deviceをmountする。空slotや他deviceは読み飛ばし、確立に使った
+/// deviceだけがsessionを所有する。失敗したprobeのregionはdropでframeを
+/// poolへ返す。
+#[cfg(target_arch = "riscv64")]
+fn probe_and_mount(frames: &mut dyn FrameSource) -> Result<Rv64Storage, Rv64StorageError> {
+    use crate::storage::virtio_blk::{VirtioBlk, VirtioError};
+
+    let spec = crate::machine::spec();
+    let mut last_init_error = None;
+    for &base in &spec.virtio_mmio[..spec.virtio_mmio_count] {
+        // Safety: `base`はFDTが報告したMMIO領域で、`with_device_pages`が
+        // S-mode R+Wとしてmap済み。
+        let mmio = unsafe { crate::drivers::virtio_mmio::MmioRegs::new(base) };
+        let Some(frame) = frames.allocate() else {
+            return Err(Rv64StorageError::NoFrames);
+        };
+        match VirtioBlk::init(mmio, crate::VirtioRegionPage::new(frame)) {
+            Ok(blk) => {
+                return crate::storage::fat32::Fat32::mount(blk).map_err(Rv64StorageError::Fat);
+            }
+            Err(
+                VirtioError::BadMagic
+                | VirtioError::NotBlockDevice(_)
+                | VirtioError::UnsupportedVersion(_),
+            ) => {}
+            Err(error) => last_init_error = Some(error),
         }
-    };
-    let result = session.for_each_root_entry(|entry| {
+    }
+    match last_init_error {
+        Some(error) => Err(Rv64StorageError::Init(error)),
+        None => Err(Rv64StorageError::NoDevice),
+    }
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+fn print_root_entries<R: crate::storage::SectorReader>(
+    session: &mut crate::storage::fat32::Fat32<R>,
+) -> Result<(), crate::storage::fat32::FatError<R::Error>> {
+    session.for_each_root_entry(|entry| {
         if entry.is_directory() {
             crate::println!("<DIR> {}", entry.name());
         } else {
             crate::println!("{:>10} {}", entry.size(), entry.name());
         }
-    });
-    if let Err(error) = result {
-        print_storage_error(error);
-    }
+    })
 }
 
 #[cfg(target_arch = "riscv32")]
-fn read_root_file(storage: &mut Option<Rv32Storage>, name: &str) {
+fn list_root(storage: &mut Option<Rv32Storage>) {
     let session = match mount_storage(storage) {
         Ok(session) => session,
         Err(error) => {
-            print_storage_error(error);
+            print_fat_error("sd", error);
             return;
         }
     };
+    if let Err(error) = print_root_entries(session) {
+        print_fat_error("sd", error);
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn list_root(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource) {
+    let session = match mount_storage(storage, frames) {
+        Ok(session) => session,
+        Err(error) => {
+            print_virtio_error(error);
+            return;
+        }
+    };
+    if let Err(error) = print_root_entries(session) {
+        print_fat_error("virtio", error);
+    }
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+fn print_root_file<R: crate::storage::SectorReader>(
+    session: &mut crate::storage::fat32::Fat32<R>,
+    name: &str,
+) -> Result<(), crate::storage::fat32::FatError<R::Error>> {
     let mut last_byte = None;
     let result = session.read_root_file(name, |bytes| {
         for &byte in bytes {
@@ -296,13 +395,38 @@ fn read_root_file(storage: &mut Option<Rv32Storage>, name: &str) {
             last_byte = Some(byte);
         }
     });
-    match finish_cat_output(result, last_byte, crate::console::write_byte) {
-        Ok(()) => {}
-        Err(error) => print_storage_error(error),
+    finish_cat_output(result, last_byte, crate::console::write_byte)
+}
+
+#[cfg(target_arch = "riscv32")]
+fn read_root_file(storage: &mut Option<Rv32Storage>, name: &str) {
+    let session = match mount_storage(storage) {
+        Ok(session) => session,
+        Err(error) => {
+            print_fat_error("sd", error);
+            return;
+        }
+    };
+    if let Err(error) = print_root_file(session, name) {
+        print_fat_error("sd", error);
     }
 }
 
-#[cfg(any(test, target_arch = "riscv32"))]
+#[cfg(target_arch = "riscv64")]
+fn read_root_file(storage: &mut Option<Rv64Storage>, name: &str, frames: &mut dyn FrameSource) {
+    let session = match mount_storage(storage, frames) {
+        Ok(session) => session,
+        Err(error) => {
+            print_virtio_error(error);
+            return;
+        }
+    };
+    if let Err(error) = print_root_file(session, name) {
+        print_fat_error("virtio", error);
+    }
+}
+
+#[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
 fn finish_cat_output<E>(
     result: Result<(), E>,
     last_byte: Option<u8>,
@@ -316,28 +440,44 @@ fn finish_cat_output<E>(
     result
 }
 
-#[cfg(target_arch = "riscv32")]
-fn print_storage_error(error: crate::storage::fat32::FatError<crate::storage::sd::SdError>) {
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+fn print_fat_error<E>(prefix: &str, error: crate::storage::fat32::FatError<E>) {
     match error {
         crate::storage::fat32::FatError::Read(_) => {
-            crate::println!("sd: I/O error");
+            crate::println!("{prefix}: I/O error");
         }
         crate::storage::fat32::FatError::Unsupported
         | crate::storage::fat32::FatError::InvalidFilesystem => {
-            crate::println!("sd: unsupported or invalid FAT32");
+            crate::println!("{prefix}: unsupported or invalid FAT32");
         }
         crate::storage::fat32::FatError::NotFound => {
-            crate::println!("sd: file not found");
+            crate::println!("{prefix}: file not found");
         }
         crate::storage::fat32::FatError::IsDirectory => {
-            crate::println!("sd: is a directory");
+            crate::println!("{prefix}: is a directory");
         }
         crate::storage::fat32::FatError::InvalidName => {
-            crate::println!("sd: invalid 8.3 name");
+            crate::println!("{prefix}: invalid 8.3 name");
         }
         crate::storage::fat32::FatError::CorruptChain => {
-            crate::println!("sd: corrupt cluster chain");
+            crate::println!("{prefix}: corrupt cluster chain");
         }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn print_virtio_error(error: Rv64StorageError) {
+    match error {
+        Rv64StorageError::NoDevice => {
+            crate::println!("virtio: no block device found");
+        }
+        Rv64StorageError::NoFrames => {
+            crate::println!("virtio: out of frames");
+        }
+        Rv64StorageError::Init(error) => {
+            crate::println!("virtio: device init failed: {error:?}");
+        }
+        Rv64StorageError::Fat(error) => print_fat_error("virtio", error),
     }
 }
 

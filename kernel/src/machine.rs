@@ -55,9 +55,8 @@ pub fn discover(dtb: usize) -> Result<&'static MachineSpec, FdtError> {
 }
 
 /// 発見済みのmachine記述を返す。`discover`前はQEMU `virt`の参照値である。
-/// 起動経路は`discover`の戻り値を直接使うため、現在の呼び出し側は
-/// `qemu-test-vm`の写像検査と`qemu-test-user-trap`のUART拒否確認だけである。
-#[cfg(any(feature = "qemu-test-vm", feature = "qemu-test-user-trap"))]
+/// 起動経路は`discover`の戻り値を直接使い、shellのvirtio-blk probeも
+/// この記述からMMIO slotを得る。
 pub fn spec() -> &'static MachineSpec {
     // Safety: `discover`は書き込み後にMACHINEを変更しない。単一ハートのみ読む。
     unsafe { &*core::ptr::addr_of!(MACHINE) }

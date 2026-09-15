@@ -142,7 +142,11 @@ mod drivers;
 mod drivers;
 #[cfg(target_arch = "riscv32")]
 mod storage {
-    pub use minios_kernel::storage::{fat32, sd};
+    pub use minios_kernel::storage::{SectorReader, fat32, sd};
+}
+#[cfg(target_arch = "riscv64")]
+mod storage {
+    pub use minios_kernel::storage::{SectorReader, fat32, virtio_blk};
 }
 #[cfg(target_arch = "riscv64")]
 mod machine;
@@ -391,12 +395,12 @@ impl minios_kernel::memory::frame::FrameSource for GlobalFrames {
 /// virtio queue/request領域。frame poolの1 pageを所有し、dropで返す。
 /// managed RAMは恒等map済みなので、frameの物理アドレスがそのまま
 /// deviceへ渡すDMAアドレスになる。
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+#[cfg(target_arch = "riscv64")]
 struct VirtioRegionPage {
     frame: Option<PhysFrame>,
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+#[cfg(target_arch = "riscv64")]
 impl VirtioRegionPage {
     fn new(frame: PhysFrame) -> Self {
         // Safety: frame poolが管理する物理pageは`KernelMapPlan`で恒等map
@@ -414,7 +418,7 @@ impl VirtioRegionPage {
     }
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+#[cfg(target_arch = "riscv64")]
 impl core::ops::Deref for VirtioRegionPage {
     type Target = minios_kernel::storage::virtio_blk::VirtioRegion;
 
@@ -425,7 +429,7 @@ impl core::ops::Deref for VirtioRegionPage {
     }
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+#[cfg(target_arch = "riscv64")]
 impl core::ops::DerefMut for VirtioRegionPage {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: `deref`と同じ領域。`VirtioBlk`が生存中はこのwrapperが
@@ -434,7 +438,7 @@ impl core::ops::DerefMut for VirtioRegionPage {
     }
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+#[cfg(target_arch = "riscv64")]
 impl Drop for VirtioRegionPage {
     fn drop(&mut self) {
         // `VirtioBlk::init`が失敗した場合にframeをpoolへ返す。
