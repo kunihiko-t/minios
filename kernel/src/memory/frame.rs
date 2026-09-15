@@ -61,6 +61,25 @@ impl PhysFrame {
     }
 }
 
+/// frameの供給元を抽象化する。`FrameAllocator`は物理bitmapを直接管理し、
+/// globalな供給元はlock済みのallocatorへ委譲する。利用側はtrait object経由で
+/// どちらも同じ手順で扱える。
+pub trait FrameSource {
+    /// 空きframeを一つ払い出す。枯渇時は`None`。
+    fn allocate(&mut self) -> Option<PhysFrame>;
+    /// `start`で指定したframeが空きなら占有する。隣接成長のように
+    /// 特定の番地だけが意味を持つ供給要求に使う。
+    fn allocate_at(&mut self, start: usize) -> Option<PhysFrame>;
+    /// `frame`を供給元へ返す。
+    fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError>;
+    /// `deallocate`と同じだが、失敗時にframeの所有権を呼び出し側へ戻す。
+    /// 巻き戻し経路が所有権を保持し続けるために使う。
+    fn deallocate_recoverable(&mut self, frame: PhysFrame) -> Result<(), (FrameError, PhysFrame)>;
+    /// 払い出し元を識別するid。frameとpage tableのprovenance照合に使う。
+    fn allocator_id(&self) -> u64;
+    fn stats(&self) -> FrameStats;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
     EmptyRange,
@@ -165,6 +184,28 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
         None
     }
 
+    /// `start`のframeだけを占有する。heapが管理領域の直下へ連続して
+    /// 成長するなど、特定番地のみが意味を持つ供給に使う。
+    /// 範囲外・未整列・占有済みでは`None`を返し、bitmapを変えない。
+    pub fn allocate_at(&mut self, start: usize) -> Option<PhysFrame> {
+        if !start.is_multiple_of(PAGE_SIZE) || start < self.base {
+            return None;
+        }
+        let frame_index = (start - self.base) / PAGE_SIZE;
+        if frame_index >= self.frame_count {
+            return None;
+        }
+        let word_index = frame_index / u64::BITS as usize;
+        let bit = 1_u64 << (frame_index % u64::BITS as usize);
+        if self.bitmap[word_index] & bit != 0 {
+            return None;
+        }
+        self.bitmap[word_index] |= bit;
+        self.allocated += 1;
+        // `start`は整列・範囲内で、占有bitを立てたので排他所有が成り立つ。
+        Some(PhysFrame(start))
+    }
+
     /// 所有権を表す値を消費し、対応するページをアロケーターへ返す。
     ///
     /// ```compile_fail
@@ -221,6 +262,32 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
             allocated: self.allocated,
             free: self.frame_count - self.allocated,
         }
+    }
+}
+
+impl<const WORDS: usize> FrameSource for FrameAllocator<WORDS> {
+    fn allocate(&mut self) -> Option<PhysFrame> {
+        FrameAllocator::allocate(self)
+    }
+
+    fn allocate_at(&mut self, start: usize) -> Option<PhysFrame> {
+        FrameAllocator::allocate_at(self, start)
+    }
+
+    fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
+        FrameAllocator::deallocate(self, frame)
+    }
+
+    fn deallocate_recoverable(&mut self, frame: PhysFrame) -> Result<(), (FrameError, PhysFrame)> {
+        FrameAllocator::deallocate_recoverable(self, frame)
+    }
+
+    fn allocator_id(&self) -> u64 {
+        FrameAllocator::allocator_id(self)
+    }
+
+    fn stats(&self) -> FrameStats {
+        FrameAllocator::stats(self)
     }
 }
 
@@ -318,6 +385,42 @@ mod tests {
         assert_eq!(second.start(), 0x5000);
         allocator.deallocate(first).unwrap();
         assert_eq!(allocator.allocate().unwrap().start(), first_start);
+    }
+
+    #[test]
+    fn allocate_at_takes_only_the_requested_frame() {
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
+
+        let frame = allocator.allocate_at(0x6000).unwrap();
+        assert_eq!(frame.start(), 0x6000);
+        assert_eq!(allocator.stats().allocated, 1);
+        // 指定frameだけが占有され、ほかはbottom-upの割り当てへ残る。
+        assert_eq!(allocator.allocate().unwrap().start(), 0x4000);
+        assert_eq!(allocator.allocate().unwrap().start(), 0x5000);
+        assert_eq!(allocator.allocate().unwrap().start(), 0x7000);
+        assert_eq!(allocator.allocate(), None);
+    }
+
+    #[test]
+    fn allocate_at_rejects_unaligned_out_of_range_and_taken_frames() {
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
+        let taken = allocator.allocate().unwrap();
+
+        assert!(allocator.allocate_at(0x4001).is_none());
+        assert!(allocator.allocate_at(0x3000).is_none());
+        assert!(allocator.allocate_at(0x8000).is_none());
+        assert!(allocator.allocate_at(taken.start()).is_none());
+        assert_eq!(allocator.stats().allocated, 1);
+    }
+
+    #[test]
+    fn allocate_at_frame_can_be_returned() {
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
+        let frame = allocator.allocate_at(0x7000).unwrap();
+
+        allocator.deallocate(frame).unwrap();
+        assert_eq!(allocator.stats().free, 4);
+        assert_eq!(allocator.allocate_at(0x7000).unwrap().start(), 0x7000);
     }
 
     #[test]

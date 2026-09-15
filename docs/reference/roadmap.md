@@ -10,8 +10,9 @@
 汎用ヒープの第一歩も完了しています。
 managed RAM末尾の1 MiB固定領域を16バイト粒度のfirst-fit free-listで管理し、`#[global_allocator]`経由で`alloc` crateの`Box`や`Vec`を利用できます。
 解放時はaddress昇順のlistで隣接ブロックを併合し、二重解放と領域外ポインターを実行時に拒否します。
-`cargo xtask test heap`は、`Vec`の成長、`Box`の割り当てと解放、統計値の整合をQEMU上で確認します。
-現段階ではヒープ領域は固定であり、単一ハートかつ割り込み内で割り当てない規約を前提とします。
+`cargo xtask test heap`は、`Vec`の成長、`Box`の割り当てと解放、初期領域を超える割り当てでの動的拡張、統計値の整合をQEMU上で確認します。
+ヒープはOOM時にframe poolの最上位pageを取り込んで下方へ成長し、ヒープとprocess frameが同一poolを分け合います。
+単一ハートかつ割り込み内で割り当てない規約を前提とし、成長したpageはヒープへ返しません。
 
 Device Tree対応も完了しています。
 `kernel_main`はOpenSBIが`a1`へ渡すDTBをbare modeで解析し、RAM範囲、16550 UARTベース、`/cpus`の`timebase-frequency`を`fdt::MachineSpec`として発見します。
@@ -65,7 +66,8 @@ Stdin frameの受信は`StdinStaging`の再開可能なdecoderが担い、frame�
 
 ## 次
 
-汎用heapの動的拡張（フレームアロケーターからの成長）と、それを使う可変個のkernel object管理は、固定容量の単一address spaceを越える段階で導入します。
+汎用heapの動的拡張は実装済みで、ヒープはOOM時にframe allocatorの最上位pageを取り込んで下方へ成長します。
+次はこの成長経路を使う可変個のkernel object管理を、固定容量の単一address spaceを越える段階で導入します。
 その後にVirtIO block、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
 
 OCI image、Linux binary互換、multi-tenant isolationはこの実装の目標に含めません。

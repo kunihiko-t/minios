@@ -168,12 +168,10 @@ use minios_kernel::elf::fixture::user_syscall_probe_elf;
     )
 ))]
 use minios_kernel::elf::load::load_image_with_kernel_mappings;
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
-use minios_kernel::memory::frame::{FrameStats, PhysFrame};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::memory::{
     KERNEL_HEAP_LEN, KernelSections,
-    frame::{FrameAllocator, FrameError, PAGE_SIZE},
+    frame::{FrameAllocator, FrameError, FrameSource, FrameStats, PAGE_SIZE, PhysFrame},
 };
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::process::{MAX_PROCS, Process, ProcessTable};
@@ -267,15 +265,149 @@ impl KernelHeap {
     }
 }
 
+/// `FrameAllocator`をspin lockで包んだ大域frame供給元。
+/// `KernelHeap`と同じ単一ハート・割り込み内不使用の規約を前提にする。
+/// lock順序はheap→framesの一方向だけを許し、frame側の臨界区間は
+/// heapを割り当てないbitmap操作に限るため循環しない。
+#[cfg(target_arch = "riscv64")]
+struct LockedFrames {
+    locked: core::sync::atomic::AtomicBool,
+    ready: core::sync::atomic::AtomicBool,
+    allocator: core::cell::UnsafeCell<core::mem::MaybeUninit<FrameAllocator<512>>>,
+}
+
+#[cfg(target_arch = "riscv64")]
+// Safety: 単一ハート上で`locked`が排他アクセスを保証する。
+unsafe impl Sync for LockedFrames {}
+
+#[cfg(target_arch = "riscv64")]
+impl LockedFrames {
+    const fn empty() -> Self {
+        Self {
+            locked: core::sync::atomic::AtomicBool::new(false),
+            ready: core::sync::atomic::AtomicBool::new(false),
+            allocator: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
+        }
+    }
+
+    /// 管理範囲を登録する。起動直後の一度だけ呼ぶ。
+    ///
+    /// # Safety
+    ///
+    /// `FrameAllocator::new`と同じ排他性の契約を呼び出し側が保証する。
+    unsafe fn init(&self, base: usize, end: usize) -> Result<(), FrameError> {
+        // Safety: 起動直後の単一実行であり、`ready`公開前に他の参照はない。
+        let allocator = unsafe { FrameAllocator::new(base, end) }?;
+        // Safety: 同上。
+        unsafe { (*self.allocator.get()).write(allocator) };
+        self.ready
+            .store(true, core::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut FrameAllocator<512>) -> R) -> Option<R> {
+        if !self.ready.load(core::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        while self
+            .locked
+            .swap(true, core::sync::atomic::Ordering::Acquire)
+        {
+            core::hint::spin_loop();
+        }
+        // Safety: `locked`を取得し、`ready`以後はallocatorが初期化済みである。
+        let result = f(unsafe { (*self.allocator.get()).assume_init_mut() });
+        self.locked
+            .store(false, core::sync::atomic::Ordering::Release);
+        Some(result)
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+static GLOBAL_FRAMES: LockedFrames = LockedFrames::empty();
+
+/// `GLOBAL_FRAMES`へlock付きで委譲する`FrameSource`実装。
+/// ZSTなので必要な場所で値を作り、`&mut`経由で渡す。
+#[cfg(target_arch = "riscv64")]
+struct GlobalFrames;
+
+#[cfg(target_arch = "riscv64")]
+impl minios_kernel::memory::frame::FrameSource for GlobalFrames {
+    fn allocate(&mut self) -> Option<PhysFrame> {
+        GLOBAL_FRAMES.with(|frames| frames.allocate()).flatten()
+    }
+
+    fn allocate_at(&mut self, start: usize) -> Option<PhysFrame> {
+        GLOBAL_FRAMES
+            .with(|frames| frames.allocate_at(start))
+            .flatten()
+    }
+
+    fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
+        GLOBAL_FRAMES
+            .with(|frames| frames.deallocate(frame))
+            .unwrap_or(Err(FrameError::WrongAllocator))
+    }
+
+    fn deallocate_recoverable(&mut self, frame: PhysFrame) -> Result<(), (FrameError, PhysFrame)> {
+        if !GLOBAL_FRAMES
+            .ready
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            return Err((FrameError::WrongAllocator, frame));
+        }
+        GLOBAL_FRAMES
+            .with(|frames| frames.deallocate_recoverable(frame))
+            .expect("allocator is initialized once ready is set")
+    }
+
+    fn allocator_id(&self) -> u64 {
+        GLOBAL_FRAMES
+            .with(|frames| frames.allocator_id())
+            .unwrap_or(0)
+    }
+
+    fn stats(&self) -> FrameStats {
+        GLOBAL_FRAMES
+            .with(|frames| frames.stats())
+            .unwrap_or(FrameStats {
+                total: 0,
+                allocated: 0,
+                free: 0,
+            })
+    }
+}
+
 #[cfg(target_arch = "riscv64")]
 // Safety: `GlobalAlloc`の契約により、返すポインターはlayoutの整列を満たす
 // 有効な領域であり、`dealloc`は`alloc`が返したポインターだけを受け取る。
 // OOM時はnullを返し、`alloc`crateの既定handlerがpanicへ変換する。
 unsafe impl core::alloc::GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        self.with(|heap| match heap.alloc(layout) {
-            Ok(ptr) => ptr.as_ptr(),
-            Err(_) => core::ptr::null_mut(),
+        self.with(|heap| {
+            if let Ok(ptr) = heap.alloc(layout) {
+                return ptr.as_ptr();
+            }
+            // 空きが尽きたらframe poolの最上位（heap領域の直下）を
+            // 取り込んで下端を伸ばし、要求が収まるまで繰り返す。
+            // 隣接pageが取れなければpoolは実質枯渇しておりOOMとなる。
+            let mut frames = GlobalFrames;
+            loop {
+                let Some(new_start) = heap.start().checked_sub(PAGE_SIZE) else {
+                    return core::ptr::null_mut();
+                };
+                let Some(frame) = frames.allocate_at(new_start) else {
+                    return core::ptr::null_mut();
+                };
+                if heap.extend_down(frame.start(), PAGE_SIZE).is_err() {
+                    // 隣接検査は必ず通る想定だが、万一の場合はframeを返してOOMとする。
+                    let _ = frames.deallocate(frame);
+                    return core::ptr::null_mut();
+                }
+                if let Ok(ptr) = heap.alloc(layout) {
+                    return ptr.as_ptr();
+                }
+            }
         })
     }
 
@@ -452,12 +584,13 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
 
     // Safety: OpenSBIが使う`0x8000_0000..0x8020_0000`と、リンカーが配置する
     // `0x8020_0000..managed_memory_start`のカーネルイメージを除外している。
-    // machine記述が導くヒープ領域の直下までを所有するのは、この局所アロケーターだけである。
+    // machine記述が導くヒープ領域の直下までを所有するのは、この大域アロケーターだけである。
     // このアロケーターが生存している間は、同じ範囲を管理する別の所有者を作らない。
-    let mut frames = match unsafe { FrameAllocator::<512>::new(managed_memory_start, heap_start) } {
-        Ok(frames) => frames,
-        Err(error) => fatal_memory_error(error),
-    };
+    // heapがOOM時に`allocate_at`で上端から成長するため、供給元は大域化する。
+    if let Err(error) = unsafe { GLOBAL_FRAMES.init(managed_memory_start, heap_start) } {
+        fatal_memory_error(error);
+    }
+    let mut frames = GlobalFrames;
 
     let sections = kernel_sections();
     // 予約窓はこの時点ではまだaddress spaceをactivateしていないbare mode
@@ -657,6 +790,34 @@ fn run_heap_test() {
     if stats.total != KERNEL_HEAP_LEN || stats.free == 0 || stats.allocated != 0 {
         fatal_qemu_test(format_args!("heap: unexpected stats {stats:?}"));
     }
+
+    // 固定領域を超える割り当てはframe poolからの成長で賄われる。
+    // 要求量は初期領域より大きく、必ず隣接pageの取り込みを伴う。
+    let frames_before = GlobalFrames.stats();
+    let mut large: Vec<u8> = Vec::new();
+    if large
+        .try_reserve_exact(KERNEL_HEAP_LEN + PAGE_SIZE)
+        .is_err()
+    {
+        fatal_qemu_test(format_args!("heap: growth allocation failed"));
+    }
+    let grown = KERNEL_HEAP.stats();
+    let frames_after = GlobalFrames.stats();
+    if grown.total <= KERNEL_HEAP_LEN || frames_after.allocated <= frames_before.allocated {
+        fatal_qemu_test(format_args!(
+            "heap: no growth: stats={grown:?} frames={frames_after:?}"
+        ));
+    }
+    crate::println!(
+        "[MINIOS_TEST] heap: grew total={} pool_free={}",
+        grown.total,
+        frames_after.free
+    );
+    drop(large);
+    if KERNEL_HEAP.stats().allocated != 0 {
+        fatal_qemu_test(format_args!("heap: grown allocation was not released"));
+    }
+
     crate::println!(
         "[MINIOS_TEST] heap: total={} largest_free={} blocks={}",
         stats.total,
@@ -801,7 +962,7 @@ fn expect_kernel_range<const N: usize>(
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 fn run_elf_test<const N: usize>(
     kernel_space: &AddressSpace<'_, N>,
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
 ) {
     let before = frames.stats();
@@ -874,7 +1035,7 @@ fn run_elf_test<const N: usize>(
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 fn dirty_reusable_elf_frames(
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
     baseline: FrameStats,
 ) {
@@ -921,7 +1082,7 @@ fn dirty_reusable_elf_frames(
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 fn release_dirty_elf_frames(
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
     dirty_frames: &mut [Option<PhysFrame>; ELF_DIRTY_FRAME_COUNT],
 ) -> Option<FrameError> {
     let mut first_error = None;
@@ -1666,7 +1827,7 @@ fn user_trap_fault_elf() -> [u8; USER_PROBE_ELF_LEN] {
 fn run_user_mode_probe_test<const KERNEL_N: usize>(
     kernel_space: &AddressSpace<'_, KERNEL_N>,
     plan: &KernelMapPlan,
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
 ) -> ! {
     // Safety: this feature path runs only on the single boot hart and obtains
@@ -1770,7 +1931,7 @@ fn run_user_mode_probe_test<const KERNEL_N: usize>(
 fn run_user_exit_test<const KERNEL_N: usize>(
     kernel_space: &AddressSpace<'_, KERNEL_N>,
     plan: &KernelMapPlan,
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
 ) {
     let before = frames.stats();
@@ -1921,7 +2082,7 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
 fn reclaim_process_slot(
     table: &mut ProcessTable<'_, MAX_OWNED_FRAMES>,
     pid: usize,
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
 ) {
     let Some(mut process) = table.take(pid) else {
         return;
@@ -1935,7 +2096,7 @@ fn reclaim_process_slot(
 #[cfg(target_arch = "riscv64")]
 fn reclaim_process_table(
     table: &mut ProcessTable<'_, MAX_OWNED_FRAMES>,
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
 ) {
     for pid in 0..MAX_PROCS {
         let _ = table.take(pid).map(|mut process| process.reclaim(frames));
@@ -1954,7 +2115,7 @@ fn reclaim_process_table(
 fn run_boot_payload<const KERNEL_N: usize>(
     kernel_space: &AddressSpace<'_, KERNEL_N>,
     plan: &KernelMapPlan,
-    frames: &mut FrameAllocator<512>,
+    frames: &mut dyn FrameSource,
     memory: &mut IdentityFrameStore,
     payload: BootPayload<'static>,
 ) -> ! {
@@ -2233,7 +2394,7 @@ fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-memory"))]
-fn run_memory_test(frames: &mut FrameAllocator<512>) -> ! {
+fn run_memory_test(frames: &mut dyn FrameSource) -> ! {
     let first = match frames.allocate() {
         Some(frame) => frame,
         None => fatal_memory_test(),

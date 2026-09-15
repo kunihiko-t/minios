@@ -2,7 +2,7 @@ use core::{cmp, fmt};
 
 use crate::{
     elf::{ElfError, ElfImage, LoadPlan, LoadSegment, USER_STACK_BOTTOM, USER_STACK_TOP},
-    memory::frame::{FrameAllocator, FrameError, PAGE_SIZE},
+    memory::frame::{FrameError, FrameSource, PAGE_SIZE},
     vm::{
         AddressSpace, AddressSpaceBuilder, AddressSpaceStorage, FrameKind, FrameStore,
         KernelMapping, PageFlags, VirtAddr, VirtPage, VmError,
@@ -77,9 +77,9 @@ impl<'storage, const N: usize> LoadedImage<'storage, N> {
     }
 
     /// Returns every owned frame, retaining this image if the allocator rejects it.
-    pub fn destroy<const WORDS: usize>(
+    pub fn destroy(
         self,
-        allocator: &mut FrameAllocator<WORDS>,
+        allocator: &mut dyn FrameSource,
     ) -> Result<(), LoadedImageDestroyError<'storage, N>> {
         let Self {
             address_space,
@@ -108,9 +108,9 @@ impl<'storage, const N: usize> LoadedImage<'storage, N> {
 /// Host unit tests use this entry point with an empty kernel-mapping iterator;
 /// the U-mode runtime borrows the kernel identity pages through
 /// [`load_image_with_kernel_mappings`] instead.
-pub fn load_image<'storage, const N: usize, const WORDS: usize, M: FrameStore>(
+pub fn load_image<'storage, const N: usize, M: FrameStore>(
     bytes: &[u8],
-    allocator: &mut FrameAllocator<WORDS>,
+    allocator: &mut dyn FrameSource,
     memory: &mut M,
     storage: &'storage mut AddressSpaceStorage<N>,
 ) -> Result<LoadedImage<'storage, N>, LoadError<M::Error>> {
@@ -127,12 +127,11 @@ pub fn load_image<'storage, const N: usize, const WORDS: usize, M: FrameStore>(
 pub fn load_image_with_kernel_mappings<
     'storage,
     const N: usize,
-    const WORDS: usize,
     M: FrameStore,
     I: IntoIterator<Item = KernelMapping>,
 >(
     bytes: &[u8],
-    allocator: &mut FrameAllocator<WORDS>,
+    allocator: &mut dyn FrameSource,
     memory: &mut M,
     storage: &'storage mut AddressSpaceStorage<N>,
     kernel_mappings: I,
@@ -174,9 +173,9 @@ pub fn load_image_with_kernel_mappings<
     })
 }
 
-fn materialize_segment<const N: usize, const WORDS: usize, M: FrameStore>(
+fn materialize_segment<const N: usize, M: FrameStore>(
     bytes: &[u8],
-    builder: &mut AddressSpaceBuilder<'_, '_, '_, N, WORDS, M>,
+    builder: &mut AddressSpaceBuilder<'_, '_, '_, N, M>,
     segment: &LoadSegment,
 ) -> Result<(), LoadError<M::Error>> {
     let file_len =

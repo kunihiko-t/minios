@@ -9,7 +9,7 @@ use core::fmt;
 
 use crate::{
     elf::{LoadError, LoadedImage, load_image_with_kernel_mappings},
-    memory::frame::{FrameAllocator, FrameError, PAGE_SIZE, PhysFrame},
+    memory::frame::{FrameError, FrameSource, PAGE_SIZE, PhysFrame},
     user::{
         context::UserContext,
         run::KERNEL_STACK_PAGES,
@@ -104,11 +104,11 @@ impl<'storage, const N: usize> Process<'storage, N> {
     /// `storage`はこのprocess専用の空arenaでなければならない
     /// (`AddressSpaceBuilder`の不変条件)。`kernel_mappings`はsupervisor専用の
     /// 借用mappingとして各user spaceへ複写される。
-    pub fn spawn<const WORDS: usize, M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
+    pub fn spawn<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
         name: &'static str,
         elf: &[u8],
         arguments: &[&str],
-        allocator: &mut FrameAllocator<WORDS>,
+        allocator: &mut dyn FrameSource,
         memory: &mut M,
         storage: &'storage mut AddressSpaceStorage<N>,
         kernel_mappings: I,
@@ -249,10 +249,7 @@ impl<'storage, const N: usize> Process<'storage, N> {
 
     /// user address spaceがinactiveな状態で、trap stackとimageの全所有frameを
     /// 回収する。失敗したframeはstruct内へ戻すため再試行できる。
-    pub fn reclaim<const WORDS: usize>(
-        &mut self,
-        allocator: &mut FrameAllocator<WORDS>,
-    ) -> Result<(), FrameError> {
+    pub fn reclaim(&mut self, allocator: &mut dyn FrameSource) -> Result<(), FrameError> {
         for index in (0..KERNEL_STACK_PAGES).rev() {
             let Some(frame) = self.kernel_stack[index].take() else {
                 continue;
@@ -278,10 +275,10 @@ impl<'storage, const N: usize> Process<'storage, N> {
 
 /// kernel stackとimageの部分回収。`UserRun`の`build_failure`と同じ順序で、
 /// 途中失敗時に確保済みresourceを漏らさない。
-fn spawn_failure<'storage, const N: usize, const WORDS: usize, E>(
+fn spawn_failure<'storage, const N: usize, E>(
     image: LoadedImage<'storage, N>,
     stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
-    allocator: &mut FrameAllocator<WORDS>,
+    allocator: &mut dyn FrameSource,
     primary: SpawnError<E>,
 ) -> SpawnFailure<'storage, N, E> {
     for slot in stack.iter_mut().rev() {
@@ -401,7 +398,10 @@ mod tests {
     use std::{boxed::Box, collections::BTreeMap, vec::Vec};
 
     use super::*;
-    use crate::{elf::fixture::valid_riscv64_elf, memory::frame::FrameStats};
+    use crate::{
+        elf::fixture::valid_riscv64_elf,
+        memory::frame::{FrameAllocator, FrameStats},
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestStoreError {
