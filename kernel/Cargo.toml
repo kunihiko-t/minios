@@ -21,6 +21,7 @@ qemu-test-user-syscall = []
 qemu-test-user-exit = []
 qemu-test-fdt = []
 qemu-test-heap = []
+qemu-test-virtio = []
 
 [dependencies]
 minios-abi = { path = "../abi" }

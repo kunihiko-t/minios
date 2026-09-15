@@ -158,17 +158,18 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 25. QEMU user-exit test
 26. QEMU fdt test
 27. QEMU heap test
-28. QEMU payload test
-29. QEMU payload-args test
-30. QEMU payload-stdin test
-31. QEMU sched test
-32. QEMU sched-io test
-33. QEMU sched-io-partial test
-34. QEMU shell test
+28. QEMU virtio test
+29. QEMU payload test
+30. QEMU payload-args test
+31. QEMU payload-stdin test
+32. QEMU sched test
+33. QEMU sched-io test
+34. QEMU sched-io-partial test
+35. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 34 phases`を表示します。
+全段階に成功すると`summary: PASSED all 35 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -177,6 +178,7 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 - `xtask/src/lib.rs`：段階の順序、最初の失敗で止まる実行管理、結果の要約
 - `xtask/src/cargo.rs`：Cargoの子プロセスと、コマンド、終了ステータス、出力の診断
 - `xtask/src/qemu.rs`：QEMUの引数、マーカーと対話の検証、制限時間、プロセスの終了と回収、対話記録
+- `xtask/src/disk.rs`：QEMU virtio検査用のFAT32 disk imageの生成
 - `xtask/src/docs.rs`：ローカルのMarkdownリンクと第1章から第17章までの必須構造
 - `kernel/src/main.rs`：テスト用機能ごとのマーカーとシェルの起動
 - `.github/workflows/ci.yml`：Linux上で同じ`setup`と`check`を呼ぶCI
@@ -202,12 +204,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/34] cargo fmt --all -- --check
-phase 1/34 passed (elapsed: ...s)
+[1/35] cargo fmt --all -- --check
+phase 1/35 passed (elapsed: ...s)
 ...
-[34/34] QEMU shell test
-phase 34/34 passed (elapsed: ...s)
-summary: PASSED all 34 phases (elapsed: ...s)
+[35/35] QEMU shell test
+phase 35/35 passed (elapsed: ...s)
+summary: PASSED all 35 phases (elapsed: ...s)
 ```
 
 この実行例の段階数は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

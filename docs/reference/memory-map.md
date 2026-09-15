@@ -17,6 +17,7 @@ MiniOSはQEMU `virt`を`-m 128M`で起動し、OpenSBIが`a1`へ渡すDTBから�
 | `0x87e0_0000..0x8800_0000` | FDTの予約領域 | QEMUがRAM上端の2 MiB整列境界へ置くDTBを守るため、allocatorの対象外で未写像 |
 | `0x8800_0000` | 128 MiB RAMの排他的な上端 | RAMの上端であり、allocatorの上端ではない |
 | `0x1000_0000..0x1000_1000` | 16550互換UARTのMMIO | RAM外の機器領域としてS-modeの`R+W`で恒等写像し、volatile accessだけを使用 |
+| FDTが報告する各virtio-mmio領域 (QEMU `virt`では`0x1000_1000`以降の1 KiB刻み) | virtio-mmioのregister file | `with_device_pages`が1 pageずつS-modeの`R+W`で恒等写像し、空slotはprobeで弾く |
 
 `PHYSICAL_MEMORY_END`という実装定数は、物理RAM全体の上端ではなく、payload窓の開始位置`0x8780_0000`を表します。
 実行時のmanaged RAMの上端は`MachineSpec::managed_end`が導き、`ram_end - FDT予約 - BUNDLE_MAX_LEN`で計算します。

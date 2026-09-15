@@ -30,6 +30,7 @@ const FDT_MARKER: &str =
     "[MINIOS_TEST] fdt: ram=0x80000000..0x88000000 uart=0x10000000 timebase=10000000";
 // `-m 128M`ではヒープ領域は`0x8770_0000..0x8780_0000`の1 MiBである。
 const HEAP_MARKER: &str = "[MINIOS_TEST] heap: ok";
+const VIRTIO_MARKER: &str = "[MINIOS_TEST] virtio: ok";
 const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
 /// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
 const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
@@ -72,6 +73,7 @@ pub enum TestKind {
     UserExit,
     Fdt,
     Heap,
+    Virtio,
     Payload,
     PayloadArgs,
     PayloadStdin,
@@ -96,6 +98,7 @@ impl TestKind {
             Self::UserExit => "qemu-test-user-exit",
             Self::Fdt => "qemu-test-fdt",
             Self::Heap => "qemu-test-heap",
+            Self::Virtio => "qemu-test-virtio",
             Self::Payload => unreachable!("the payload test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -122,6 +125,7 @@ impl TestKind {
             Self::UserExit => USER_EXIT_MARKER,
             Self::Fdt => FDT_MARKER,
             Self::Heap => HEAP_MARKER,
+            Self::Virtio => VIRTIO_MARKER,
             Self::Payload => unreachable!("the payload test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -371,6 +375,23 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let (command, command_line) = qemu_command(&kernel);
         let completed = run_shell_command(command, command_line.clone(), deadline)?;
         return verify_shell_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::Virtio {
+        let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) = qemu_command_with_disk(&kernel, disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        disk.remove();
+        return verify_test_result(
+            &command_line,
+            kind,
+            completed.status.code(),
+            &completed.output,
+        );
     }
 
     let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
@@ -1468,6 +1489,23 @@ fn payload_elf_bytes() -> Vec<u8> {
     bytes[header + 48..header + 56].copy_from_slice(&0x1000u64.to_le_bytes());
     bytes[0x1000..].copy_from_slice(&code_bytes);
     bytes
+}
+
+fn qemu_command_with_disk(kernel: &Path, disk: &Path) -> (Command, String) {
+    let mut args = qemu_args(kernel);
+    args.push("-drive".to_owned());
+    args.push(format!(
+        "file={},format=raw,if=none,id=blk0",
+        disk.display()
+    ));
+    args.push("-global".to_owned());
+    args.push("virtio-mmio.force-legacy=false".to_owned());
+    args.push("-device".to_owned());
+    args.push("virtio-blk-device,drive=blk0,bus=virtio-mmio-bus.0".to_owned());
+    let command_line = render_command(QEMU_PROGRAM, &args);
+    let mut command = Command::new(QEMU_PROGRAM);
+    command.args(&args);
+    (command, command_line)
 }
 
 fn qemu_command(kernel: &Path) -> (Command, String) {

@@ -38,7 +38,8 @@ pub mod process;
 pub mod sbi;
 #[cfg(test)]
 pub mod shell;
-#[cfg(any(test, target_arch = "riscv32"))]
+// storageは全targetでcompileする: fat32/sd/virtio_blkはalloc非依存の
+// 純粋なtransport/parserであり、xtaskのhost側image検証もこの実装を再利用する。
 pub mod storage;
 #[cfg(test)]
 pub mod time;

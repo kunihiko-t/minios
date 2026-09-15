@@ -1,5 +1,6 @@
 use core::ops::Range;
 
+use crate::fdt::VIRTIO_MMIO_MAX;
 use crate::memory::{KernelSections, frame::PAGE_SIZE};
 
 use super::{PageFlags, PhysAddr, VirtPage};
@@ -10,6 +11,8 @@ pub enum KernelMapError {
     InvalidManagedRange,
     /// payload rangeが予約窓の外、非整列、またはmanaged範囲と隣接していない。
     InvalidPayloadRange,
+    /// device MMIO pageが非整列、既存mappingと重複、または数がslotを超えた。
+    InvalidDeviceRange,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,9 +21,20 @@ struct MappingRange {
     flags: PageFlags,
 }
 
+impl MappingRange {
+    fn empty() -> Self {
+        Self {
+            addresses: 0..0,
+            flags: PageFlags::supervisor_rw(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KernelMapPlan {
-    ranges: [MappingRange; 7],
+    /// 0..7は既定mapping、7以降はdevice MMIOの1page mapping
+    /// (`with_device_pages`が順に埋める。空rangeはmappingを生まない)。
+    ranges: [MappingRange; 7 + VIRTIO_MMIO_MAX],
 }
 
 impl KernelMapPlan {
@@ -74,6 +88,16 @@ impl KernelMapPlan {
                     addresses: managed_end..managed_end,
                     flags: PageFlags::supervisor_r(),
                 },
+                // device MMIO slots (VIRTIO_MMIO_MAX個) — 空rangeで初期化。
+                // 以降はMappingRange::empty()が8連続で並ぶ。
+                MappingRange::empty(),
+                MappingRange::empty(),
+                MappingRange::empty(),
+                MappingRange::empty(),
+                MappingRange::empty(),
+                MappingRange::empty(),
+                MappingRange::empty(),
+                MappingRange::empty(),
             ],
         })
     }
@@ -119,6 +143,33 @@ impl KernelMapPlan {
             addresses: window.start..end,
             flags: PageFlags::supervisor_r(),
         };
+        Ok(self)
+    }
+
+    /// device MMIO page (4 KiB整列のベース) を1 pageずつS-mode R+Wで追加する。
+    /// `MachineSpec::virtio_mmio`のようにFDTが報告したMMIO領域を渡す。
+    /// 既存mapping (kernel・managed・UART・payload) との重複は拒否する。
+    pub fn with_device_pages(mut self, bases: &[usize]) -> Result<Self, KernelMapError> {
+        if bases.len() > VIRTIO_MMIO_MAX {
+            return Err(KernelMapError::InvalidDeviceRange);
+        }
+        for (slot, base) in bases.iter().enumerate() {
+            let base = *base;
+            if base == 0 || !base.is_multiple_of(PAGE_SIZE) {
+                return Err(KernelMapError::InvalidDeviceRange);
+            }
+            let range = base..base + PAGE_SIZE;
+            let overlaps = self.ranges.iter().any(|existing| {
+                existing.addresses.start < range.end && range.start < existing.addresses.end
+            });
+            if overlaps {
+                return Err(KernelMapError::InvalidDeviceRange);
+            }
+            self.ranges[7 + slot] = MappingRange {
+                addresses: range,
+                flags: PageFlags::supervisor_rw(),
+            };
+        }
         Ok(self)
     }
 
@@ -228,6 +279,54 @@ mod tests {
         let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000, 0x1000_0000).unwrap();
 
         assert!(plan.mappings().all(|mapping| !mapping.flags().user()));
+    }
+
+    // Catches unaligned device bases, overlap with kernel/managed/UART
+    // pages, or more slots than the plan reserves.
+    #[test]
+    fn kernel_plan_maps_device_pages_and_rejects_invalid_ones() {
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000, 0x1000_0000).unwrap();
+        let plan = plan.with_device_pages(&[0x1000_1000, 0x1000_8000]).unwrap();
+
+        assert_eq!(
+            plan.flags_at(0x1000_1000).unwrap(),
+            PageFlags::supervisor_rw()
+        );
+        assert_eq!(
+            plan.flags_at(0x1000_8fff).unwrap(),
+            PageFlags::supervisor_rw()
+        );
+        assert_eq!(plan.flags_at(0x1000_2000), None);
+        assert!(plan.mappings().all(|mapping| !mapping.flags().user()));
+
+        let sections = fixture_sections();
+        let plan = KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000, 0x1000_0000).unwrap();
+        // 非整列
+        assert_eq!(
+            plan.clone().with_device_pages(&[0x1000_1001]),
+            Err(KernelMapError::InvalidDeviceRange)
+        );
+        // UART pageと重複
+        assert_eq!(
+            plan.clone().with_device_pages(&[0x1000_0000]),
+            Err(KernelMapError::InvalidDeviceRange)
+        );
+        // managed RAMと重複
+        assert_eq!(
+            plan.clone().with_device_pages(&[0x8021_5000]),
+            Err(KernelMapError::InvalidDeviceRange)
+        );
+        // device同士の重複
+        assert_eq!(
+            plan.clone().with_device_pages(&[0x1000_1000, 0x1000_1000]),
+            Err(KernelMapError::InvalidDeviceRange)
+        );
+        // slot超過
+        assert_eq!(
+            plan.with_device_pages(&[0x1000_1000; 9]),
+            Err(KernelMapError::InvalidDeviceRange)
+        );
     }
 
     // Catches skipped, duplicated, reordered, or non-identity pages anywhere

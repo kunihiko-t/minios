@@ -38,7 +38,15 @@ pub struct MachineSpec {
     pub uart_base: usize,
     /// `/cpus`の`timebase-frequency`。
     pub timebase_hz: u64,
+    /// `compatible="virtio,mmio"`の各nodeのregベース（発見順、最大
+    /// [`VIRTIO_MMIO_MAX`]個）。
+    pub virtio_mmio: [usize; VIRTIO_MMIO_MAX],
+    /// `virtio_mmio`の有効個数。
+    pub virtio_mmio_count: usize,
 }
+
+/// QEMU virtが提供するvirtio-mmio transportのslot数。
+pub const VIRTIO_MMIO_MAX: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FdtError {
@@ -60,6 +68,7 @@ struct NodeScan {
     name_is_cpus: bool,
     device_is_memory: bool,
     has_ns16550: bool,
+    is_virtio_mmio: bool,
     reg_cells: (u32, u32),
     reg_first: Option<(u64, u64)>,
     timebase: Option<u32>,
@@ -176,6 +185,12 @@ fn decode_reg(value: &[u8], cells: (u32, u32)) -> Result<(u64, u64), FdtError> {
     Ok((address, size))
 }
 
+fn compatible_has_virtio_mmio(value: &[u8]) -> bool {
+    value
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == b"virtio,mmio")
+}
+
 fn compatible_has_ns16550(value: &[u8]) -> bool {
     value
         .split(|byte| *byte == 0)
@@ -196,6 +211,8 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
     let mut ram: Option<(u64, u64)> = None;
     let mut uart: Option<u64> = None;
     let mut timebase: Option<u32> = None;
+    let mut virtio_mmio = [0usize; VIRTIO_MMIO_MAX];
+    let mut virtio_mmio_count = 0usize;
 
     loop {
         let token = read_be32(structure, cursor).map_err(|_| FdtError::BadStructure)?;
@@ -244,6 +261,14 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                 if scan.has_ns16550 && uart.is_none() {
                     uart = scan.reg_first.map(|(address, _)| address);
                 }
+                if scan.is_virtio_mmio
+                    && virtio_mmio_count < VIRTIO_MMIO_MAX
+                    && let Some((base, _)) = scan.reg_first
+                    && let Ok(base) = usize::try_from(base)
+                {
+                    virtio_mmio[virtio_mmio_count] = base;
+                    virtio_mmio_count += 1;
+                }
             }
             FDT_PROP => {
                 if depth == 0 {
@@ -265,7 +290,10 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                         scan.reg_first = Some(decode_reg(value, scan.reg_cells)?);
                     }
                     "device_type" => scan.device_is_memory = device_type_is_memory(value),
-                    "compatible" => scan.has_ns16550 = compatible_has_ns16550(value),
+                    "compatible" => {
+                        scan.has_ns16550 = compatible_has_ns16550(value);
+                        scan.is_virtio_mmio = compatible_has_virtio_mmio(value);
+                    }
                     "timebase-frequency" => scan.timebase = Some(read_be32(value, 0)?),
                     _ => {}
                 }
@@ -291,6 +319,8 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
         uart_base: usize::try_from(uart.ok_or(FdtError::MissingUart)?)
             .map_err(|_| FdtError::BadStructure)?,
         timebase_hz: u64::from(timebase.ok_or(FdtError::MissingTimebase)?),
+        virtio_mmio,
+        virtio_mmio_count,
     })
 }
 
@@ -350,6 +380,14 @@ mod tests {
             cpus_props.push(prop("timebase-frequency", be32(10_000_000)));
         }
         let mut soc_children = std::vec![];
+        soc_children.push(Node {
+            name: "virtio_mmio@10001000",
+            props: std::vec![
+                prop("reg", reg((2, 2), 0x1000_1000, 0x1000)),
+                prop("compatible", b"virtio,mmio\0".to_vec()),
+            ],
+            children: std::vec![],
+        });
         if with_uart {
             soc_children.push(Node {
                 name: "serial@10000000",
@@ -485,6 +523,7 @@ mod tests {
         assert_eq!(spec.ram, 0x8000_0000..0x8800_0000);
         assert_eq!(spec.uart_base, 0x1000_0000);
         assert_eq!(spec.timebase_hz, 10_000_000);
+        assert_eq!(spec.virtio_mmio[..spec.virtio_mmio_count], [0x1000_1000]);
     }
 
     #[test]
