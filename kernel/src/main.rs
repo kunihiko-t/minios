@@ -2043,6 +2043,14 @@ fn run_boot_payload<const KERNEL_N: usize>(
         USER_STDIN_STAGING = StdinStaging::new();
     }
 
+    // boot中に積み上がったtick債務を精算する。S-mode側を遮断したためSTIPは
+    // pendingのまま残り得て、そのままU-modeへ落ちると最初のprocessがほぼ
+    // 進まずpreemptされる。ここでdeadlineを張り直し、最初のdispatchへ
+    // 満タンのquantumを渡す。
+    if let Err(error) = time::handle_interrupt() {
+        fatal_payload_error(format_args!("MiniOS payload: timer, {error:?}\r\n"));
+    }
+
     // Ready frameを最後のplain text出力の後に送り、以降のUARTをcontrol frame
     // へ限定する。
     control::send_ready();
