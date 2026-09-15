@@ -4,5 +4,5 @@ pub mod neorv32_sd;
 pub mod neorv32_uart;
 #[cfg(target_arch = "riscv64")]
 pub mod uart;
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-virtio"))]
+#[cfg(target_arch = "riscv64")]
 pub mod virtio_mmio;

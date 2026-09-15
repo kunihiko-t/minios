@@ -9,9 +9,9 @@ pub enum Command<'a> {
     Shutdown,
     #[cfg(any(test, target_arch = "riscv32"))]
     Echo(&'a str),
-    #[cfg(any(test, target_arch = "riscv32"))]
+    #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
     Ls,
-    #[cfg(any(test, target_arch = "riscv32"))]
+    #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
     Cat(&'a str),
     Unknown(&'a str),
 }
@@ -30,16 +30,16 @@ pub fn parse_command(input: &str) -> Command<'_> {
         "echo" => Command::Echo(""),
         #[cfg(any(test, target_arch = "riscv32"))]
         input if input.starts_with("echo ") => Command::Echo(input[5..].trim_start_matches(' ')),
-        #[cfg(any(test, target_arch = "riscv32"))]
+        #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         "ls" => Command::Ls,
-        #[cfg(any(test, target_arch = "riscv32"))]
+        #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         "cat" => Command::Cat(""),
-        #[cfg(any(test, target_arch = "riscv32"))]
+        #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         input => match input.strip_prefix("cat ") {
             Some(argument) => Command::Cat(argument.trim_start_matches(' ')),
             None => Command::Unknown(input),
         },
-        #[cfg(not(any(test, target_arch = "riscv32")))]
+        #[cfg(not(any(test, target_arch = "riscv32", target_arch = "riscv64")))]
         unknown => Command::Unknown(unknown),
     }
 }
