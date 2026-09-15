@@ -490,41 +490,13 @@ fn run_stdin_command(
         });
     }
 
-    let remaining = deadline.saturating_sub(started.elapsed());
-    match wait_until_exit(&mut child, remaining) {
-        Ok(status) => {
-            let output = readers.join().map_err(|error| QemuError::Wait {
-                command: command_line.clone(),
-                error,
-            })?;
-            Ok(CompletedProcess { status, output })
-        }
-        Err(WaitFailure::TimedOut) => {
-            let cleanup = terminate_and_reap(&mut child);
-            let mut output = readers.join().unwrap_or_else(|error| error);
-            if let Err(cleanup_error) = cleanup {
-                output.push_str("\nQEMU cleanup error: ");
-                output.push_str(&cleanup_error);
-            }
-            Err(QemuError::TimedOut {
-                command: command_line,
-                deadline,
-                output,
-            })
-        }
-        Err(WaitFailure::Poll(error)) => {
-            let cleanup = terminate_and_reap(&mut child);
-            let output = readers.join().unwrap_or_else(|error| error);
-            let cleanup = cleanup
-                .err()
-                .map(|error| format!("; cleanup also failed: {error}"))
-                .unwrap_or_default();
-            Err(QemuError::Wait {
-                command: command_line,
-                error: format!("{error}{cleanup}\n{output}"),
-            })
-        }
-    }
+    collect_process_output(
+        child,
+        move || readers.join(),
+        command_line,
+        deadline,
+        deadline.saturating_sub(started.elapsed()),
+    )
 }
 
 /// sched-io検査の入力。`b3`を観測してから送る1 byteのStdin frame。
@@ -629,41 +601,13 @@ fn run_sched_io_script(
         }
     }
 
-    let remaining = deadline.saturating_sub(started.elapsed());
-    match wait_until_exit(&mut child, remaining) {
-        Ok(status) => {
-            let output = readers.join().map_err(|error| QemuError::Wait {
-                command: command_line.clone(),
-                error,
-            })?;
-            Ok(CompletedProcess { status, output })
-        }
-        Err(WaitFailure::TimedOut) => {
-            let cleanup = terminate_and_reap(&mut child);
-            let mut output = readers.join().unwrap_or_else(|error| error);
-            if let Err(cleanup_error) = cleanup {
-                output.push_str("\nQEMU cleanup error: ");
-                output.push_str(&cleanup_error);
-            }
-            Err(QemuError::TimedOut {
-                command: command_line,
-                deadline,
-                output,
-            })
-        }
-        Err(WaitFailure::Poll(error)) => {
-            let cleanup = terminate_and_reap(&mut child);
-            let output = readers.join().unwrap_or_else(|error| error);
-            let cleanup = cleanup
-                .err()
-                .map(|error| format!("; cleanup also failed: {error}"))
-                .unwrap_or_default();
-            Err(QemuError::Wait {
-                command: command_line,
-                error: format!("{error}{cleanup}\n{output}"),
-            })
-        }
-    }
+    collect_process_output(
+        child,
+        move || readers.join(),
+        command_line,
+        deadline,
+        deadline.saturating_sub(started.elapsed()),
+    )
 }
 
 fn finish_stdin_failure(
@@ -768,10 +712,29 @@ fn run_command_with_capture(
             error: error.to_string(),
         })?;
     let readers = OutputReaders::start(&mut child);
+    collect_process_output(
+        child,
+        move || readers.join(),
+        command_line,
+        deadline,
+        deadline,
+    )
+}
 
-    match wait_until_exit(&mut child, deadline) {
+/// `wait_until_exit`の共通末尾: 正常終了ならreader出力を回収し、timeout/poll
+/// 失敗なら子processを止めて回収済み出力をerrorへ添える。
+/// `join`はreader種別（`OutputReaders`/`LiveOutputReaders`）を吸収する
+/// 一回限りのclosureである。
+fn collect_process_output(
+    mut child: Child,
+    join: impl FnOnce() -> Result<String, String>,
+    command_line: String,
+    deadline: Duration,
+    remaining: Duration,
+) -> Result<CompletedProcess, QemuError> {
+    match wait_until_exit(&mut child, remaining) {
         Ok(status) => {
-            let output = readers.join().map_err(|error| QemuError::Wait {
+            let output = join().map_err(|error| QemuError::Wait {
                 command: command_line.clone(),
                 error,
             })?;
@@ -779,10 +742,10 @@ fn run_command_with_capture(
         }
         Err(WaitFailure::TimedOut) => {
             let cleanup = terminate_and_reap(&mut child);
-            let mut output = readers.join().unwrap_or_else(|error| error);
-            if let Err(error) = cleanup {
+            let mut output = join().unwrap_or_else(|error| error);
+            if let Err(cleanup_error) = cleanup {
                 output.push_str("\nQEMU cleanup error: ");
-                output.push_str(&error);
+                output.push_str(&cleanup_error);
             }
             Err(QemuError::TimedOut {
                 command: command_line,
@@ -792,7 +755,7 @@ fn run_command_with_capture(
         }
         Err(WaitFailure::Poll(error)) => {
             let cleanup = terminate_and_reap(&mut child);
-            let output = readers.join().unwrap_or_else(|error| error);
+            let output = join().unwrap_or_else(|error| error);
             let cleanup = cleanup
                 .err()
                 .map(|error| format!("; cleanup also failed: {error}"))
