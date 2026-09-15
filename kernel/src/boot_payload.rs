@@ -4,7 +4,7 @@ use core::ops::Range;
 
 use crate::memory::{BOOT_PAYLOAD_END, BOOT_PAYLOAD_START};
 use minios_abi::boot::{BOOT_HEADER_LEN, BOOT_MAGIC, BootHeader, BootHeaderError};
-use minios_abi::manifest::{Manifest, ManifestError};
+use minios_abi::manifest::{Manifest, ManifestError, ManifestImage};
 
 /// 予約窓の検証に失敗した理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,8 @@ pub enum BootPayloadError {
     NonZeroPadding,
     /// bytesが宣言された`total_len`に満たない。
     WindowTooShort,
+    /// imageの`elf=` rangeが`header.elf`領域からはみ出す。
+    BadImageRange,
 }
 
 impl BootPayloadError {
@@ -142,6 +144,15 @@ impl<'a> BootPayload<'a> {
             .get(elf_start..)
             .ok_or(BootPayloadError::WindowTooShort)?;
         let manifest = Manifest::parse(manifest_bytes).map_err(BootPayloadError::Manifest)?;
+        // 各imageの`elf=` range (manifest側で重複拒否済み) が
+        // `header.elf`領域内に収まるかを領域長に対して検査する。
+        for image in manifest.images() {
+            if let Some(range) = image.elf()
+                && range.end > elf.len() as u64
+            {
+                return Err(BootPayloadError::BadImageRange);
+            }
+        }
         Ok((manifest, elf))
     }
 
@@ -150,9 +161,23 @@ impl<'a> BootPayload<'a> {
         &self.manifest
     }
 
-    /// 検証済みELF bytesを借りる。
+    /// 検証済みELF bytesを借りる。複数image bundleでは全imageの連結領域を返す。
     pub const fn elf(&self) -> &'a [u8] {
         self.elf
+    }
+
+    /// manifestが宣言するimageを列挙する。v1 bundleでは単一imageを返す。
+    pub fn images(&self) -> minios_abi::manifest::ManifestImages<'a> {
+        self.manifest.images()
+    }
+
+    /// imageが占めるELF bytesを借りる。v1の`elf=None`は領域全体、v2の
+    /// `elf=offset,len`は検証済みの部分rangeを返す。
+    pub fn image_elf(&self, image: &ManifestImage<'a>) -> &'a [u8] {
+        match image.elf() {
+            None => self.elf,
+            Some(range) => &self.elf[range.start as usize..range.end as usize],
+        }
     }
 
     /// header内で宣言されたELF rangeを返す。
@@ -170,7 +195,7 @@ impl<'a> BootPayload<'a> {
 mod tests {
     extern crate std;
 
-    use std::{vec, vec::Vec};
+    use std::{format, vec, vec::Vec};
 
     use super::{BootPayload, BootPayloadError};
     use crate::{
@@ -273,15 +298,74 @@ mod tests {
     fn payload_rejects_an_invalid_manifest() {
         let mut bytes = canonical_bundle();
         let manifest_start = BOOT_HEADER_LEN;
-        // 同長の不正manifest (未対応version行) へ差し替える。
+        // 同長の不正manifest (v2でimage sectionを持たない) へ差し替える。
         bytes[manifest_start..manifest_start + MANIFEST.len()]
             .copy_from_slice(b"version=2\nname=hello\n");
         assert!(matches!(
             BootPayload::parse(&bytes),
             Err(BootPayloadError::Manifest(
-                minios_abi::manifest::ManifestError::MissingVersion
+                minios_abi::manifest::ManifestError::UnknownKey
             ))
         ));
+    }
+
+    // Catches trusting a v2 image `elf=` range that escapes the header's
+    // ELF area (overlap is rejected by the manifest parser itself).
+    #[test]
+    fn payload_rejects_an_image_range_outside_the_elf_area() {
+        let elf = valid_riscv64_elf();
+        let manifest = format!(
+            "version=2\nimage=a\nelf=0,{}\nimage=b\nelf={},16\n",
+            elf.len(),
+            elf.len()
+        );
+        let manifest_bytes = manifest.into_bytes();
+        let manifest_end = BOOT_HEADER_LEN + manifest_bytes.len();
+        let padding_len = (8 - manifest_end % 8) % 8;
+        let elf_offset = manifest_end + padding_len;
+        let total_len = elf_offset + elf.len();
+
+        let mut bytes = vec![0u8; total_len];
+        bytes[0..8].copy_from_slice(b"MINICTR\0");
+        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        bytes[12..14].copy_from_slice(&(BOOT_HEADER_LEN as u16).to_le_bytes());
+        bytes[16..24].copy_from_slice(&(total_len as u64).to_le_bytes());
+        bytes[24..32].copy_from_slice(&(BOOT_HEADER_LEN as u64).to_le_bytes());
+        bytes[32..40].copy_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
+        bytes[40..48].copy_from_slice(&(elf_offset as u64).to_le_bytes());
+        bytes[48..56].copy_from_slice(&(elf.len() as u64).to_le_bytes());
+        bytes[BOOT_HEADER_LEN..manifest_end].copy_from_slice(&manifest_bytes);
+        bytes[elf_offset..].copy_from_slice(&elf);
+
+        assert_eq!(
+            BootPayload::parse(&bytes),
+            Err(BootPayloadError::BadImageRange)
+        );
+
+        // image bのrangeを領域内へ修正すれば受理される。
+        let fixed = format!("version=2\nimage=a\nelf=0,16\nimage=b\nelf=16,16\n");
+        let fixed_bytes = fixed.into_bytes();
+        let manifest_end = BOOT_HEADER_LEN + fixed_bytes.len();
+        let elf_offset = manifest_end + (8 - manifest_end % 8) % 8;
+        let total_len = elf_offset + elf.len();
+        let mut bytes = vec![0u8; total_len];
+        bytes[0..8].copy_from_slice(b"MINICTR\0");
+        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        bytes[12..14].copy_from_slice(&(BOOT_HEADER_LEN as u16).to_le_bytes());
+        bytes[16..24].copy_from_slice(&(total_len as u64).to_le_bytes());
+        bytes[24..32].copy_from_slice(&(BOOT_HEADER_LEN as u64).to_le_bytes());
+        bytes[32..40].copy_from_slice(&(fixed_bytes.len() as u64).to_le_bytes());
+        bytes[40..48].copy_from_slice(&(elf_offset as u64).to_le_bytes());
+        bytes[48..56].copy_from_slice(&(elf.len() as u64).to_le_bytes());
+        bytes[BOOT_HEADER_LEN..manifest_end].copy_from_slice(&fixed_bytes);
+        bytes[elf_offset..].copy_from_slice(&elf);
+
+        let payload = BootPayload::parse(&bytes).unwrap();
+        let images: Vec<_> = payload.images().collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(payload.image_elf(&images[0]).len(), 16);
+        assert_eq!(payload.image_elf(&images[1]).len(), 16);
+        assert_eq!(payload.image_elf(&images[0]), &elf[..16]);
     }
 
     // Catches trusting padding bytes between the manifest and the ELF.

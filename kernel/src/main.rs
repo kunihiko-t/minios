@@ -1832,6 +1832,14 @@ fn run_boot_payload<const KERNEL_N: usize>(
     payload: BootPayload<'static>,
 ) -> ! {
     let before = frames.stats();
+    // 複数image (manifest v2) の実行はscheduler経路が担う。ここでは単一imageのみ
+    // 受理し、複数imageのbundleは黙って一部だけ実行しないよう明示的に拒否する。
+    let spec = payload.images().next();
+    let Some(spec) = spec.filter(|_| payload.images().nth(1).is_none()) else {
+        fatal_payload_error(format_args!(
+            "MiniOS payload: multi-image bundles are not supported yet\r\n"
+        ));
+    };
     // Safety: このpathは単一boot hartでだけ実行し、このstorageを一度だけ取得する。
     let storage_pointer = &raw mut PAYLOAD_ADDRESS_SPACE_STORAGE;
     let storage = unsafe { storage_pointer.as_mut() }
@@ -1844,7 +1852,7 @@ fn run_boot_payload<const KERNEL_N: usize>(
     }
 
     let image = match load_image_with_kernel_mappings(
-        payload.elf(),
+        payload.image_elf(&spec),
         frames,
         memory,
         storage,
@@ -1854,11 +1862,11 @@ fn run_boot_payload<const KERNEL_N: usize>(
         Err(error) => fatal_payload_error(format_args!("MiniOS payload: load, {error:?}\r\n")),
     };
     // imageはUserRunへmoveされるため、entryとargv blockは先にcontextへ固定する。
-    // manifestのnameとarg=を初期user stackへ積み、a0=argc / a1=argvで起動する。
+    // manifestのimage nameとarg=を初期user stackへ積み、a0=argc / a1=argvで起動する。
     let mut argv: [&str; minios_abi::manifest::ARG_MAX_COUNT + 1] = [""; 17];
-    argv[0] = payload.manifest().name();
+    argv[0] = spec.name();
     let mut argv_len = 1usize;
-    for argument in payload.manifest().args() {
+    for argument in spec.args() {
         argv[argv_len] = argument;
         argv_len += 1;
     }

@@ -409,15 +409,17 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
             let request = bundle::BundleRequest {
                 name: options.name,
                 args: options.args,
+                images: options.images,
                 output: options.output,
             };
             let product = bundle::create_bundle_file(&request)?;
             println!(
-                "wrote {} ({} bytes, name={}, args={}, sha256={})",
+                "wrote {} ({} bytes, name={}, args={}, images={}, sha256={})",
                 product.path.display(),
                 product.total_len,
                 product.name,
                 product.arguments,
+                product.images,
                 hex_digest(&product.digest),
             );
         }

@@ -1,4 +1,4 @@
-//! ビルド済みguest ELFとmanifestからMiniBundle v1を生成する。
+//! ビルド済みguest ELFとmanifestからMiniBundle (v1単一image / v2複数image) を生成する。
 //!
 //! `cargo xtask bundle`はguest binaryのbuildとbundle fileの書き出しを
 //! 一つの開発commandにまとめ、配置とdigestはABI decoderと同じ規約で作る。
@@ -65,11 +65,23 @@ impl fmt::Display for BundleError {
 impl std::error::Error for BundleError {}
 
 /// `cargo xtask bundle`の入力。`None`の項目は既定値を使う。
+/// `images`が空でなければmanifest v2の複数image bundleを生成する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleRequest {
     pub name: Option<String>,
     pub args: Vec<String>,
+    /// 複数image modeのguest bin名。`--image`で順に指定する。
+    pub images: Vec<String>,
     pub output: Option<PathBuf>,
+}
+
+/// 複数image bundleに載せる1 imageの入力。`elf` rangeは連結順の累積offsetから
+/// 生成側が計算するため、ここではbytesだけを渡す。
+#[derive(Debug)]
+pub struct BundleImage<'a> {
+    pub name: &'a str,
+    pub args: &'a [String],
+    pub elf: &'a [u8],
 }
 
 /// 書き出したbundleの要約。digestはcontent addressingに使える。
@@ -79,6 +91,8 @@ pub struct BundleProduct {
     pub total_len: u64,
     pub name: String,
     pub arguments: usize,
+    /// bundle内のimage数。単一image (v1) では1。
+    pub images: usize,
     pub digest: [u8; 32],
 }
 
@@ -103,12 +117,37 @@ impl BuiltBundle {
 
 /// guestのbuildからbundle fileの書き出しまでを一括で実行する。
 pub fn create_bundle_file(request: &BundleRequest) -> Result<BundleProduct, BundleError> {
-    let elf_path = crate::guest::build_guest().map_err(BundleError::GuestBuild)?;
-    let elf = std::fs::read(&elf_path).map_err(|error| BundleError::ReadElf {
-        path: elf_path,
-        message: error.to_string(),
-    })?;
-    assemble_bundle_file(request, &elf)
+    if request.images.is_empty() {
+        let elf_path = crate::guest::build_guest().map_err(BundleError::GuestBuild)?;
+        let elf = std::fs::read(&elf_path).map_err(|error| BundleError::ReadElf {
+            path: elf_path,
+            message: error.to_string(),
+        })?;
+        return assemble_bundle_file(request, &elf);
+    }
+
+    // 複数image mode: `--image`で指定されたguest binを順にbuildし、
+    // manifest v2のbundleへ組み立てる。
+    let mut elfs = Vec::with_capacity(request.images.len());
+    for name in &request.images {
+        let path = crate::guest::build_guest_bin(name).map_err(BundleError::GuestBuild)?;
+        let elf = std::fs::read(&path).map_err(|error| BundleError::ReadElf {
+            path,
+            message: error.to_string(),
+        })?;
+        elfs.push(elf);
+    }
+    let images: Vec<BundleImage<'_>> = request
+        .images
+        .iter()
+        .zip(&elfs)
+        .map(|(name, elf)| BundleImage {
+            name,
+            args: &[],
+            elf,
+        })
+        .collect();
+    assemble_multi_bundle_file(request, &images)
 }
 
 /// 取得済みELFからmanifest生成、bundle組み立て、file書き出しを行う。
@@ -132,8 +171,71 @@ fn assemble_bundle_file(request: &BundleRequest, elf: &[u8]) -> Result<BundlePro
         total_len: bundle.bytes().len() as u64,
         name,
         arguments: request.args.len(),
+        images: 1,
         digest: bundle.digest(),
     })
+}
+
+/// 複数image (manifest v2) のbundleを組み立てて書き出す。
+///
+/// 各imageのELFは`header.elf`領域へ指定順に隙間なく連結し、
+/// `elf=<offset>,<len>`行がその累積offsetを記録する。
+pub fn assemble_multi_bundle_file(
+    request: &BundleRequest,
+    images: &[BundleImage<'_>],
+) -> Result<BundleProduct, BundleError> {
+    let manifest = render_manifest_multi(images)?;
+    let mut elf_area = Vec::new();
+    for image in images {
+        elf_area.extend_from_slice(image.elf);
+    }
+    let bundle = build_bundle(&manifest, &elf_area)?;
+    let output = request.output.clone().unwrap_or_else(default_bundle_path);
+    std::fs::write(&output, bundle.bytes()).map_err(|error| BundleError::Write {
+        path: output.clone(),
+        message: error.to_string(),
+    })?;
+    Ok(BundleProduct {
+        path: output,
+        total_len: bundle.bytes().len() as u64,
+        name: images
+            .first()
+            .map_or(String::new(), |image| image.name.to_owned()),
+        arguments: images.iter().map(|image| image.args.len()).sum(),
+        images: images.len(),
+        digest: bundle.digest(),
+    })
+}
+
+/// manifest v2 (`version=2` + `image=` section列) を生成し、ABI parserで検査する。
+///
+/// `elf=<offset>,<len>`は各imageの連結順累積offsetから求める。
+pub fn render_manifest_multi(images: &[BundleImage<'_>]) -> Result<Vec<u8>, BundleError> {
+    let mut text = String::from("version=2\n");
+    let mut offset = 0u64;
+    for image in images {
+        text.push_str("image=");
+        text.push_str(image.name);
+        text.push('\n');
+        for argument in image.args {
+            text.push_str("arg=");
+            text.push_str(argument);
+            text.push('\n');
+        }
+        text.push_str(&format!("elf={},{}\n", offset, image.elf.len()));
+        offset += image.elf.len() as u64;
+    }
+    let bytes = text.into_bytes();
+    if let Err(source) = Manifest::parse(&bytes) {
+        return Err(BundleError::Manifest {
+            name: images
+                .first()
+                .map_or(String::new(), |image| image.name.to_owned()),
+            arguments: images.iter().map(|image| image.args.len()).sum(),
+            source,
+        });
+    }
+    Ok(bytes)
 }
 
 /// `name`と`arg=`行からmanifest bytesを作り、ABI parserで全制限を検査する。
@@ -495,6 +597,54 @@ mod tests {
         assert_eq!(payload.total_len(), bundle.bytes().len() as u64);
     }
 
+    // Catches a multi-image manifest whose layout (cumulative elf= offsets)
+    // or image metadata the kernel parser would reject, and vice versa: the
+    // bundle the kernel accepts must carry the per-image ranges it declares.
+    #[test]
+    fn multi_image_bundle_passes_the_kernel_decoder() {
+        use minios_kernel::boot_payload::BootPayload;
+
+        let first = crate::guest::guest_bytes();
+        let second = crate::guest::guest_bytes();
+        let images = [
+            super::BundleImage {
+                name: "first",
+                args: &[String::from("alpha")],
+                elf: first,
+            },
+            super::BundleImage {
+                name: "second",
+                args: &[],
+                elf: second,
+            },
+        ];
+        let manifest =
+            super::render_manifest_multi(&images).expect("multi-image manifest must render");
+
+        let parsed = Manifest::parse(&manifest).expect("manifest must parse");
+        assert_eq!(parsed.version(), 2);
+        let declared: Vec<_> = parsed.images().collect();
+        assert_eq!(declared.len(), 2);
+        assert_eq!(declared[0].name(), "first");
+        assert_eq!(declared[0].args().collect::<Vec<_>>(), vec!["alpha"]);
+        assert_eq!(declared[0].elf(), Some(0..first.len() as u64));
+        assert_eq!(declared[1].name(), "second");
+        assert_eq!(
+            declared[1].elf(),
+            Some(first.len() as u64..(first.len() + second.len()) as u64)
+        );
+
+        let mut area = Vec::new();
+        area.extend_from_slice(first);
+        area.extend_from_slice(second);
+        let bundle = build_bundle(&manifest, &area).expect("bundle must fit");
+        let payload = BootPayload::parse(bundle.bytes()).expect("kernel must accept v2 bundle");
+        let payload_images: Vec<_> = payload.images().collect();
+        assert_eq!(payload_images.len(), 2);
+        assert_eq!(payload.image_elf(&payload_images[0]), first);
+        assert_eq!(payload.image_elf(&payload_images[1]), second);
+    }
+
     // Catches a `bundle` command path that ignores the requested manifest,
     // misapplies the defaults, or writes bytes that fail the ABI decoder.
     // The guest ELF comes from the shared test-process build; the QEMU
@@ -513,6 +663,7 @@ mod tests {
             &BundleRequest {
                 name: None,
                 args: vec!["alpha".to_owned(), "bravo".to_owned()],
+                images: vec![],
                 output: Some(output.clone()),
             },
             crate::guest::guest_bytes(),
@@ -530,6 +681,7 @@ mod tests {
             total_len: bytes.len() as u64,
             name: super::DEFAULT_BUNDLE_NAME.to_owned(),
             arguments: 2,
+            images: 1,
             digest: header.digest,
         };
         assert_eq!(product, expected);
