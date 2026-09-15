@@ -8,8 +8,8 @@ payloadの使用pageだけをS-mode read-onlyでmapし、QEMU loaderからproduc
 
 ## 背景
 
-QEMU `virt`の128 MiB RAMでは、`0x8780_0000..0x8800_0000`をboot payload専用windowとして予約します。
-このwindowをallocatorのmanaged rangeから外すため、user imageのpageやpage tableがpayload byteを上書きしません。
+QEMU `virt`の128 MiB RAMでは、`0x8780_0000..0x87e0_0000`をboot payload専用windowとして予約します。
+直上の`0x87e0_0000..0x8800_0000`はQEMUがDTBを置くFDT予約領域であり、二つともallocatorのmanaged rangeから外すため、user imageのpageやpage tableがpayload byteやDTBを上書きしません。
 
 payloadはカーネルが所有するコピーではなく、予約windowを借用するbyte sliceです。
 したがって実行中の所有frameは回収できますが、loaderが配置したpayload自体をallocatorへ返すことはありません。

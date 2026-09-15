@@ -42,7 +42,7 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
 
 ### 時刻
 
-- `time.rs`：10 MHzと100 Hzの定数、`ticks_to_millis`、`ticks`、`uptime_millis`をホストとゲストへ公開します。
+- `time.rs`：FDTの`/cpus`から発見したtimebaseと100 Hzのティック周波数、`ticks_to_millis`、`ticks`、`uptime_millis`をホストとゲストへ公開します。
   RISC-V側では、最初のSBI deadline、STIEとSIE、割り込みごとのtick加算と再予約を担当します。
 
 ### 物理メモリー
@@ -51,7 +51,11 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
   `FrameAllocator::new`は、未所有の排他的な物理範囲を取得する`unsafe`な境界です。
   4 KiBのalignmentと容量は実装が検査します。
   `Clone`でも`Copy`でもない`PhysFrame`と、その値を消費する`deallocate`により、取得後のページ所有権をsafe codeから複製または偽造できません。
-  allocatorの上端はboot payload開始位置の`0x8780_0000`であり、`0x8780_0000..0x8800_0000`を割り当てません。
+  allocatorの上端はヒープ領域の直下であり、ヒープ、payload窓、FDT予約を合わせた`0x8770_0000..0x8800_0000`を割り当てません。
+  各境界は実行時に`fdt::MachineSpec`がDTBから導きます。
+- `memory/heap.rs`：managed RAM末尾の1 MiB固定領域を16バイト粒度で分割するfirst-fit free-listヒープを提供します。
+  `dealloc`はaddress昇順の空きリストへ挿入して隣接ブロックを併合し、二重解放と領域外ポインターを拒否します。
+  `#[global_allocator]`経由で`alloc` crateへ供給され、単一ハートかつ割り込み内で割り当てない規約を前提とします。
 - `memory/mod.rs`：物理メモリーの定数、リンカーセクションを検査する`KernelSections`、フレーム管理の名前空間を提供します。
   汎用ヒープは扱いません。
 
@@ -98,7 +102,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 - `shell/command.rs`：前後の空白を除いた入力をcommand列挙型へ分類するだけで、UARTとglobal状態へ作用しません。
 - `shell/mod.rs`：UARTのpollingとecho、prompt、commandの振り分けを担当します。
   RV64ではtimerの読み取り用APIと一つだけ存在するallocatorへの参照を使い、`shutdown`をSBI reset境界へ渡します。
-  RV32では`help`、`info`、`echo`だけを実行し、CRLFのLFを一度だけ読み飛ばします。
+  RV32では`uptime`を`cycle`カウンターから、`memory`をIMEM/DMEMのリンカー境界から求め、`shutdown`を`wfi`による停止として実行し、CRLFのLFを一度だけ読み飛ばします。
 
 ### ホストでテストできるライブラリー
 

@@ -1,8 +1,20 @@
 pub mod frame;
+pub mod heap;
 
+// この節の定数はQEMU `virt` `-m 128M`の参照レイアウトである。
+// 実行時はDTBから組み立てた`fdt::MachineSpec`が同じ値を導き、
+// kernelはspec側の値で動く。こちらはホストテストと文書の期待値として残す。
 pub const PHYSICAL_MEMORY_END: usize = 0x8780_0000;
 pub const BOOT_PAYLOAD_START: usize = 0x8780_0000;
-pub const BOOT_PAYLOAD_END: usize = 0x8800_0000;
+/// QEMUがDTBを置く最終2 MiBを残した、payload窓の排他的な上端。
+pub const BOOT_PAYLOAD_END: usize = 0x87e0_0000;
+/// QEMU `virt`がFDTを書き込む`0x87e0_0000..0x8800_0000`の予約領域。
+pub const FDT_RESERVED_START: usize = 0x87e0_0000;
+pub const FDT_RESERVED_END: usize = 0x8800_0000;
+/// managed RAMの末尾へ切り出すヒープ領域の長さ。
+/// `FrameAllocator`の管理上端はこの分だけ`managed_end`より下になる。
+/// QEMU `virt` `-m 128M`ではヒープは`0x8770_0000..0x8780_0000`となる。
+pub const KERNEL_HEAP_LEN: usize = 1024 * 1024;
 
 #[allow(dead_code)]
 pub struct KernelSections {

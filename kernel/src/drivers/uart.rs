@@ -1,7 +1,11 @@
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-// QEMU virtの16550互換UARTに予約された、固定のMMIOベースアドレスである。
-const UART_BASE: usize = 0x1000_0000;
+// QEMU virtの16550互換UARTに予約されたMMIOベースアドレスの既定値である。
+// `kernel_main`はFDTから得た値で上書きする。FDT解析に失敗した場合の
+// 緊急診断だけが、この既定値を頼りにする。
+const QEMU_VIRT_UART_BASE: usize = 0x1000_0000;
+static UART_BASE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_UART_BASE);
 const LINE_STATUS_OFFSET: usize = 5;
 const RECEIVE_READY: u8 = 1 << 0;
 const TRANSMIT_READY: u8 = 1 << 5;
@@ -11,16 +15,17 @@ pub struct Uart {
 }
 
 impl Uart {
-    pub const fn qemu_virt() -> Self {
-        // Safety: `UART_BASE`はQEMU virtの仕様でUARTレジスターを指す固定アドレスである。
-        // この型はRISC-V向けQEMUカーネルだけで使うため、生ポインターの参照先はMMIO領域に限られる。
-        Self {
-            base: UART_BASE as *mut u8,
-        }
+    /// FDTの`ns16550a`nodeから発見したUARTベースを登録する。
+    /// `kernel_main`が一度だけ呼ぶ。
+    pub fn set_base(base: usize) {
+        UART_BASE.store(base, Ordering::Relaxed);
     }
 
-    pub const fn for_target() -> Self {
-        Self::qemu_virt()
+    /// 登録済みのUARTベースでdriverを作る。`set_base`前はQEMU `virt`の既定値を使う。
+    pub fn for_target() -> Self {
+        Self {
+            base: UART_BASE.load(Ordering::Relaxed) as *mut u8,
+        }
     }
 
     pub fn write_byte(&mut self, byte: u8) {

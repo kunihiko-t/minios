@@ -9,7 +9,7 @@ use minios_abi::manifest::{Manifest, ManifestError};
 /// 予約窓の検証に失敗した理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootPayloadError {
-    /// `total_len`が予約窓 (8 MiB) を超えた。
+    /// `total_len`が予約窓 (`BUNDLE_MAX_LEN`) を超えた。
     HeaderTooLarge,
     /// header自体がABI契約に反する。
     Header(BootHeaderError),
@@ -34,8 +34,9 @@ impl BootPayloadError {
 
 /// 予約窓から検証済みのmanifestとELF rangeを借りるpayload。
 ///
-/// bytesは`0x8780_0000..0x8800_0000`の予約窓の内容であり、manifest rangeと
-/// ELF rangeは[`Self::parse`]が二段階の検証を終えた後でのみ貸し出す。
+/// bytesはmachine記述が導く予約窓 (QEMU `virt`では`0x8780_0000..0x87e0_0000`)
+/// の内容であり、manifest rangeとELF rangeは[`Self::parse`]が二段階の検証を
+/// 終えた後でのみ貸し出す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootPayload<'a> {
     header: BootHeader,
@@ -69,48 +70,46 @@ impl<'a> BootPayload<'a> {
         })
     }
 
-    /// production入口: 予約窓`BOOT_PAYLOAD_START..BOOT_PAYLOAD_END`を直接検証する。
+    /// production入口: machine記述の導く予約窓`window`を直接検証する。
     ///
     /// # Safety
     ///
-    /// 呼び出し側は、QEMUが`-m 128M`で起動しており`-device loader`が予約窓
-    /// `0x8780_0000..0x8800_0000`を有効なRAMとして配置すること、kernel実行中に
-    /// この範囲を他の所有者が書き換えないことを保証しなければならない。
+    /// 呼び出し側は、QEMUが`-device loader`で`window`を有効なRAMとして
+    /// 配置すること、kernel実行中にこの範囲を他の所有者が書き換えないことを
+    /// 保証しなければならない。`window`の長さは`BUNDLE_MAX_LEN`以下である。
     /// 返る`BootPayload`は予約窓の物理memoryを`'static`として借りる。
     /// この関数はaddress spaceを切り替える前のbare mode (VA==PA) で呼ぶか、
     /// 予約窓がS-modeから読めるmapping済みの状態で呼ぶこと。
-    pub unsafe fn from_reserved_window() -> Result<Self, BootPayloadError> {
+    pub unsafe fn from_reserved_window(window: Range<usize>) -> Result<Self, BootPayloadError> {
         // 最初の96 byteだけを読み、headerと窓上限を確定させてから残りを見る。
         let header = {
             // Safety: この関数のSafety契約が予約窓の有効性を保証する。
-            let header_bytes = unsafe {
-                core::slice::from_raw_parts(BOOT_PAYLOAD_START as *const u8, BOOT_HEADER_LEN)
-            };
+            let header_bytes =
+                unsafe { core::slice::from_raw_parts(window.start as *const u8, BOOT_HEADER_LEN) };
             BootHeader::decode(header_bytes).map_err(BootPayloadError::from_header)?
         };
-        if header.total_len > (BOOT_PAYLOAD_END - BOOT_PAYLOAD_START) as u64 {
+        if header.total_len > (window.end - window.start) as u64 {
             return Err(BootPayloadError::HeaderTooLarge);
         }
         let total_len =
             usize::try_from(header.total_len).map_err(|_| BootPayloadError::WindowTooShort)?;
         // Safety: header検証済みの`total_len`が予約窓内に収まる。
-        let window =
-            unsafe { core::slice::from_raw_parts(BOOT_PAYLOAD_START as *const u8, total_len) };
-        Self::validate_window(&header, window).map(|(manifest, elf)| Self {
+        let bytes = unsafe { core::slice::from_raw_parts(window.start as *const u8, total_len) };
+        Self::validate_window(&header, bytes).map(|(manifest, elf)| Self {
             header,
             manifest,
             elf,
         })
     }
 
-    /// 予約窓がbundleのmagicで始まるかを確認する。
+    /// 予約窓の先頭`start`がbundleのmagicで始まるかを確認する。
     ///
     /// # Safety
     ///
     /// [`Self::from_reserved_window`]と同じ呼び出し側の保証を要求する。
-    pub unsafe fn reserved_window_has_bundle() -> bool {
+    pub unsafe fn reserved_window_has_bundle(start: usize) -> bool {
         // Safety: この関数のSafety契約が予約窓の有効性を保証する。
-        let prefix = unsafe { core::slice::from_raw_parts(BOOT_PAYLOAD_START as *const u8, 8) };
+        let prefix = unsafe { core::slice::from_raw_parts(start as *const u8, 8) };
         prefix == BOOT_MAGIC
     }
 

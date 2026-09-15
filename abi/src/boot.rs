@@ -2,7 +2,9 @@ pub const BOOT_MAGIC: [u8; 8] = *b"MINICTR\0";
 pub const BOOT_ABI_MAJOR: u16 = 1;
 pub const BOOT_ABI_MINOR: u16 = 1;
 pub const BOOT_HEADER_LEN: usize = 96;
-pub const BUNDLE_MAX_LEN: u64 = 8 * 1024 * 1024;
+// QEMU `virt`はFDTをDRAM上端の2 MiB予約領域へ置く。payload窓はその直下にあり、
+// bundleがFDTを上書きしないよう上限は6 MiBである。
+pub const BUNDLE_MAX_LEN: u64 = 6 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ByteRange {

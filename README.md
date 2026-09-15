@@ -71,8 +71,8 @@ cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none
 このELFは、`pc=0`からM-modeで始まり、IMEMに続けて格納した`.data`の初期値をDMEMへコピーしてからBSSをゼロ化します。
 実機へ書き込む形式と手順は、NEORV32を組み込んだFPGA構成に合わせて選んでください。
 
-起動後のRV32シェルは`help`、`info`、`echo`を実行できます。
-RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`command unavailable on RV32`を返します。
+起動後のRV32シェルは`help`、`info`、`uptime`、`memory`、`echo`、`ls`、`cat`、`clear`、`shutdown`を実行できます。
+`uptime`は`cycle`カウンターをシステムクロックで換算し、`memory`はIMEM/DMEMの占有量を表示し、`shutdown`は`wfi`でCPUを停止します。
 `cargo xtask check`はRV32のClippyとreleaseビルドまで検査しますが、実機UARTの動作確認は開発者が行います。
 
 ## 学習ガイド
@@ -117,15 +117,16 @@ RV64側の`uptime`、`memory`、`clear`、`shutdown`を入力すると、`comman
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの14経路を29段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの16経路を31段階で検査します。
 
 ## 現在の制約
 
 MiniOSが実行対象にするのは、MiniBundleへ格納した静的RISC-V 64 ELFだけです。
 OCI image、network、volume、Linux binary互換、multi-tenant isolation、Windowsは保証しません。
-動的ヒープ、プロセス管理、VirtIO、ファイルシステム、network、マルチハート、Device Tree解析、NEORV32以外の実機driverは未実装です。
+プロセス管理、VirtIO、ファイルシステム、network、マルチハート、NEORV32以外の実機driverは未実装です。
+ヒープはmanaged RAM末尾の固定1 MiB領域に限り、フレームアロケーターからの動的拡張は行いません。
 `write`はstdoutとstderrだけを扱い、`exit`は一つのU-mode実行をkernelへ戻します。
-ハードウェアアドレス、10 MHzのタイムベース、128 MiBの上端はQEMU `virt`に固定しています。
+ハードウェアアドレス、タイムベース、RAMの上端はOpenSBIが渡すDevice Treeから発見しますが、対象machineはQEMU `virt`の配置契約に限定しています。
 シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
 永続ストレージとセキュリティー境界は提供しません。
 

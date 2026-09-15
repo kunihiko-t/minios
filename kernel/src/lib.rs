@@ -17,6 +17,10 @@ pub mod boot_payload;
 // RV32 lib build以外は常時compileする。中身は純粋な検証logicである。
 #[cfg(not(target_arch = "riscv32"))]
 pub mod elf;
+// FDTパーサーはu64アドレス前提のためRV32のlibビルドから外す。
+// NEORV32実機経路にはDTBが存在しない。ホストテストでは検証を続ける。
+#[cfg(not(target_arch = "riscv32"))]
+pub mod fdt;
 // `frame.rs`のビットマップとID採番はu64前提のため、RV32のlibビルドから外す。
 // RV32用アロケーターは幅汎化と合わせて別途対応する。ホストテストでは検証を続ける。
 #[cfg(not(target_arch = "riscv32"))]
@@ -42,7 +46,9 @@ mod tests {
     fn managed_memory_stops_before_the_boot_payload_window() {
         assert_eq!(memory::PHYSICAL_MEMORY_END, 0x8780_0000);
         assert_eq!(memory::BOOT_PAYLOAD_START, memory::PHYSICAL_MEMORY_END);
-        assert_eq!(memory::BOOT_PAYLOAD_END, 0x8800_0000);
+        assert_eq!(memory::BOOT_PAYLOAD_END, 0x87e0_0000);
+        assert_eq!(memory::FDT_RESERVED_START, memory::BOOT_PAYLOAD_END);
+        assert_eq!(memory::FDT_RESERVED_END, 0x8800_0000);
     }
 
     #[test]

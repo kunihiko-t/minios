@@ -28,7 +28,9 @@ OpenSBIから受け取ったハートIDは、`run(hart_id, ...)`からコマン�
 二つの読み取りの間にもタイマー割り込みが入る可能性があるため、値の組を同じ瞬間の観測とは見なさず、それぞれが単調に増えることだけを利用します。
 
 RV32側も同じ`LineBuffer`と`parse_command`を使います。
-NEORV32にはSBIタイマー、物理ページアロケーター、端末を消去する規約がないため、実行できるコマンドを`help`、`info`、`echo`に絞っています。
+NEORV32にはSBIタイマーと物理ページアロケーターがないため、対応するコマンドは別の情報源を使います。
+`uptime`は64ビットの`cycle`カウンターを96 MHzのシステムクロックで換算し、`memory`はリンカー記号から得たIMEM/DMEMの占有量を表示します。
+`clear`は端末側が解釈する同じエスケープ列を使い、`shutdown`は電源切断機構を持たないCPUを`wfi`で恒久的に停止します。
 CRLFを送る端末では、CRでコマンドを確定した直後のLFを一度だけ読み飛ばし、空のコマンドが続けて実行されることを防ぎます。
 
 ## 実行と確認
@@ -65,10 +67,22 @@ hart id: 0
 minios> help
 help      Show available commands
 info      Show system information
+uptime    Show elapsed time
+memory    Show memory usage
 echo      Echo text
+ls        List root directory
+cat       Read a root file
+clear     Clear the terminal
+shutdown  Halt the CPU
 minios> echo hello
 hello
+minios> memory
+imem: 15240 / 32768 bytes
+dmem: 1096 / 16192 bytes
 ```
+
+IMEM/DMEMの占有量は、カーネルイメージの大きさによって変わります。
+`shutdown`は表示の後にCPUを停止し、UARTも応答しなくなります。
 
 ## よくある失敗
 

@@ -25,6 +25,11 @@ const USER_TRAP_FAULT_DIAGNOSTIC: &str =
     "MiniOS user trap: scause=0x000000000000000f stval=0x0000000010000000";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
 const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
+// QEMU `virt` -m 128Mが渡すDTBからkernelが発見するmachine記述の期待値。
+const FDT_MARKER: &str =
+    "[MINIOS_TEST] fdt: ram=0x80000000..0x88000000 uart=0x10000000 timebase=10000000";
+// `-m 128M`ではヒープ領域は`0x8770_0000..0x8780_0000`の1 MiBである。
+const HEAP_MARKER: &str = "[MINIOS_TEST] heap: ok";
 const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x01\0";
 /// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
 const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x01\0";
@@ -61,6 +66,8 @@ pub enum TestKind {
     UserTrap,
     UserSyscall,
     UserExit,
+    Fdt,
+    Heap,
     Payload,
     PayloadArgs,
     PayloadStdin,
@@ -80,6 +87,8 @@ impl TestKind {
             Self::UserTrap => "qemu-test-user-trap",
             Self::UserSyscall => "qemu-test-user-syscall",
             Self::UserExit => "qemu-test-user-exit",
+            Self::Fdt => "qemu-test-fdt",
+            Self::Heap => "qemu-test-heap",
             Self::Payload => unreachable!("the payload test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -99,6 +108,8 @@ impl TestKind {
             Self::UserTrap => USER_TRAP_REJECTED_MARKER,
             Self::UserSyscall => USER_SYSCALL_MARKER,
             Self::UserExit => USER_EXIT_MARKER,
+            Self::Fdt => FDT_MARKER,
+            Self::Heap => HEAP_MARKER,
             Self::Payload => unreachable!("the payload test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {

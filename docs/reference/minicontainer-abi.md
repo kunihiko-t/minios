@@ -8,7 +8,7 @@
 ## MiniBundle v1
 
 MiniBundle v1は、96バイトの固定header、UTF-8 manifest、8バイト境界までのゼロpadding、静的ELFの順に並ぶ単一ファイルです。
-bundle全体の長さは8 MiB以下です。
+bundle全体の長さは6 MiB以下です。
 Rustの構造体をそのままメモリーへ配置せず、各fieldを次のoffsetから読んでください。
 
 | offset | size | field | v1の値と意味 |

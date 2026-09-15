@@ -1,11 +1,12 @@
 use core::fmt;
 
+use crate::arch::riscv32::SYSTEM_CLOCK_HZ;
+
 // NEORV32のプライマリーUART(UART0)の固定MMIOベースアドレスである。
 const UART_BASE: usize = 0xFFF5_0000;
 const CTRL_OFFSET: usize = 0x00;
 const DATA_OFFSET: usize = 0x04;
-// NEORV32のデータシートが規定する96 MHz基準クロックと19,200 baudである。
-const SYSTEM_CLOCK_HZ: u32 = 96_000_000;
+// NEORV32のデータシートが規定する19,200 baudである。
 const BAUD_RATE: u32 = 19_200;
 // `neorv32_uart.vhd`のCTRLビット定義である。
 const TX_FULL: u32 = 1 << 21;

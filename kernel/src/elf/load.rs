@@ -420,7 +420,7 @@ mod tests {
             0x8021_5000,
         )
         .unwrap();
-        KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000).unwrap()
+        KernelMapPlan::new(&sections, 0x8021_5000, 0x8780_0000, 0x1000_0000).unwrap()
     }
 
     // Catches borrowing kernel pages with the U bit set, dropping a borrowed

@@ -4,7 +4,7 @@
 
 OSの実装順を、すべての将来機能に共通する一本道ではなく、今回の受け入れ条件に必要な依存関係として説明できるようになります。
 Device Treeと汎用ヒープをSv39より先に置いた旧順序と、固定容量の単一アドレス空間を先行させた現在の順序を比較します。
-実装済みのU-mode遷移、user trap context、`write`、`exit`、boot payloadを確認し、その後の拡張を考えます。
+実装済みのU-mode遷移、user trap context、`write`、`exit`、boot payload、Device Treeを確認し、その後の拡張を考えます。
 
 ## 背景
 
@@ -12,15 +12,17 @@ Device Treeと汎用ヒープをSv39より先に置いた旧順序と、固定�
 この順序は複数のmachineと可変個のアドレス空間へ広げやすい一方、ハードウェア発見、動的確保、仮想メモリーの失敗を同じ段階へ持ち込みます。
 
 MiniContainerの最初の実行単位に必要なのは、QEMU `virt`上で一つのユーザーイメージを配置できるアドレス空間です。
-そこで現在の実装は、固定された128 MiB RAMとUARTの配置を維持し、2,688個までの所有フレームを静的な`AddressSpaceStorage`へ記録しました。
+そこでSv39とELF loaderの段階では、固定された128 MiB RAMとUARTの配置を維持し、2,688個までの所有フレームを静的な`AddressSpaceStorage`へ記録しました。
 この上限に収まる一つのactiveなカーネル空間と一つのinactiveなユーザー空間に対象を絞ったため、Device Treeと汎用ヒープを前提にせずSv39とELF loaderを先に検証できました。
 
-この順序変更は「Device Treeとヒープが不要になった」ことを意味しません。
-固定アドレスと固定容量を複数machine、複数process、動的な実行数へ広げる段階では、ハードウェア記述と失敗可能な動的確保が必要になります。
+この順序変更は「Device Treeとヒープが不要になった」ことを意味しませんでした。
+Device Tree対応は完了しており、`kernel_main`はOpenSBIが`a1`へ渡すDTBからRAM範囲、UARTベース、timebaseを発見し、固定アドレスへの依存をmachine記述へ置き換えました。
+汎用ヒープも導入済みであり、managed RAM末尾の固定領域をfree-listで管理して`alloc` crateの`Box`と`Vec`を利用できます。
+残る固定容量を複数processや動的な実行数へ広げる段階では、このヒープをフレームアロケーターから成長させる拡張が必要になります。
 
 ## 実装
 
-物理フレームアロケーター、Sv39のactiveなカーネル空間、静的RISC-V 64 ELFから作る`LoadedImage`、U-mode実行、MiniBundle payloadが完成しています。
+物理フレームアロケーター、Sv39のactiveなカーネル空間、静的RISC-V 64 ELFから作る`LoadedImage`、U-mode実行、MiniBundle payload、DTBからmachine記述を発見するDevice Tree解析、固定領域上のfree-listヒープが完成しています。
 実行済みの接続は次のとおりです。
 
 1. **U-mode遷移とuser trap context**：`LoadedImage`のentryとuser stack上端から初期registerを作り、`sscratch`を使うkernel stackへtrapを保存して`sret`します。
@@ -28,16 +30,17 @@ MiniContainerの最初の実行単位に必要なのは、QEMU `virt`上で一�
 3. **`exit` system call**：終了codeをExit frameで通知し、user address spaceとkernel trap stackの所有frameを回収します。
 4. **MiniBundle payload統合**：予約物理windowからMiniBundle内のELFを二段階で検証し、使用pageだけをS-mode read-onlyでmapします。
 
-NEORV32向けには、RV32IMのM-mode起動、IMEMからDMEMへの`.data`コピー、UART0、`help`、`info`、`echo`を持つ対話シェルまでを実装しています。
+NEORV32向けには、RV32IMのM-mode起動、IMEMからDMEMへの`.data`コピー、UART0、SD/FAT32の読み出し、`help`、`info`、`uptime`、`memory`、`echo`、`ls`、`cat`、`clear`、`shutdown`を持つ対話シェルまでを実装しています。
 この実機経路は、QEMU側のSv39やU-modeを前提にせず、共通のコンソールと入力処理を別のハードウェアへ接続します。
 
-Device Treeと汎用ヒープは、QEMU `virt`の固定値を外す段階と、固定容量の単一アドレス空間を越える段階で導入します。
+Device Tree解析は、QEMU `virt`の固定値をmachine記述へ置き換える段階として導入済みです。
+汎用ヒープも固定領域上のfree-listとして導入済みであり、ヒープ領域の動的拡張は固定容量の単一アドレス空間を越える段階で進めます。
 その後にprocessとscheduler、VirtIO、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
 各段階の完了条件は[発展ロードマップ](../reference/roadmap.md)にあります。
 
 ## 実行と確認
 
-実装後の全検査には、29段階のrelease gateを実行します。
+実装後の全検査には、31段階のrelease gateを実行します。
 
 ```sh
 cargo xtask check
@@ -49,7 +52,8 @@ U-mode遷移にはentryと特権levelを観測するQEMU markerがあり、`writ
 
 ## よくある失敗
 
-- 旧順序を現在の必須条件として残す：現在のSv39とELF loaderはDevice Treeも汎用ヒープも使わず、固定容量の所有権表で動いています。
+- 旧順序を現在の必須条件として残す：Sv39とELF loaderは汎用ヒープを使わず、固定容量の所有権表で動いています。
+  Device Treeはmachine記述を発見するだけであり、動的確保の前提ではありません。
 - `LoadedImage`を常に実行中と記述する：ELF loaderが返した直後はinactiveであり、`UserRun`がkernel mappingとtrap stackを加えた後だけ`sret`します。
 - U-mode実行をLinux互換と記述する：実装するsystem callは`write`と`exit`だけであり、Linux ABI全体は提供しません。
 - payload統合でELF loaderを作り直す：MiniBundleから得たELF byte sliceを既存の検証とmaterializeへ渡し、所有権とrollbackの規約を一つに保ちます。
@@ -58,7 +62,7 @@ U-mode遷移にはentryと特権levelを観測するQEMU markerがあり、`writ
 ## 演習
 
 U-mode遷移、`write`、`exit`の三項目について、直接の前提、hostで検査できる純粋ロジック、QEMUでしか観測できない状態、失敗時に回収する所有物を四列の表へ整理してください。
-次に、Device Treeまたは汎用ヒープを先行させた場合に各列がどう増えるかを書き足してください。
+次に、汎用ヒープを先行させた場合に各列がどう増えるかを書き足してください。
 追加した依存が最初の`write`と`exit`の受け入れ条件に必要かを調べ、不要なら後続段階へ戻します。
 
 ## 次の章
