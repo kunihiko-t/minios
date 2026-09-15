@@ -28,6 +28,11 @@ pub trait ControlSource {
 
     /// 次の入力を`output`へ移す。戻り値はbyte数であり、0はEOFである。
     fn read_stdin(&mut self, output: &mut [u8]) -> Result<usize, Self::Error>;
+
+    /// `read_stdin`が入力待ちで停まらずに進めるか。staging済みbyteの存在、
+    /// EOF到達済み、または受信側に未読byteがあれば`true`を返す。
+    /// `false`のとき`read_stdin`は入力待ちで停まる可能性がある。
+    fn stdin_ready(&mut self) -> bool;
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -46,6 +51,10 @@ pub enum SyscallFlow<E, SE = E> {
     /// `a0`へ`len`を書いて戻る。4 KiBを値で返さないのは、trap stackの
     /// 多重frameでoverflowさせないためである。
     ReadComplete { start: u64, len: usize },
+    /// `read`の検証は通ったが入力が未到着である。`sepc`はecallへ戻してあり、
+    /// 入力到着後の再開で同じsyscallがやり直される。schedulerはこのprocessを
+    /// stdin待ちへ回し、他のrunnable processを動かせる。
+    Blocked,
 }
 
 /// `a7`のsystem call番号に従って`context`を処理する。
@@ -53,7 +62,8 @@ pub enum SyscallFlow<E, SE = E> {
 /// guest pointerをRust参照として解することなく、`write`は1回の検証付きcopyと
 /// 1回の`sink.frame`で処理し、戻り値を`a0`へ書き込む。descriptorは1と2だけを
 /// 許可し、4,096 byteを超える長さは拒否する。`read`はdescriptor 0だけを許可し、
-/// 書き込み検証を通してから1回の`source.read_stdin`で`read_scratch`へ受信し、
+/// 書き込み検証を通してから`source.stdin_ready`を確認し、未到着なら`Blocked`、
+/// 到着済みなら1回の`source.read_stdin`で`read_scratch`へ受信する。
 /// userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは呼び出し側が
 /// 1個だけ持ち、多重frameへ4 KiBを複製しない。
 pub fn dispatch_syscall<const N: usize, M: FrameStore, S: ControlSink, R: ControlSource>(
@@ -102,6 +112,12 @@ fn dispatch_read<const N: usize, M: FrameStore, E, R: ControlSource>(
     if check_user_writable_range(space, memory, start, len).is_err() {
         context.set_register(10, EFAULT as usize);
         return SyscallFlow::Resume;
+    }
+    // 入力未到着ならここで停まる代わりにBlockedを返す。`sepc`はclassifyが
+    // ecallの次へ進めてあるため、4 byte戻して再開時に同じecallをやり直す。
+    if !source.stdin_ready() {
+        context.set_sepc(context.sepc() - 4);
+        return SyscallFlow::Blocked;
     }
 
     match source.read_stdin(&mut read_scratch[..len]) {
@@ -320,6 +336,7 @@ mod tests {
         position: usize,
         fail: bool,
         reads: usize,
+        ready: bool,
     }
 
     impl FakeSource {
@@ -329,6 +346,14 @@ mod tests {
                 position: 0,
                 fail: false,
                 reads: 0,
+                ready: true,
+            }
+        }
+
+        fn not_ready() -> Self {
+            Self {
+                ready: false,
+                ..Self::scripted(b"")
             }
         }
     }
@@ -346,6 +371,10 @@ mod tests {
             output[..count].copy_from_slice(&available[..count]);
             self.position += count;
             Ok(count)
+        }
+
+        fn stdin_ready(&mut self) -> bool {
+            self.ready
         }
     }
 
@@ -382,6 +411,39 @@ mod tests {
         builder.copy_into(page, 0, MESSAGE).unwrap();
         let space = builder.finish();
         let mut context = syscall_context(number, a0, a1, a2);
+        let flow = dispatch_syscall(&mut context, &space, &memory, sink, source, read_scratch);
+        (context, flow)
+    }
+
+    /// `dispatch_fixture`と同じ空間を組み、既存のcontextを引き継いでdispatchする。
+    /// `Blocked`からの再開 (同じecallの再実行) を再現するテストが使う。
+    fn dispatch_fixture_at<R: ControlSource<Error = SinkError>>(
+        mut context: UserContext,
+        number: usize,
+        a0: usize,
+        a1: usize,
+        a2: usize,
+        sink: &mut FakeSink,
+        source: &mut R,
+        read_scratch: &mut [u8; MAX_READ_LEN],
+    ) -> (UserContext, SyscallFlow<SinkError>) {
+        let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
+        let mut memory = TestFrameStore::default();
+        let mut storage = AddressSpaceStorage::<2688>::new();
+        let mut builder =
+            AddressSpaceBuilder::new(&mut allocator, &mut memory, &mut storage).unwrap();
+        let page = builder
+            .map_new_zeroed(
+                VirtPage::from_start(MESSAGE_PAGE as u64).unwrap(),
+                PageFlags::new(true, true, false, true).unwrap(),
+            )
+            .unwrap();
+        builder.copy_into(page, 0, MESSAGE).unwrap();
+        let space = builder.finish();
+        context.set_register(17, number);
+        context.set_register(10, a0);
+        context.set_register(11, a1);
+        context.set_register(12, a2);
         let flow = dispatch_syscall(&mut context, &space, &memory, sink, source, read_scratch);
         (context, flow)
     }
@@ -577,6 +639,12 @@ mod tests {
                     .read(&mut self.reader, output)
                     .map_err(|_| SinkError::Injected)
             }
+
+            fn stdin_ready(&mut self) -> bool {
+                self.staging.has_pending()
+                    || self.staging.is_eof()
+                    || self.reader.position < self.reader.bytes.len()
+            }
         }
 
         let header = |len: u32| {
@@ -748,6 +816,94 @@ mod tests {
         assert_eq!(context.register(10), 0);
         assert_eq!(source.reads, 0);
         assert!(sink.frames.is_empty());
+    }
+
+    // Catches a blocked read consuming input state or forgetting to rewind
+    // sepc: with no input pending, dispatch must return Blocked, leave a0
+    // and the script untouched, and point sepc back at the ecall so resume
+    // retries the same syscall.
+    #[test]
+    fn read_without_ready_input_blocks_and_rewinds_sepc() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::not_ready();
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Blocked);
+        // classifyはsepcをecallの次 (+4) へ進めてからdispatchするため、
+        // Blockedはその4 byte分だけ戻した位置を指す。
+        assert_eq!(context.sepc(), 0x0010_0500 - 4);
+        assert_eq!(context.register(10), STDIN);
+        assert_eq!(source.reads, 0);
+        assert!(sink.frames.is_empty());
+    }
+
+    // Catches the readiness check running before argument validation: an
+    // invalid read must keep reporting its error even when input is pending
+    // or absent, and must not mark the process blocked.
+    #[test]
+    fn read_validation_errors_precede_the_blocked_check() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::not_ready();
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDOUT,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EBADF as usize);
+        assert_eq!(context.sepc(), 0x0010_0500);
+    }
+
+    // Catches a woken reader failing to complete: once input arrives, the
+    // retried ecall must run the normal read path and finish.
+    #[test]
+    fn read_completes_after_input_arrives() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::not_ready();
+        let mut scratch_buf = scratch();
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+        assert_eq!(flow, SyscallFlow::Blocked);
+
+        source.ready = true;
+        source.script = Vec::from(&b"hi"[..]);
+        // 再開で同じecallが再実行され、sepcは再び+4された状態でdispatchへ来る。
+        let mut context = context;
+        context.set_sepc(context.sepc() + 4);
+        let (context, flow) = dispatch_fixture_at(
+            context,
+            READ_NUMBER,
+            STDIN,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+
+        let (start, len) = read_completion(flow);
+        assert_eq!((start, len), (MESSAGE_PAGE as u64, 2));
+        assert_eq!(context.register(10), STDIN);
     }
 
     // Catches resuming after a source failure or clobbering the guest context.

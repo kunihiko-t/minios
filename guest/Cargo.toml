@@ -38,3 +38,10 @@ path = "src/bin/sched_b.rs"
 test = false
 bench = false
 doctest = false
+
+[[bin]]
+name = "minios-guest-sched-r"
+path = "src/bin/sched_r.rs"
+test = false
+bench = false
+doctest = false

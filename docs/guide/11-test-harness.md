@@ -4,7 +4,7 @@
 
 `cargo xtask`をローカル開発とCIの共通入口にする理由を学びます。
 読み終えると、ホスト単体テストとRISC-Vゲスト統合テストの違い、QEMUのマーカーモードと対話モード、時間切れになったプロセスの回収、対話記録の読み方を説明できるようになります。
-`cargo xtask check`が実行する32段階の順序も確認します。
+`cargo xtask check`が実行する33段階の順序も確認します。
 
 ## 背景
 
@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|sched|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|sched|sched-io|shell]
 cargo xtask check
 ```
 
@@ -63,9 +63,10 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 16. QEMU payload-argsテスト
 17. QEMU payload-stdinテスト
 18. QEMU schedテスト
-19. QEMUシェルテスト
+19. QEMU sched-ioテスト
+20. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、payload、payload-args、payload-stdin、スケジューラー、対話シェルという依存関係の順にゲストの17経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、payload、payload-args、payload-stdin、スケジューラー、stdin待ちprocessを含むスケジューラー、対話シェルという依存関係の順にゲストの18経路を確認します。
 
 ### QEMUの三つの検証モード
 
@@ -90,12 +91,14 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`sched`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
 `sched`ではmanifest v2の二つのimageを通常カーネルへ渡し、busy-waitするprocessの出力`a1`と`a3`の間に短命processの`b1`が挟まること、二つの`ProcExit`frameが届くこと、回収診断が`switches`を1以上として報告することを要求します。
 この順序条件は、プリエンプションを伴わない逐次実行を確実に弾きます。
+`sched-io`では三つのimageを渡し、`read`でstdin待ちするreader processの`r1`と`r2`の間に、busy-waitするprocessと短命processの出力がすべて挟まることを要求します。
+入力frameは`b3`を観測してから送るため、`b3 < r2`の順序は「block中も他processが進む」ことの直接証拠です。
 
 シェルテストは**対話モード**です。
 通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`not-a-command`、`shutdown`を標準入力へ送ります。
@@ -118,9 +121,9 @@ QEMU起動前にビルドが失敗した場合も、Cargoコマンドにはテ�
 失敗した段階の見出しと、最後に見えた初期化行やマーカーを照合すると、ビルド失敗、ゲスト内の明示的な失敗、停止を区別できます。
 Cargoの子プロセスが失敗した場合も、実行コマンド、終了ステータス、標準出力、標準エラーを表示します。
 
-### `check`が実行する32段階
+### `check`が実行する33段階
 
-`cargo xtask check`は、次の32段階をこの順に実行し、最初の失敗で停止します。
+`cargo xtask check`は、次の33段階をこの順に実行し、最初の失敗で停止します。
 書式検査の直後に教材のリンクと章構造を調べ、その後でコンパイラーを動かします。
 静的検査より前にQEMUを起動しないことと、検査していないバイナリーをゲストテストへ渡さないことが、この順序を固定する理由です。
 
@@ -156,11 +159,12 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 29. QEMU payload-args test
 30. QEMU payload-stdin test
 31. QEMU sched test
-32. QEMU shell test
+32. QEMU sched-io test
+33. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 32 phases`を表示します。
+全段階に成功すると`summary: PASSED all 33 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -194,12 +198,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/32] cargo fmt --all -- --check
-phase 1/32 passed (elapsed: ...s)
+[1/33] cargo fmt --all -- --check
+phase 1/33 passed (elapsed: ...s)
 ...
-[32/32] QEMU shell test
-phase 32/32 passed (elapsed: ...s)
-summary: PASSED all 32 phases (elapsed: ...s)
+[33/33] QEMU shell test
+phase 33/33 passed (elapsed: ...s)
+summary: PASSED all 33 phases (elapsed: ...s)
 ```
 
 この実行例の段階数は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

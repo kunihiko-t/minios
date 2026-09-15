@@ -39,6 +39,7 @@ pub enum TestFilter {
     PayloadArgs,
     PayloadStdin,
     Sched,
+    SchedIo,
     Shell,
 }
 
@@ -56,7 +57,7 @@ pub fn help() -> &'static str {
   cargo xtask run\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
   cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|sched|shell]\n\
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|sched|sched-io|shell]\n\
   cargo xtask check"
 }
 
@@ -108,6 +109,9 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         [command, test] if command == "test" && test == "sched" => {
             Ok(Command::Test(TestFilter::Sched))
+        }
+        [command, test] if command == "test" && test == "sched-io" => {
+            Ok(Command::Test(TestFilter::SchedIo))
         }
         [command, test] if command == "test" && test == "shell" => {
             Ok(Command::Test(TestFilter::Shell))
@@ -219,6 +223,7 @@ mod tests {
             (vec!["test", "payload-args"], TestFilter::PayloadArgs),
             (vec!["test", "payload-stdin"], TestFilter::PayloadStdin),
             (vec!["test", "sched"], TestFilter::Sched),
+            (vec!["test", "sched-io"], TestFilter::SchedIo),
             (vec!["test", "shell"], TestFilter::Shell),
         ] {
             assert_eq!(parse(&owned(&args)), Ok(Command::Test(expected)));
@@ -244,7 +249,7 @@ mod tests {
             "cargo xtask run",
             "cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]",
             "cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]",
-            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|sched|shell]",
+            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|sched|sched-io|shell]",
             "cargo xtask check",
         ] {
             assert!(help.contains(command), "missing help entry: {command}");

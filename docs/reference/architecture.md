@@ -106,8 +106,9 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   切り替えはtrap内ではなく`run_boot_payload`のdispatch loopが行うため、kernel trap stackは常に「実行中process専用」の不変条件を保ちます。
 - processの`exit`またはfatal trapでslotを取り除き、全所有frameを回収してから次を選びます。
   manifest v2では終了を`PROC_EXIT` frame（pidと終了code）で個別に通知し、v1の単一imageでは従来の`EXIT` frameを維持します。
-- 既知の制限として、`read`はsyscall handler内でUARTを同期pollingします。
-  trap中は割り込みが無効なため、`read`でblockしたprocessの間は他processも進みません。
+- `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
+  processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
+  残る制限として、Stdin frameの途中受信（headerやpayloadのbyte待ち）はtrap内の同期pollingであり、その間だけ他processが進みません。
 
 ### シェル
 
@@ -137,7 +138,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   `sched`経路は二つのguestを持つmanifest v2 bundleを通常カーネルへ渡し、stdoutの交差と`PROC_EXIT` frameを検査します。
 - `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第17章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
-- `lib.rs`：公開commandを32段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
+- `lib.rs`：公開commandを33段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
 
 ## Rustユーザープログラム
 

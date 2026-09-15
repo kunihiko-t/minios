@@ -135,6 +135,13 @@ pub fn read_byte() -> u8 {
     Backend::for_target().read_byte()
 }
 
+/// 受信FIFOに未読byteがあるか。stdin待ちprocessを起こす判定に使う。
+/// byteは消費しない (frame streamは`read_byte`が順に引く)。
+#[cfg(target_arch = "riscv64")]
+pub fn stdin_pending() -> bool {
+    Backend::for_target().has_byte()
+}
+
 pub fn write_byte(byte: u8) {
     // シェルの1文字エコーも、通常出力と同じUARTのMMIO経路へ順に送る。
     Backend::for_target().write_byte(byte);

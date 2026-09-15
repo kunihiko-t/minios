@@ -76,6 +76,7 @@ pub enum TestKind {
     PayloadArgs,
     PayloadStdin,
     Sched,
+    SchedIo,
     Shell,
 }
 
@@ -98,6 +99,7 @@ impl TestKind {
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
+            Self::SchedIo => unreachable!("the sched-io test boots the normal kernel"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -122,6 +124,9 @@ impl TestKind {
                 unreachable!("the payload-stdin test verifies raw control frames")
             }
             Self::Sched => unreachable!("the sched test verifies interleaved control frames"),
+            Self::SchedIo => {
+                unreachable!("the sched-io test verifies a blocked reader's control frames")
+            }
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -336,6 +341,15 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         return verify_sched_result(&command_line, completed.status.code(), &completed.output);
     }
 
+    if kind == TestKind::SchedIo {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_sched_io()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_sched_io_command(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_sched_io_result(&command_line, completed.status.code(), &completed.output);
+    }
+
     if kind == TestKind::Shell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let (command, command_line) = qemu_command(&kernel);
@@ -447,6 +461,96 @@ fn run_stdin_command(
         .take()
         .expect("stdin test stdin must be piped")
         .write_all(STDIN_TEST_FRAMES);
+    if let Err(error) = write_result {
+        let cleanup = terminate_and_reap(&mut child);
+        let mut output = readers.join().unwrap_or_else(|join_error| join_error);
+        if let Err(cleanup_error) = cleanup {
+            output.push_str("\nQEMU cleanup error: ");
+            output.push_str(&cleanup_error);
+        }
+        return Err(QemuError::Wait {
+            command: command_line,
+            error: format!("could not write stdin frames: {error}\n{output}"),
+        });
+    }
+
+    let remaining = deadline.saturating_sub(started.elapsed());
+    match wait_until_exit(&mut child, remaining) {
+        Ok(status) => {
+            let output = readers.join().map_err(|error| QemuError::Wait {
+                command: command_line.clone(),
+                error,
+            })?;
+            Ok(CompletedProcess { status, output })
+        }
+        Err(WaitFailure::TimedOut) => {
+            let cleanup = terminate_and_reap(&mut child);
+            let mut output = readers.join().unwrap_or_else(|error| error);
+            if let Err(cleanup_error) = cleanup {
+                output.push_str("\nQEMU cleanup error: ");
+                output.push_str(&cleanup_error);
+            }
+            Err(QemuError::TimedOut {
+                command: command_line,
+                deadline,
+                output,
+            })
+        }
+        Err(WaitFailure::Poll(error)) => {
+            let cleanup = terminate_and_reap(&mut child);
+            let output = readers.join().unwrap_or_else(|error| error);
+            let cleanup = cleanup
+                .err()
+                .map(|error| format!("; cleanup also failed: {error}"))
+                .unwrap_or_default();
+            Err(QemuError::Wait {
+                command: command_line,
+                error: format!("{error}{cleanup}\n{output}"),
+            })
+        }
+    }
+}
+
+/// sched-io検査の入力。`b3`を観測してから送る1 byteのStdin frame。
+/// marker待ち後の送信なので、reader processは必ず一度blockする。
+const SCHED_IO_STDIN_FRAME: &[u8] = b"MCF1\x07\0\0\0\x01\0\0\0z";
+
+/// sched-io検査: Readyを待ち、quick processの`b3\n`が出力へ現れてから
+/// Stdin frameを送り、終了まで出力を集める。readerがblock中に他processが
+/// 進むことを`b3 < r2`の順序で検証するため、入力は必ずmarker観測後に送る。
+fn run_sched_io_command(
+    mut command: Command,
+    command_line: String,
+    deadline: Duration,
+) -> Result<CompletedProcess, QemuError> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| QemuError::Spawn {
+            command: command_line.clone(),
+            error: error.to_string(),
+        })?;
+    let readers = LiveOutputReaders::start(&mut child);
+    let started = Instant::now();
+
+    if let Err(failure) =
+        wait_for_output(&mut child, &readers, PAYLOAD_READY_TEXT, started, deadline)
+    {
+        return finish_stdin_failure(child, readers, command_line, deadline, failure);
+    }
+    // quick processの最終出力を待ってからstdinを送る。この時点でreaderは
+    // 必ずblock済みであり、spinはまだbusy-waitの途中である。
+    if let Err(failure) = wait_for_output(&mut child, &readers, "b3\n", started, deadline) {
+        return finish_stdin_failure(child, readers, command_line, deadline, failure);
+    }
+
+    let write_result = child
+        .stdin
+        .take()
+        .expect("sched-io test stdin must be piped")
+        .write_all(SCHED_IO_STDIN_FRAME);
     if let Err(error) = write_result {
         let cleanup = terminate_and_reap(&mut child);
         let mut output = readers.join().unwrap_or_else(|join_error| join_error);
@@ -932,6 +1036,90 @@ fn verify_sched_result(
     Ok(output.to_owned())
 }
 
+/// sched-io検証: stdin待ちreaderの`r1`と`r2`の間に、busy-waitするprocessと
+/// 短命processの出力がすべて挟まること、3つとも`ProcExit` frameを出すこと、
+/// kernelが`processes=3`と切り替え回数を報告することを確認する。
+///
+/// 決定的な条件は`b3 < r2`である。hostは`b3`を観測してからstdinを送るため、
+/// `r2`は必ず`b3`の後に出る。`read`がkernel内で停まる旧来の実装なら
+/// `b1`すら到着せずtimeoutになるため、この条件は「block中も他processが
+/// 進む」ことの直接証拠になる。
+fn verify_sched_io_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let Some(frames) = collect_payload_frames(output.as_bytes()) else {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    };
+
+    let mut stdout = Vec::new();
+    let mut proc_exits = Vec::new();
+    let mut last_diagnostic = String::new();
+    for (kind, payload) in &frames {
+        match kind {
+            FrameKind::Stdout => stdout.extend_from_slice(payload),
+            FrameKind::ProcExit => {
+                let Ok(decoded) = ProcExitPayload::decode(payload) else {
+                    return Err(QemuError::PayloadFrames {
+                        command: command.to_owned(),
+                        output: output.to_owned(),
+                    });
+                };
+                proc_exits.push((decoded.pid, decoded.code));
+            }
+            FrameKind::Diagnostic => {
+                last_diagnostic = String::from_utf8_lossy(payload).into_owned();
+            }
+            _ => {}
+        }
+    }
+
+    let position = |marker: &[u8]| {
+        stdout
+            .windows(marker.len())
+            .position(|window| window == marker)
+    };
+    let (r1, r2, a1, a3, b1, b3) = (
+        position(b"r1\n"),
+        position(b"r2\n"),
+        position(b"a1\n"),
+        position(b"a3\n"),
+        position(b"b1\n"),
+        position(b"b3\n"),
+    );
+    let ordered = matches!(
+        (r1, r2, a1, a3, b1, b3),
+        (Some(r1), Some(r2), Some(a1), Some(a3), Some(b1), Some(b3))
+            if r1 < r2 && a1 < a3 && b1 < b3 && b3 < r2
+    );
+    // exit順はschedule次第で揺れるため、pid/codeの集合で検査する。
+    let mut exits = proc_exits.clone();
+    exits.sort_unstable();
+    let exits_ok = exits == [(0, 5), (1, 0), (2, 7)];
+    let switches_ok = last_diagnostic
+        .strip_prefix("\r\nMiniOS payload: ok processes=3 switches=")
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .is_some_and(|switches| switches >= 1);
+    if !ordered || !exits_ok || !switches_ok {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
 fn verify_payload_args_result(
     command: &str,
     status: Option<i32>,
@@ -1039,6 +1227,13 @@ impl PayloadBundle {
         Self::create_with(sched_bundle_bytes(&spin, &quick)?)
     }
 
+    fn create_sched_io() -> Result<Self, QemuError> {
+        let reader = built_bin_elf_bytes(crate::guest::GUEST_SCHED_R)?;
+        let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
+        let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
+        Self::create_with(sched_io_bundle_bytes(&reader, &spin, &quick)?)
+    }
+
     fn create_with(bytes: Vec<u8>) -> Result<Self, QemuError> {
         let path = std::env::temp_dir().join(format!(
             "minios-payload-{}-{}.mcb",
@@ -1140,6 +1335,35 @@ fn sched_bundle_bytes(spin: &[u8], quick: &[u8]) -> Result<Vec<u8>, QemuError> {
         .map(|bundle| bundle.bytes().to_vec())
         .map_err(|error| QemuError::Bundle {
             stage: "sched bundle layout",
+            error: error.to_string(),
+        })
+}
+
+/// sched-io検証用bundle: stdinで待つguest・busy-waitするguest・すぐ終わる
+/// guestの3 imageをmanifest v2で組み立てる。process indexは宣言順
+/// (reader=0, spin=1, quick=2)。
+fn sched_io_bundle_bytes(reader: &[u8], spin: &[u8], quick: &[u8]) -> Result<Vec<u8>, QemuError> {
+    let images = [
+        crate::bundle::BundleImage {
+            name: "reader",
+            args: &[],
+            elf: reader,
+        },
+        crate::bundle::BundleImage {
+            name: "spin",
+            args: &[],
+            elf: spin,
+        },
+        crate::bundle::BundleImage {
+            name: "quick",
+            args: &[],
+            elf: quick,
+        },
+    ];
+    crate::bundle::build_multi_bundle(&images)
+        .map(|bundle| bundle.bytes().to_vec())
+        .map_err(|error| QemuError::Bundle {
+            stage: "sched-io bundle layout",
             error: error.to_string(),
         })
 }
@@ -2372,6 +2596,69 @@ mod tests {
         no_switches = no_switches.replace("switches=3", "switches=0");
         assert!(matches!(
             verify_sched_result(TEST_COMMAND, Some(0), &no_switches),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+    }
+
+    // Catches a sched-io run where the reader never blocked (r2 before b3
+    // would mean input arrived instantly, which the marker-triggered write
+    // makes impossible), a missing ProcExit, or a missing processes=3 report.
+    #[test]
+    fn sched_io_verification_requires_blocked_window_and_all_exits() {
+        let frame = |kind: u8, payload: &[u8]| -> String {
+            let mut bytes = b"MCF1".to_vec();
+            bytes.push(kind);
+            bytes.extend_from_slice(&[0, 0, 0]);
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let proc_exit = |pid: u32, code: u32| frame(8, &ProcExitPayload { pid, code }.encode());
+
+        // readerがblock中にquickとspinが進み、stdin到着後にr2が出る列。
+        let mut blocked = String::from("OpenSBI\n");
+        blocked.push_str(&String::from_utf8_lossy(PAYLOAD_READY_FRAME));
+        blocked.push_str(&frame(2, b"r1\n"));
+        blocked.push_str(&frame(2, b"b1\nb2\nb3\n"));
+        blocked.push_str(&proc_exit(2, 7));
+        blocked.push_str(&frame(2, b"a1\n"));
+        blocked.push_str(&frame(2, b"r2\n"));
+        blocked.push_str(&proc_exit(0, 5));
+        blocked.push_str(&frame(2, b"a2\na3\n"));
+        blocked.push_str(&proc_exit(1, 0));
+        blocked.push_str(&frame(
+            6,
+            b"\r\nMiniOS payload: ok processes=3 switches=5\n",
+        ));
+        assert_eq!(
+            verify_sched_io_result(TEST_COMMAND, Some(0), &blocked).map(|_| ()),
+            Ok(())
+        );
+
+        // r2がb3より前にある＝readerがblockせず走り切った列は弾く。
+        let mut not_blocked = String::from("OpenSBI\n");
+        not_blocked.push_str(&String::from_utf8_lossy(PAYLOAD_READY_FRAME));
+        not_blocked.push_str(&frame(2, b"r1\nr2\n"));
+        not_blocked.push_str(&frame(2, b"b1\nb2\nb3\n"));
+        not_blocked.push_str(&proc_exit(2, 7));
+        not_blocked.push_str(&frame(2, b"a1\na2\na3\n"));
+        not_blocked.push_str(&proc_exit(1, 0));
+        not_blocked.push_str(&proc_exit(0, 5));
+        not_blocked.push_str(&frame(
+            6,
+            b"\r\nMiniOS payload: ok processes=3 switches=3\n",
+        ));
+        assert!(matches!(
+            verify_sched_io_result(TEST_COMMAND, Some(0), &not_blocked),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+
+        // ProcExitが欠けた列は弾く。
+        let mut missing_exit = blocked.clone();
+        let exit_pos = missing_exit.find(&proc_exit(1, 0)).expect("exit frame");
+        missing_exit.replace_range(exit_pos..exit_pos + proc_exit(1, 0).len(), "");
+        assert!(matches!(
+            verify_sched_io_result(TEST_COMMAND, Some(0), &missing_exit),
             Err(QemuError::PayloadFrames { .. })
         ));
     }

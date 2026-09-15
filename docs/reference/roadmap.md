@@ -1,7 +1,7 @@
 # 発展ロードマップ
 
 この文書は、実装済みの範囲、次の受け入れ単位、その後の方向を区別します。
-現在のrelease gateは、RV64とRV32のクロスビルド、host test、17個のQEMU経路を含む32段階を実行します。
+現在のrelease gateは、RV64とRV32のクロスビルド、host test、18個のQEMU経路を含む33段階を実行します。
 
 ## 実装済み
 
@@ -60,7 +60,8 @@ manifest v2のbundleは最大4個のimageを宣言でき、kernelは各imageを�
 U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類され、trap handlerがtickを再アームしてkernelへ戻ると、`ProcessTable`のround-robinが次のprocessを選んで`__run_user`へ再投入します。
 各processの終了は`PROC_EXIT` frameで個別に通知され、slotを取り除いて全所有frameを回収します。
 `cargo xtask test sched`は、busy-waitするprocessの出力の間に短命processの出力が挟まることと、切り替え回数の報告をQEMU上で確認します。
-現段階では`read`がsyscall handler内でUARTを同期pollingするため、blockしたprocessの間は他processも進まない制限があります。
+`read`は入力未到着ならprocessを`BlockedOnStdin`へ回してecallをやり直すため、stdin待ちの間も他processが進みます（`cargo xtask test sched-io`で検証）。
+残る制限として、Stdin frameの途中受信だけはtrap内の同期pollingです。
 
 ## 次
 

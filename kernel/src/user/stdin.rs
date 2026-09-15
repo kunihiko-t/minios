@@ -58,6 +58,12 @@ impl StdinStaging {
         self.eof
     }
 
+    /// 未配達のbyteがstaging内に残っているか。残っていれば`read`は
+    /// readerへ触れず即座に返せる。
+    pub const fn has_pending(&self) -> bool {
+        self.start != self.end
+    }
+
     /// 未配達byteを`output`へ移す。空でEOF未達なら1 frame読む。
     ///
     /// 戻り値は移したbyte数であり、0はEOFを意味する。`output`が空のときは

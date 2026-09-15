@@ -383,6 +383,11 @@ const USER_RUN_OUTCOME_SOURCE_FAILURE: usize = 4;
 /// schedulerが次回dispatch時に再開する。
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_PREEMPTED: usize = 5;
+
+/// `read`が入力未到着で中断した。`sepc`はecallへ戻してあるため、入力が
+/// 届いて再開されると同じsyscallがやり直される。
+#[cfg(target_arch = "riscv64")]
+const USER_RUN_OUTCOME_BLOCKED: usize = 6;
 /// run単位のstdin staging。resetはrunnerが実行窓の前に行い、handlerだけが
 /// assemblyの実行窓で借りる。runnerが待機中のため同時にaliasしない。
 #[cfg(target_arch = "riscv64")]
@@ -1314,6 +1319,10 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXIT, Ordering::Relaxed);
             RunExit::ReturnToKernel
         }
+        SyscallFlow::Blocked => {
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_BLOCKED, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
         SyscallFlow::Fatal(()) => {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SINK_FAILURE, Ordering::Relaxed);
             RunExit::ReturnToKernel
@@ -1439,6 +1448,17 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
             let _ = sink.frame(minios_abi::control::FrameKind::Exit, &code.to_le_bytes());
             RunExit::ReturnToKernel
         }
+        SyscallFlow::Blocked => {
+            // probe fixtureはhost scriptが入力を同期済みであり、readで
+            // 待つ設計ではない。到達したらharness側の欠陥である。
+            crate::console::emergency_print(format_args!(
+                "[MINIOS_TEST] failed: user-syscall blocked read\r\n"
+            ));
+            arch::riscv64::sbi::system_reset(
+                arch::riscv64::sbi::ResetType::Shutdown,
+                arch::riscv64::sbi::ResetReason::SystemFailure,
+            )
+        }
         SyscallFlow::Fatal(()) => {
             crate::console::emergency_print(format_args!(
                 "[MINIOS_TEST] failed: user-syscall sink failure\r\n"
@@ -1488,6 +1508,16 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
             USER_EXIT_CODE.store(code as usize, Ordering::Relaxed);
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXIT, Ordering::Relaxed);
             RunExit::ReturnToKernel
+        }
+        SyscallFlow::Blocked => {
+            // このprobeのfixtureはreadを呼ばない。blocked readはharness欠陥。
+            crate::console::emergency_print(format_args!(
+                "[MINIOS_TEST] failed: user-exit blocked read\r\n"
+            ));
+            arch::riscv64::sbi::system_reset(
+                arch::riscv64::sbi::ResetType::Shutdown,
+                arch::riscv64::sbi::ResetReason::SystemFailure,
+            )
         }
         SyscallFlow::Fatal(()) => {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SINK_FAILURE, Ordering::Relaxed);
@@ -1915,9 +1945,10 @@ fn reclaim_process_table(
 /// production payload path: Ready frameを送り、予約窓の全imageをprocessとして
 /// spawnし、timerプリエンプションのround-robinで全processが終了するまで回す。
 ///
-/// `read` syscallはhandler内でUARTを同期pollingする (trap中は割り込み無効)
-/// ため、blockしたprocessの間は他processも進まない。これは既知の制限であり、
-/// 非同期stdin化は別featureとして扱う。
+/// `read`は入力未到着のとき`Blocked`としてkernelへ戻り、processはstdin待ち
+/// 状態で再選対象から外れる。入力が届くとecallがやり直されて完了する。
+/// 残る制限として、frameの途中受信 (header/payloadのbyte待ち) はtrap内で
+/// 同期pollingするため、その間は他processが進まない。
 #[cfg(target_arch = "riscv64")]
 fn run_boot_payload<const KERNEL_N: usize>(
     kernel_space: &AddressSpace<'_, KERNEL_N>,
@@ -2018,7 +2049,20 @@ fn run_boot_payload<const KERNEL_N: usize>(
     let mut failed = 0usize;
     let mut last_pid = usize::MAX;
     let mut last_code = 0u32;
-    while let Some(pid) = table.pick_next() {
+    while !table.is_empty() {
+        // stdinへbyteが届いていればblocked processを選対象へ戻す。
+        if console::stdin_pending() {
+            table.wake_all_blocked();
+        }
+        let Some(pid) = table.pick_next() else {
+            // 占有slotが残るのに選べない＝全processがstdin待ち。
+            // kernelがdata-readyをpollし、到着したら全員を起こす。
+            while !console::stdin_pending() {
+                core::hint::spin_loop();
+            }
+            table.wake_all_blocked();
+            continue;
+        };
         let process = table.get_mut(pid).expect("picked pid is live");
         // Safety: handlerがdispatch中だけ読む静的参照であり、kernelへ戻るたび
         // に0へ戻す。同時に実行されるprocessは1つだけなのでaliasしない。
@@ -2051,6 +2095,9 @@ fn run_boot_payload<const KERNEL_N: usize>(
         last_pid = pid;
         match (exit, USER_RUN_OUTCOME.load(Ordering::Relaxed)) {
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_PREEMPTED) => {}
+            (RunExit::ReturnToKernel, USER_RUN_OUTCOME_BLOCKED) => {
+                process.block_on_stdin();
+            }
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_EXIT) => {
                 let code = USER_EXIT_CODE.load(Ordering::Relaxed) as u32;
                 last_code = code;
