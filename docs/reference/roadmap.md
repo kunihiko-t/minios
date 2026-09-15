@@ -1,7 +1,7 @@
 # 発展ロードマップ
 
 この文書は、実装済みの範囲、次の受け入れ単位、その後の方向を区別します。
-現在のrelease gateは、RV64とRV32のクロスビルド、host test、16個のQEMU経路を含む31段階を実行します。
+現在のrelease gateは、RV64とRV32のクロスビルド、host test、17個のQEMU経路を含む32段階を実行します。
 
 ## 実装済み
 
@@ -55,10 +55,17 @@ GPIO-SPI経由のSD sector readerとFAT32 parserをRV32 shellの`ls`と`cat`か�
 RV32IMEM契約は実効32 KiBへ更新し、RV32 buildは`opt-level=z`で収めます。
 設計は[NEORV32 read-only FAT32設計](sd-fat32.md)にあります。
 
+複数processのプリエンプティブ実行も完了しています。
+manifest v2のbundleは最大4個のimageを宣言でき、kernelは各imageを独立したaddress space・専用kernel trap stack・保存contextを持つ`Process`としてspawnします。
+U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類され、trap handlerがtickを再アームしてkernelへ戻ると、`ProcessTable`のround-robinが次のprocessを選んで`__run_user`へ再投入します。
+各processの終了は`PROC_EXIT` frameで個別に通知され、slotを取り除いて全所有frameを回収します。
+`cargo xtask test sched`は、busy-waitするprocessの出力の間に短命processの出力が挟まることと、切り替え回数の報告をQEMU上で確認します。
+現段階では`read`がsyscall handler内でUARTを同期pollingするため、blockしたprocessの間は他processも進まない制限があります。
+
 ## 次
 
-汎用heapの動的拡張（フレームアロケーターからの成長）と、それを使う可変個のkernel object・process管理は、固定容量の単一address spaceを越える段階で導入します。
-その後にscheduler、VirtIO block、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
+汎用heapの動的拡張（フレームアロケーターからの成長）と、それを使う可変個のkernel object管理は、固定容量の単一address spaceを越える段階で導入します。
+その後にVirtIO block、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
 
 OCI image、Linux binary互換、multi-tenant isolationはこの実装の目標に含めません。
 

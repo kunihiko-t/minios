@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::cargo;
-use minios_abi::control::{FRAME_HEADER_LEN, FrameHeader};
+use minios_abi::control::{FRAME_HEADER_LEN, FrameHeader, FrameKind, ProcExitPayload};
 
 const QEMU_PROGRAM: &str = "qemu-system-riscv64";
 const BOOT_MARKER: &str = "[MINIOS_TEST] boot: ok";
@@ -30,9 +30,9 @@ const FDT_MARKER: &str =
     "[MINIOS_TEST] fdt: ram=0x80000000..0x88000000 uart=0x10000000 timebase=10000000";
 // `-m 128M`ではヒープ領域は`0x8770_0000..0x8780_0000`の1 MiBである。
 const HEAP_MARKER: &str = "[MINIOS_TEST] heap: ok";
-const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x01\0";
+const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
 /// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
-const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x01\0";
+const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
 /// payload-stdin検査の入力。2 frameのbyte列とEOFのStdin frameである。
 const STDIN_TEST_FRAMES: &[u8] =
     b"MCF1\x07\0\0\0\x02\0\0\0abMCF1\x07\0\0\0\x04\0\0\0cdefMCF1\x07\0\0\0\0\0\0\0";
@@ -42,6 +42,10 @@ const PAYLOAD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x03\0\0\0MK6";
 const PAYLOAD_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK6";
 const PAYLOAD_EXIT_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const PAYLOAD_DIAGNOSTIC_FRAME: &[u8] = b"MCF1\x06\0\0\0\x1d\0\0\0\r\nMiniOS payload: ok code=42\n";
+const PAYLOAD_SPAWNED_HELLO_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x27\0\0\0MiniOS sched: spawned pid=0 name=hello\n";
+const PAYLOAD_SPAWNED_STDIN_CAT_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=stdin-cat\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -71,6 +75,7 @@ pub enum TestKind {
     Payload,
     PayloadArgs,
     PayloadStdin,
+    Sched,
     Shell,
 }
 
@@ -92,6 +97,7 @@ impl TestKind {
             Self::Payload => unreachable!("the payload test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
+            Self::Sched => unreachable!("the sched test boots the normal kernel"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -115,6 +121,7 @@ impl TestKind {
             Self::PayloadStdin => {
                 unreachable!("the payload-stdin test verifies raw control frames")
             }
+            Self::Sched => unreachable!("the sched test verifies interleaved control frames"),
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -318,6 +325,15 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
         );
+    }
+
+    if kind == TestKind::Sched {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_sched()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_sched_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Shell {
@@ -776,17 +792,20 @@ fn qemu_command_with_payload(kernel: &Path, bundle: &Path) -> (Command, String) 
     (command, command_line)
 }
 
-/// payload検査で期待されるcontrol frame列 (Ready→stdout→stderr→Exit→cleanup)。
-const PAYLOAD_EXPECTED_FRAMES: [&[u8]; 5] = [
+/// payload検査で期待されるcontrol frame列 (Ready→spawned→stdout→stderr→Exit→cleanup)。
+const PAYLOAD_EXPECTED_FRAMES: [&[u8]; 6] = [
     PAYLOAD_READY_FRAME,
+    PAYLOAD_SPAWNED_HELLO_FRAME,
     PAYLOAD_STDOUT_FRAME,
     PAYLOAD_STDERR_FRAME,
     PAYLOAD_EXIT_FRAME,
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
-const PAYLOAD_ARGS_EXPECTED_FRAMES: [&[u8]; 6] = [
+/// payload-args検査で期待されるcontrol frame列 (Ready→spawned→argv echo×3→Exit→cleanup)。
+const PAYLOAD_ARGS_EXPECTED_FRAMES: [&[u8]; 7] = [
     PAYLOAD_READY_FRAME,
+    PAYLOAD_SPAWNED_HELLO_FRAME,
     ARGS_STDOUT_HELLO_FRAME,
     ARGS_STDOUT_ALPHA_FRAME,
     ARGS_STDOUT_BRAVO_FRAME,
@@ -794,9 +813,10 @@ const PAYLOAD_ARGS_EXPECTED_FRAMES: [&[u8]; 6] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
-/// payload-stdin検査で期待されるcontrol frame列 (Ready→echo→echo→Exit→cleanup)。
-const PAYLOAD_STDIN_EXPECTED_FRAMES: [&[u8]; 5] = [
+/// payload-stdin検査で期待されるcontrol frame列 (Ready→spawned→echo→echo→Exit→cleanup)。
+const PAYLOAD_STDIN_EXPECTED_FRAMES: [&[u8]; 6] = [
     PAYLOAD_READY_FRAME,
+    PAYLOAD_SPAWNED_STDIN_CAT_FRAME,
     STDIN_STDOUT_AB_FRAME,
     STDIN_STDOUT_CDEF_FRAME,
     PAYLOAD_EXIT_FRAME,
@@ -816,6 +836,94 @@ fn verify_payload_stdin_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &PAYLOAD_STDIN_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+/// Ready以降のcontrol frameを`(kind, payload)`列として集める。Readyがない、
+/// frame列が途中で切れる、またはdecode不能な場合は`None`を返す。
+fn collect_payload_frames(output: &[u8]) -> Option<Vec<(FrameKind, &[u8])>> {
+    let start = output
+        .windows(PAYLOAD_READY_FRAME.len())
+        .position(|window| window == PAYLOAD_READY_FRAME)?;
+    let mut frames = Vec::new();
+    let mut remaining = &output[start..];
+    while !remaining.is_empty() {
+        let header = FrameHeader::decode(remaining.get(..FRAME_HEADER_LEN)?).ok()?;
+        let payload_len = usize::try_from(header.payload_len).ok()?;
+        let payload = remaining.get(FRAME_HEADER_LEN..FRAME_HEADER_LEN + payload_len)?;
+        frames.push((header.kind, payload));
+        remaining = &remaining[FRAME_HEADER_LEN + payload_len..];
+    }
+    Some(frames)
+}
+
+/// sched検証: 2 processのstdout markerが交差すること、両方のProcExit frameが
+/// 届くこと、kernelが切り替え回数を報告することを確認する。
+///
+/// `a1` < `b1` < `a3` の順序は、busy-wait中のprocess Aの生存期間内に
+/// process Bが走ったこと＝timerプリエンプションの直接証拠である。
+/// 逐次実行なら必ず `a*…b*` か `b*…a*` の単調列になるため、この条件は
+/// 順次実行を確実に弾く。
+fn verify_sched_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let Some(frames) = collect_payload_frames(output.as_bytes()) else {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    };
+
+    let mut stdout = Vec::new();
+    let mut proc_exits = Vec::new();
+    let mut last_diagnostic = String::new();
+    for (kind, payload) in &frames {
+        match kind {
+            FrameKind::Stdout => stdout.extend_from_slice(payload),
+            FrameKind::ProcExit => {
+                let Ok(decoded) = ProcExitPayload::decode(payload) else {
+                    return Err(QemuError::PayloadFrames {
+                        command: command.to_owned(),
+                        output: output.to_owned(),
+                    });
+                };
+                proc_exits.push((decoded.pid, decoded.code));
+            }
+            FrameKind::Diagnostic => {
+                last_diagnostic = String::from_utf8_lossy(payload).into_owned();
+            }
+            _ => {}
+        }
+    }
+
+    let position = |marker: &[u8]| {
+        stdout
+            .windows(marker.len())
+            .position(|window| window == marker)
+    };
+    let (a1, a3, b1) = (position(b"a1\n"), position(b"a3\n"), position(b"b1\n"));
+    let interleaved = matches!((a1, a3, b1), (Some(a1), Some(a3), Some(b1)) if a1 < b1 && b1 < a3);
+    // BがAのspin中に終了するので、ProcExitはpid 1→0の順で確定的である。
+    let exits_ok = proc_exits == [(1, 7), (0, 0)];
+    let switches_ok = last_diagnostic
+        .strip_prefix("\r\nMiniOS payload: ok processes=2 switches=")
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .is_some_and(|switches| switches >= 1);
+    if !interleaved || !exits_ok || !switches_ok {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -921,8 +1029,14 @@ impl PayloadBundle {
     }
 
     fn create_stdin() -> Result<Self, QemuError> {
-        let elf = built_cat_elf_bytes()?;
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_STDIN_CAT)?;
         Self::create_with(payload_stdin_bundle_bytes(&elf)?)
+    }
+
+    fn create_sched() -> Result<Self, QemuError> {
+        let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
+        let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
+        Self::create_with(sched_bundle_bytes(&spin, &quick)?)
     }
 
     fn create_with(bytes: Vec<u8>) -> Result<Self, QemuError> {
@@ -987,6 +1101,18 @@ fn built_guest_elf_bytes() -> Result<Vec<u8>, QemuError> {
     })
 }
 
+/// 指定したguest binをbuildしてELF bytesを読み込む。
+fn built_bin_elf_bytes(name: &str) -> Result<Vec<u8>, QemuError> {
+    let elf_path = crate::guest::build_guest_bin(name).map_err(|error| QemuError::Bundle {
+        stage: "guest build",
+        error: error.to_string(),
+    })?;
+    std::fs::read(&elf_path).map_err(|error| QemuError::Bundle {
+        stage: "guest ELF read",
+        error: format!("{}: {error}", elf_path.display()),
+    })
+}
+
 /// payload-args検査用bundle: Rust guestのELFと`arg=`付きmanifestを
 /// 正規のMiniBundleへ組み立てる。guestはargvを順にstdoutへ出してexit(42)する。
 /// 手書きのargv loop ELFはRust guestと役割が重複するため、この経路では使わない。
@@ -995,19 +1121,27 @@ fn payload_args_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     assemble_test_bundle(MANIFEST, elf)
 }
 
-/// build済みstdin cat guestのELF bytesを読み込む。
-fn built_cat_elf_bytes() -> Result<Vec<u8>, QemuError> {
-    let elf_path =
-        crate::guest::build_guest_bin(crate::guest::GUEST_STDIN_CAT).map_err(|error| {
-            QemuError::Bundle {
-                stage: "guest build",
-                error: error.to_string(),
-            }
-        })?;
-    std::fs::read(&elf_path).map_err(|error| QemuError::Bundle {
-        stage: "guest ELF read",
-        error: format!("{}: {error}", elf_path.display()),
-    })
+/// sched検証用bundle: busy-waitするguestとすぐ終わるguestの2 imageを
+/// manifest v2で組み立てる。process indexは宣言順 (spin=0, quick=1)。
+fn sched_bundle_bytes(spin: &[u8], quick: &[u8]) -> Result<Vec<u8>, QemuError> {
+    let images = [
+        crate::bundle::BundleImage {
+            name: "spin",
+            args: &[],
+            elf: spin,
+        },
+        crate::bundle::BundleImage {
+            name: "quick",
+            args: &[],
+            elf: quick,
+        },
+    ];
+    crate::bundle::build_multi_bundle(&images)
+        .map(|bundle| bundle.bytes().to_vec())
+        .map_err(|error| QemuError::Bundle {
+            stage: "sched bundle layout",
+            error: error.to_string(),
+        })
 }
 
 /// payload-stdin検査用bundle: cat guestのELFと引数なしmanifestを
@@ -1406,6 +1540,7 @@ mod tests {
             TestKind::UserEntry,
             TestKind::UserSyscall,
             TestKind::UserExit,
+            TestKind::Sched,
             TestKind::Shell,
         ] {
             assert_eq!(kind.forbidden_marker(), None);
@@ -2182,6 +2317,63 @@ mod tests {
             !status.success(),
             "the timed-out user-test child must be killed and reaped"
         );
+    }
+
+    // Catches a sched run whose two processes executed strictly one after the
+    // other (no preemption evidence), or that never reported a timer switch.
+    #[test]
+    fn sched_verification_requires_interleaved_output_and_switches() {
+        let frame = |kind: u8, payload: &[u8]| -> String {
+            let mut bytes = b"MCF1".to_vec();
+            bytes.push(kind);
+            bytes.extend_from_slice(&[0, 0, 0]);
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let proc_exit = |pid: u32, code: u32| frame(8, &ProcExitPayload { pid, code }.encode());
+
+        let mut interleaved = String::from("OpenSBI\n");
+        interleaved.push_str(&String::from_utf8_lossy(PAYLOAD_READY_FRAME));
+        interleaved.push_str(&frame(6, b"MiniOS sched: spawned pid=0 name=spin\n"));
+        interleaved.push_str(&frame(6, b"MiniOS sched: spawned pid=1 name=quick\n"));
+        interleaved.push_str(&frame(2, b"a1\n"));
+        interleaved.push_str(&frame(2, b"b1\nb2\nb3\n"));
+        interleaved.push_str(&proc_exit(1, 7));
+        interleaved.push_str(&frame(2, b"a2\na3\n"));
+        interleaved.push_str(&proc_exit(0, 0));
+        interleaved.push_str(&frame(
+            6,
+            b"\r\nMiniOS payload: ok processes=2 switches=3\n",
+        ));
+        assert_eq!(
+            verify_sched_result(TEST_COMMAND, Some(0), &interleaved).map(|_| ()),
+            Ok(())
+        );
+
+        // 逐次実行: process Aが完走してからB — プリエンプションは起きていない。
+        let mut sequential = String::from("OpenSBI\n");
+        sequential.push_str(&String::from_utf8_lossy(PAYLOAD_READY_FRAME));
+        sequential.push_str(&frame(2, b"a1\na2\na3\n"));
+        sequential.push_str(&frame(2, b"b1\nb2\nb3\n"));
+        sequential.push_str(&proc_exit(0, 0));
+        sequential.push_str(&proc_exit(1, 7));
+        sequential.push_str(&frame(
+            6,
+            b"\r\nMiniOS payload: ok processes=2 switches=0\n",
+        ));
+        assert!(matches!(
+            verify_sched_result(TEST_COMMAND, Some(0), &sequential),
+            Err(QemuError::PayloadFrames { .. })
+        ));
+
+        // 交差していてもswitches=0ならtimer切り替えの証拠にならない。
+        let mut no_switches = interleaved.clone();
+        no_switches = no_switches.replace("switches=3", "switches=0");
+        assert!(matches!(
+            verify_sched_result(TEST_COMMAND, Some(0), &no_switches),
+            Err(QemuError::PayloadFrames { .. })
+        ));
     }
 
     fn complete_payload_output() -> String {

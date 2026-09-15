@@ -184,12 +184,7 @@ pub fn assemble_multi_bundle_file(
     request: &BundleRequest,
     images: &[BundleImage<'_>],
 ) -> Result<BundleProduct, BundleError> {
-    let manifest = render_manifest_multi(images)?;
-    let mut elf_area = Vec::new();
-    for image in images {
-        elf_area.extend_from_slice(image.elf);
-    }
-    let bundle = build_bundle(&manifest, &elf_area)?;
+    let bundle = build_multi_bundle(images)?;
     let output = request.output.clone().unwrap_or_else(default_bundle_path);
     std::fs::write(&output, bundle.bytes()).map_err(|error| BundleError::Write {
         path: output.clone(),
@@ -205,6 +200,17 @@ pub fn assemble_multi_bundle_file(
         images: images.len(),
         digest: bundle.digest(),
     })
+}
+
+/// 複数imageのbundleをfileへ書かずin-memoryで組み立てる。QEMUのsched検証のように
+/// 一時file化を呼び出し側へ委ねたい経路が使う。
+pub fn build_multi_bundle(images: &[BundleImage<'_>]) -> Result<BuiltBundle, BundleError> {
+    let manifest = render_manifest_multi(images)?;
+    let mut elf_area = Vec::new();
+    for image in images {
+        elf_area.extend_from_slice(image.elf);
+    }
+    build_bundle(&manifest, &elf_area)
 }
 
 /// manifest v2 (`version=2` + `image=` section列) を生成し、ABI parserで検査する。

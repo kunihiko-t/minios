@@ -158,7 +158,15 @@ use minios_kernel::boot_payload::BootPayload;
 use minios_kernel::elf::fixture::user_exit_probe_elf;
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-syscall"))]
 use minios_kernel::elf::fixture::user_syscall_probe_elf;
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(
+    target_arch = "riscv64",
+    any(
+        feature = "qemu-test-user-entry",
+        feature = "qemu-test-user-trap",
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
+    )
+))]
 use minios_kernel::elf::load::load_image_with_kernel_mappings;
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-elf"))]
 use minios_kernel::memory::frame::{FrameStats, PhysFrame};
@@ -168,6 +176,8 @@ use minios_kernel::memory::{
     frame::{FrameAllocator, FrameError, PAGE_SIZE},
 };
 #[cfg(target_arch = "riscv64")]
+use minios_kernel::process::{MAX_PROCS, Process, ProcessTable};
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 use minios_kernel::user::run::{RunCompletion, RunOutcome, UserRun};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::user::stdin::StdinStaging;
@@ -181,8 +191,8 @@ use minios_kernel::user::{RunExit, SSTATUS_SUM, UserContext};
 use minios_kernel::vm::AddressSpace;
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::{
-    AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, PhysPageNum,
-    VirtAddr as PayloadVirtAddr,
+    AddressSpaceBuilder, AddressSpaceStorage, IdentityFrameStore, KernelMapPlan, MAX_OWNED_FRAMES,
+    PhysPageNum,
 };
 #[cfg(all(
     target_arch = "riscv64",
@@ -343,8 +353,13 @@ static mut USER_SYSCALL_PROBE_SPACE: usize = 0;
 #[cfg(target_arch = "riscv64")]
 static mut USER_SYSCALL_PROBE_MEMORY: usize = 0;
 
+/// processごとのaddress space所有権arena。`AddressSpaceStorage`は1 address
+/// space専用の排他借用を要求するため、生存中のprocessごとに1つずつ静的に持つ。
+/// slot indexは`ProcessTable`のpidと対応する。
 #[cfg(target_arch = "riscv64")]
-static mut PAYLOAD_ADDRESS_SPACE_STORAGE: AddressSpaceStorage<2688> = AddressSpaceStorage::new();
+static mut PROCESS_STORAGES: [AddressSpaceStorage<MAX_OWNED_FRAMES>;
+    minios_kernel::process::MAX_PROCS] =
+    [const { AddressSpaceStorage::new() }; minios_kernel::process::MAX_PROCS];
 
 #[cfg(target_arch = "riscv64")]
 static USER_EXIT_CODE: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -364,6 +379,10 @@ const USER_RUN_OUTCOME_FATAL_TRAP: usize = 2;
 const USER_RUN_OUTCOME_SINK_FAILURE: usize = 3;
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_SOURCE_FAILURE: usize = 4;
+/// timer割り込みによるpreempt。contextはtrap stack上のslotへ残り、
+/// schedulerが次回dispatch時に再開する。
+#[cfg(target_arch = "riscv64")]
+const USER_RUN_OUTCOME_PREEMPTED: usize = 5;
 /// run単位のstdin staging。resetはrunnerが実行窓の前に行い、handlerだけが
 /// assemblyの実行窓で借りる。runnerが待機中のため同時にaliasしない。
 #[cfg(target_arch = "riscv64")]
@@ -1212,6 +1231,7 @@ unsafe fn rust_user_trap_handler_impl(context: *mut UserContext) -> RunExit {
     let context = unsafe { &mut *context };
     match minios_kernel::user::trap::handle_user_trap(context, scause, stval) {
         TrapAction::SystemCall => user_trap_system_call(context),
+        TrapAction::Timer => user_trap_timer(),
         TrapAction::Fatal { scause, stval } => user_trap_fatal(scause, stval),
     }
 }
@@ -1323,6 +1343,50 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
     USER_FATAL_STVAL.store(stval, Ordering::Relaxed);
     USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
     RunExit::ReturnToKernel
+}
+
+/// U-mode実行中のsupervisor timer割り込み。次tickを再アームしてからkernelへ
+/// 戻り、schedulerが`Preempted`として中断processを再選対象へ戻す。
+#[cfg(all(
+    target_arch = "riscv64",
+    not(any(
+        feature = "qemu-test-user-entry",
+        feature = "qemu-test-user-trap",
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
+    ))
+))]
+fn user_trap_timer() -> RunExit {
+    if let Err(error) = time::handle_interrupt() {
+        // 再アームできない環境ではscheduleを続けられないため、実行中processの
+        // fatalとして扱う。timer欠損はhaltではなく診断で表す。
+        crate::console::emergency_print(format_args!("MiniOS user timer: {error:?}\r\n"));
+        USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
+        return RunExit::ReturnToKernel;
+    }
+    USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_PREEMPTED, Ordering::Relaxed);
+    RunExit::ReturnToKernel
+}
+
+/// probe経路は実行前にSTIEを落とすため、timer割り込みは到達しないはずの
+/// 環境異常である。発生した場合はprobeの前提が崩れたとして失敗終了する。
+#[cfg(all(
+    target_arch = "riscv64",
+    any(
+        feature = "qemu-test-user-entry",
+        feature = "qemu-test-user-trap",
+        feature = "qemu-test-user-syscall",
+        feature = "qemu-test-user-exit"
+    )
+))]
+fn user_trap_timer() -> RunExit {
+    crate::console::emergency_print(format_args!(
+        "[MINIOS_TEST] failed: unexpected timer interrupt inside user probe\r\n"
+    ));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-entry"))]
@@ -1821,8 +1885,39 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
     )
 }
 
-/// production payload path: Ready frameを送り、予約窓のELFをuser実行し、
-/// Exit後のresource回収を検証してからshutdownする。
+/// 終了したprocessをtableから取り出して全所有frameを回収する。
+/// 回収に失敗した場合は一回だけ再試行し、それでも駄目ならpayload全体を中止する。
+#[cfg(target_arch = "riscv64")]
+fn reclaim_process_slot(
+    table: &mut ProcessTable<'_, MAX_OWNED_FRAMES>,
+    pid: usize,
+    frames: &mut FrameAllocator<512>,
+) {
+    let Some(mut process) = table.take(pid) else {
+        return;
+    };
+    if process.reclaim(frames).is_err() && process.reclaim(frames).is_err() {
+        fatal_payload_error(format_args!("MiniOS payload: reclaim pid={pid} failed\r\n"));
+    }
+}
+
+/// tableに残る全processを回収する。spawn途中の失敗経路で使う。
+#[cfg(target_arch = "riscv64")]
+fn reclaim_process_table(
+    table: &mut ProcessTable<'_, MAX_OWNED_FRAMES>,
+    frames: &mut FrameAllocator<512>,
+) {
+    for pid in 0..MAX_PROCS {
+        let _ = table.take(pid).map(|mut process| process.reclaim(frames));
+    }
+}
+
+/// production payload path: Ready frameを送り、予約窓の全imageをprocessとして
+/// spawnし、timerプリエンプションのround-robinで全processが終了するまで回す。
+///
+/// `read` syscallはhandler内でUARTを同期pollingする (trap中は割り込み無効)
+/// ため、blockしたprocessの間は他processも進まない。これは既知の制限であり、
+/// 非同期stdin化は別featureとして扱う。
 #[cfg(target_arch = "riscv64")]
 fn run_boot_payload<const KERNEL_N: usize>(
     kernel_space: &AddressSpace<'_, KERNEL_N>,
@@ -1832,149 +1927,198 @@ fn run_boot_payload<const KERNEL_N: usize>(
     payload: BootPayload<'static>,
 ) -> ! {
     let before = frames.stats();
-    // 複数image (manifest v2) の実行はscheduler経路が担う。ここでは単一imageのみ
-    // 受理し、複数imageのbundleは黙って一部だけ実行しないよう明示的に拒否する。
-    let spec = payload.images().next();
-    let Some(spec) = spec.filter(|_| payload.images().nth(1).is_none()) else {
-        fatal_payload_error(format_args!(
-            "MiniOS payload: multi-image bundles are not supported yet\r\n"
-        ));
-    };
-    // Safety: このpathは単一boot hartでだけ実行し、このstorageを一度だけ取得する。
-    let storage_pointer = &raw mut PAYLOAD_ADDRESS_SPACE_STORAGE;
-    let storage = unsafe { storage_pointer.as_mut() }
-        .expect("a static payload storage pointer is never null");
-    if !storage.is_empty() {
-        fatal_payload_error(format_args!(
-            "MiniOS payload: storage precondition failed, len={}\r\n",
-            storage.len()
-        ));
-    }
-
-    let image = match load_image_with_kernel_mappings(
-        payload.image_elf(&spec),
-        frames,
-        memory,
-        storage,
-        plan.mappings(),
-    ) {
-        Ok(image) => image,
-        Err(error) => fatal_payload_error(format_args!("MiniOS payload: load, {error:?}\r\n")),
-    };
-    // imageはUserRunへmoveされるため、entryとargv blockは先にcontextへ固定する。
-    // manifestのimage nameとarg=を初期user stackへ積み、a0=argc / a1=argvで起動する。
-    let mut argv: [&str; minios_abi::manifest::ARG_MAX_COUNT + 1] = [""; 17];
-    argv[0] = spec.name();
-    let mut argv_len = 1usize;
-    for argument in spec.args() {
-        argv[argv_len] = argument;
-        argv_len += 1;
-    }
-    let initial = match minios_kernel::user::stack::write_initial_argv(
-        image.address_space(),
-        memory,
-        argv[0],
-        &argv[1..argv_len],
-    ) {
-        Ok(initial) => initial,
-        Err(error) => fatal_payload_error(format_args!("MiniOS payload: argv, {error:?}\r\n")),
-    };
-    let entry = image.entry();
-    let stack_pointer = match PayloadVirtAddr::try_new(initial.stack_pointer as u64) {
-        Ok(address) => address,
-        Err(_) => fatal_payload_error(format_args!(
-            "MiniOS payload: argv stack pointer is not a valid Sv39 address\r\n"
-        )),
-    };
-    let mut context =
-        UserContext::with_arguments(entry, stack_pointer, initial.argc, initial.argv_address);
     let kernel_root = PhysPageNum::from_start(kernel_space.root().as_u64())
         .expect("kernel root page number is valid");
-    let mut run = match UserRun::new(image, frames, memory, kernel_root) {
-        Ok(run) => run,
-        Err(error) => fatal_payload_error(format_args!("MiniOS payload: run build, {error:?}\r\n")),
-    };
+    let kernel_satp = arch::riscv64::csr::sv39_satp_bits(kernel_root);
+    let image_count = payload.images().count();
+    // manifest v2ではProcExit frameでprocess個別の終了を通知し、v1互換の
+    // 単一imageでは従来のExit frameを送る。
+    let multi = payload.manifest().version() >= 2;
 
-    // Safety: pointer値を保存するだけでここでは解参照しない。handlerだけが
-    // assemblyの実行窓で読み、kernelへ戻った直後に0へ戻す。
-    unsafe {
-        USER_SYSCALL_PROBE_SPACE = run.address_space() as *const _ as usize;
-        USER_SYSCALL_PROBE_MEMORY = run.memory() as *const IdentityFrameStore as usize;
-        USER_STDIN_STAGING = StdinStaging::new();
+    // image宣言順にspawnし、slot index (=pid) をmanifest順と一致させる。
+    let mut table = ProcessTable::<MAX_OWNED_FRAMES>::new();
+    for (index, spec) in payload.images().enumerate() {
+        // Safety: 単一boot hartであり、manifest parserがimage数をMAX_PROCS以下に
+        // 制限済み。各storageはこのprocess専用に一度だけ貸し出す。
+        let storage = unsafe {
+            (&raw mut PROCESS_STORAGES)
+                .cast::<AddressSpaceStorage<MAX_OWNED_FRAMES>>()
+                .add(index)
+                .as_mut()
+        }
+        .expect("a static storage pointer is never null");
+        if !storage.is_empty() {
+            fatal_payload_error(format_args!(
+                "MiniOS payload: storage precondition failed, len={}\r\n",
+                storage.len()
+            ));
+        }
+        let mut argv: [&str; minios_abi::manifest::ARG_MAX_COUNT] =
+            [""; minios_abi::manifest::ARG_MAX_COUNT];
+        let mut argc = 0usize;
+        for argument in spec.args() {
+            argv[argc] = argument;
+            argc += 1;
+        }
+        match Process::spawn(
+            spec.name(),
+            payload.image_elf(&spec),
+            &argv[..argc],
+            frames,
+            memory,
+            storage,
+            plan.mappings(),
+        ) {
+            Ok(process) => {
+                let pid = table
+                    .insert(process)
+                    .expect("manifest caps image count at MAX_PROCS");
+                if pid != index {
+                    fatal_payload_error(format_args!(
+                        "MiniOS payload: unexpected pid {pid} for image {index}\r\n"
+                    ));
+                }
+            }
+            Err(failure) => {
+                // 回収しきれなかったimageが残っていればdestroyを一度試す。
+                if let Some(image) = failure.image {
+                    let _ = image.destroy(frames);
+                }
+                reclaim_process_table(&mut table, frames);
+                fatal_payload_error(format_args!(
+                    "MiniOS payload: spawn {index}, {:?}\r\n",
+                    failure.error
+                ));
+            }
+        }
     }
 
-    // payloadはtimer tickに依存せず、Supervisor timer割り込みはuser trapの
-    // 分類上Fatalなので、実行窓だけSTIEを無効化する。
+    // user trap入口を指し直し、Supervisor timer割り込みを有効化する。
+    // `sie.STIE`は実行窓でU-modeへ落ちるたびにsstatus.SPIE経由で効く。
     const SIE_STIE: usize = 1 << 5;
-    // Safety: S-modeで`sie`と`stvec`を書く。
+    // Safety: S-modeで`stvec`と`sie`を書く。
     unsafe {
-        let sie = arch::riscv64::csr::read_sie();
-        arch::riscv64::csr::write_sie(sie & !SIE_STIE);
         arch::riscv64::csr::write_stvec(__user_trap_entry as *const () as usize);
+        let sie = arch::riscv64::csr::read_sie();
+        arch::riscv64::csr::write_sie(sie | SIE_STIE);
+        USER_STDIN_STAGING = StdinStaging::new();
     }
 
     // Ready frameを最後のplain text出力の後に送り、以降のUARTをcontrol frame
     // へ限定する。
     control::send_ready();
+    for pid in 0..MAX_PROCS {
+        if let Some(process) = table.get(pid) {
+            crate::println!("MiniOS sched: spawned pid={pid} name={}", process.name());
+        }
+    }
 
-    let completion = {
-        let mut assembly_exit = RunExit::Resume;
-        let mut sink = control::UartControlSink;
-        let completion = run.execute(&mut sink, |launch| {
-            // Safety: runが両address space、frame memory、連続した専用trap stackを
-            // 所有する。assemblyはkernel satpとboot stackを復元してから戻る。
-            assembly_exit = unsafe {
-                __run_user(
-                    &raw mut context,
-                    launch.user_satp(),
-                    launch.kernel_satp(),
-                    launch.kernel_stack_top(),
-                )
-            };
-            if assembly_exit != RunExit::ReturnToKernel {
-                return RunOutcome::Fatal;
-            }
-            match USER_RUN_OUTCOME.load(Ordering::Relaxed) {
-                USER_RUN_OUTCOME_EXIT => {
-                    RunOutcome::Exit(USER_EXIT_CODE.load(Ordering::Relaxed) as u32)
-                }
-                _ => RunOutcome::Fatal,
-            }
-        });
-        // Safety: handlerが今後走らないkernel側へ戻ったため、danglingになり得る
-        // pointer値を解放前に無効化する。
+    let mut sink = control::UartControlSink;
+    let mut switches = 0usize;
+    let mut failed = 0usize;
+    let mut last_pid = usize::MAX;
+    let mut last_code = 0u32;
+    while let Some(pid) = table.pick_next() {
+        let process = table.get_mut(pid).expect("picked pid is live");
+        // Safety: handlerがdispatch中だけ読む静的参照であり、kernelへ戻るたび
+        // に0へ戻す。同時に実行されるprocessは1つだけなのでaliasしない。
         unsafe {
+            USER_SYSCALL_PROBE_SPACE = process.address_space() as *const _ as usize;
+            USER_SYSCALL_PROBE_MEMORY = memory as *const IdentityFrameStore as usize;
+            USER_EXIT_CODE.store(usize::MAX, Ordering::Relaxed);
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_NONE, Ordering::Relaxed);
+        }
+        // Safety: processがuser address space・連続した専用kernel stack・保存済み
+        // contextを所有する。assemblyはkernel satpとboot stackを復元して戻る。
+        let exit = unsafe {
+            __run_user(
+                process.context_ptr(),
+                process.user_satp(),
+                kernel_satp,
+                process.kernel_stack_top(),
+            )
+        };
+        // Safety: `ReturnToKernel`の時点でこのprocessのtrap frame slotに
+        // 中断contextが書き込まれている。
+        unsafe {
+            process.reload_context();
             USER_SYSCALL_PROBE_SPACE = 0;
             USER_SYSCALL_PROBE_MEMORY = 0;
         }
-        completion
-    };
-    let completion = match completion {
-        Ok(completion) => completion,
-        Err(error) => fatal_payload_error(format_args!("MiniOS payload: finish, {error:?}\r\n")),
-    };
+        if last_pid != usize::MAX && last_pid != pid {
+            switches += 1;
+        }
+        last_pid = pid;
+        match (exit, USER_RUN_OUTCOME.load(Ordering::Relaxed)) {
+            (RunExit::ReturnToKernel, USER_RUN_OUTCOME_PREEMPTED) => {}
+            (RunExit::ReturnToKernel, USER_RUN_OUTCOME_EXIT) => {
+                let code = USER_EXIT_CODE.load(Ordering::Relaxed) as u32;
+                last_code = code;
+                if multi {
+                    let payload = minios_abi::control::ProcExitPayload {
+                        pid: pid as u32,
+                        code,
+                    }
+                    .encode();
+                    use minios_kernel::user::syscall::ControlSink as _;
+                    let _ = sink.frame(minios_abi::control::FrameKind::ProcExit, &payload);
+                } else {
+                    use minios_kernel::user::syscall::ControlSink as _;
+                    let _ = sink.frame(minios_abi::control::FrameKind::Exit, &code.to_le_bytes());
+                }
+                reclaim_process_slot(&mut table, pid, frames);
+            }
+            (
+                RunExit::ReturnToKernel,
+                USER_RUN_OUTCOME_FATAL_TRAP
+                | USER_RUN_OUTCOME_SINK_FAILURE
+                | USER_RUN_OUTCOME_SOURCE_FAILURE,
+            ) => {
+                failed += 1;
+                reclaim_process_slot(&mut table, pid, frames);
+            }
+            // `ReturnToKernel`以外の戻りや、handlerがoutcomeを記録しないまま
+            // 戻った場合は実装不変条件の破綻であり、静かに続行しない。
+            _ => fatal_payload_error(format_args!(
+                "MiniOS payload: internal, exit={exit:?} outcome={}\r\n",
+                USER_RUN_OUTCOME.load(Ordering::Relaxed)
+            )),
+        }
+    }
 
     let after = frames.stats();
-    let storage_len = storage.len();
-    if after != before || storage_len != 0 {
+    if after != before {
         fatal_payload_error(format_args!(
-            "MiniOS payload: recovery, allocator expected={before:?} actual={after:?}; storage len={storage_len}\r\n"
+            "MiniOS payload: recovery, allocator expected={before:?} actual={after:?}\r\n"
         ));
     }
-
-    match completion {
-        RunCompletion::Exit(code) => {
-            // control mode中の唯一のplain text出力経路であり、Diagnostic frame
-            // としてhostへ届くresource cleanup markerである。
-            crate::println!("\r\nMiniOS payload: ok code={code}");
-            successful_payload_shutdown()
+    // Safety: 全processが終了済みで、storageを触るものは残っていない。
+    let storages = unsafe {
+        core::slice::from_raw_parts(
+            (&raw const PROCESS_STORAGES).cast::<AddressSpaceStorage<MAX_OWNED_FRAMES>>(),
+            MAX_PROCS,
+        )
+    };
+    for (index, storage) in storages.iter().enumerate() {
+        let len = storage.len();
+        if len != 0 {
+            fatal_payload_error(format_args!(
+                "MiniOS payload: recovery, storage {index} len={len}\r\n"
+            ));
         }
-        RunCompletion::Fatal => fatal_payload_error(format_args!(
-            "MiniOS payload: fatal, scause={:#018x} stval={:#018x}\r\n",
-            USER_FATAL_SCAUSE.load(Ordering::Relaxed),
-            USER_FATAL_STVAL.load(Ordering::Relaxed)
-        )),
     }
+
+    if failed > 0 {
+        fatal_payload_error(format_args!(
+            "MiniOS payload: failed processes={failed}\r\n"
+        ));
+    }
+    if multi {
+        crate::println!("\r\nMiniOS payload: ok processes={image_count} switches={switches}");
+    } else {
+        crate::println!("\r\nMiniOS payload: ok code={last_code}");
+    }
+    successful_payload_shutdown()
 }
 
 #[cfg(target_arch = "riscv64")]

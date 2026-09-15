@@ -237,7 +237,7 @@ mod tests {
             kind: FrameKind::Ready,
             payload_len: READY_PAYLOAD_LEN as u32,
         };
-        assert_eq!(ready_payload, [1, 0, 1, 0]);
+        assert_eq!(ready_payload, [1, 0, 2, 0]);
         assert_eq!(
             FrameHeader::decode(&ready_header.encode()),
             Ok(ready_header)

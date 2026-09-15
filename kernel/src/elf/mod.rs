@@ -5,7 +5,9 @@ pub mod load;
 pub mod plan;
 
 pub use header::{ElfError, ElfImage, MAX_LOAD_SEGMENTS, ProgramHeader};
-pub use load::{LoadError, LoadedImage, LoadedImageDestroyError, load_image};
+pub use load::{
+    LoadError, LoadedImage, LoadedImageDestroyError, load_image, load_image_with_kernel_mappings,
+};
 pub use plan::{
     LoadPlan, LoadSegment, MAX_USER_IMAGE_PAGES, USER_END, USER_GUARD_BOTTOM, USER_STACK_BOTTOM,
     USER_STACK_TOP, USER_START,
