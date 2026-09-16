@@ -7,6 +7,8 @@
 
 use core::fmt;
 
+#[cfg(not(target_arch = "riscv32"))]
+use crate::storage::fat32::FileDesc;
 use crate::{
     elf::{LoadError, LoadedImage, load_image_with_kernel_mappings},
     memory::frame::{FrameError, FrameSource, PAGE_SIZE, PhysFrame},
@@ -69,13 +71,131 @@ pub enum ProcessState {
     BlockedOnStdin,
 }
 
+/// `open`/`create`がprocessへ割り当てたfile descriptor 1個。
+/// `desc`はFAT32の位置記述子、`offset`は次に読み書きするbyte位置、
+/// `writable`は`create`由来のfdを示す。fdはread専用またはwrite専用で、
+/// 両方は許さない。
+#[cfg(not(target_arch = "riscv32"))]
+#[derive(Debug, Clone, Copy)]
+pub struct FileFd {
+    desc: FileDesc,
+    offset: u64,
+    writable: bool,
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+impl FileFd {
+    /// このfdが指すfileのFAT32位置記述子。
+    pub const fn desc(&self) -> &FileDesc {
+        &self.desc
+    }
+
+    /// `write_range`がsizeやfirst_clusterをwrite-backするための可変参照。
+    pub fn desc_mut(&mut self) -> &mut FileDesc {
+        &mut self.desc
+    }
+
+    /// 次に読み書きするbyte位置。
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// offsetを直接設定する。`lseek`が使う。
+    pub fn set_offset(&mut self, offset: u64) {
+        self.offset = offset;
+    }
+
+    /// 処理したbyte数だけoffsetを進める。`read`/`write`が使う。
+    pub fn advance(&mut self, count: u64) {
+        self.offset += count;
+    }
+
+    /// `create`由来で`write`を受理するfdかどうか。
+    pub const fn writable(&self) -> bool {
+        self.writable
+    }
+}
+
+/// processごとのfile descriptor table。fd番号はslot index +
+/// `FIRST_FILE_FD`であり、tableはprocess内に閉じるため他processのfdを
+/// 構造的に参照できない。RV32はfdを持たないためZSTでコスト0にする。
+#[cfg(not(target_arch = "riscv32"))]
+#[derive(Debug)]
+struct FileFdTable {
+    slots: [Option<FileFd>; minios_abi::syscall::MAX_OPEN_FILES],
+}
+
+#[cfg(target_arch = "riscv32")]
+#[derive(Debug)]
+struct FileFdTable;
+
+#[cfg(not(target_arch = "riscv32"))]
+impl FileFdTable {
+    const fn new() -> Self {
+        Self {
+            slots: [const { None }; minios_abi::syscall::MAX_OPEN_FILES],
+        }
+    }
+
+    fn fd_mut(&mut self, fd: usize) -> Option<&mut FileFd> {
+        let slot = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD)?;
+        self.slots.get_mut(slot)?.as_mut()
+    }
+
+    fn alloc_fd(&mut self, desc: FileDesc, writable: bool) -> Result<usize, isize> {
+        let slot = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(minios_abi::syscall::EMFILE)?;
+        self.slots[slot] = Some(FileFd {
+            desc,
+            offset: 0,
+            writable,
+        });
+        Ok(minios_abi::syscall::FIRST_FILE_FD + slot)
+    }
+
+    fn close_fd(&mut self, fd: usize) -> bool {
+        let Some(slot) = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD) else {
+            return false;
+        };
+        match self.slots.get_mut(slot) {
+            Some(slot) => slot.take().is_some(),
+            None => false,
+        }
+    }
+
+    /// `dir_location`が指すentryを開いているfdをすべて閉じる。
+    /// `unlink`したfileのclusterは即座に解放されるため、残すと再利用
+    /// されたslotやclusterを壊し得る。
+    fn revoke_fd_at(&mut self, dir_cluster: u32, dir_index: u32) {
+        for slot in self.slots.iter_mut() {
+            if let Some(fd) = slot
+                && fd.desc.dir_location() == (dir_cluster, dir_index)
+            {
+                *slot = None;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+impl FileFdTable {
+    const fn new() -> Self {
+        Self
+    }
+}
+
 /// 再入可能なuser process。image (user address spaceとその所有frame)、
-/// 専用kernel trap stack、前回中断時の`UserContext`を所有する。
+/// 専用kernel trap stack、前回中断時の`UserContext`、file descriptor
+/// tableを所有する。
 ///
 /// allocator/frame memoryへの参照は保持しないため、生存中のprocess同士が
 /// borrowを共有せず、tableが複数のprocessを同時に抱えられる。
 /// `dispatch`中だけkernelが当該stackを使い、戻った時点でcontextをslotから
-/// 回収する (`reload_context`)。
+/// 回収する (`reload_context`)。fd tableはprocess dropとともに死ぬため、
+/// 終了時の明示的なcloseは要らない。
 pub struct Process {
     name: &'static str,
     image: Option<LoadedImage>,
@@ -84,6 +204,7 @@ pub struct Process {
     user_satp: u64,
     context: UserContext,
     state: ProcessState,
+    file_fds: FileFdTable,
 }
 
 impl fmt::Debug for Process {
@@ -187,6 +308,7 @@ impl Process {
             user_satp,
             context,
             state: ProcessState::Runnable,
+            file_fds: FileFdTable::new(),
         })
     }
 
@@ -197,6 +319,33 @@ impl Process {
     /// stdin待ちへ移す。`dispatch`が`Blocked`を返した直後に呼ぶ。
     pub fn block_on_stdin(&mut self) {
         self.state = ProcessState::BlockedOnStdin;
+    }
+
+    /// `fd`に対応するslotを借りる。未割り当てや範囲外なら`None`。
+    /// trap窓からのみ呼ばれ、借用はその窓内で完結する。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn fd_mut(&mut self, fd: usize) -> Option<&mut FileFd> {
+        self.file_fds.fd_mut(fd)
+    }
+
+    /// file記述子を割り当てfd番号を返す。`writable`のfdは`write`だけを
+    /// 受理し、それ以外は`read`だけを受理する。空きslotがなければ`EMFILE`。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn alloc_fd(&mut self, desc: FileDesc, writable: bool) -> Result<usize, isize> {
+        self.file_fds.alloc_fd(desc, writable)
+    }
+
+    /// `fd`を閉じる。未割り当てなら`false`を返す。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn close_fd(&mut self, fd: usize) -> bool {
+        self.file_fds.close_fd(fd)
+    }
+
+    /// `(dir_cluster, dir_index)`のdir entryを指すfdを閉じる。
+    /// `unlink`成功後にtable経由で呼ばれる。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn revoke_fd_at(&mut self, dir_cluster: u32, dir_index: u32) {
+        self.file_fds.revoke_fd_at(dir_cluster, dir_index);
     }
 
     /// stdinへのbyte到着で再びdispatch可能にする。
@@ -384,6 +533,17 @@ impl ProcessTable {
             if !slot.is_runnable() {
                 slot.wake();
             }
+        }
+    }
+
+    /// `(dir_cluster, dir_index)`のdir entryを指すfdを全processから閉じる。
+    /// `unlink`したfileのclusterは即座に解放されるため、開いたままのfdを
+    /// 残すと再利用されたslotやclusterを壊し得る。呼び出しprocess自身の
+    /// fdも失効する。trap窓からのみ呼ばれる。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn revoke_file_fds(&mut self, dir_cluster: u32, dir_index: u32) {
+        for process in self.slots.iter_mut().flatten() {
+            process.revoke_fd_at(dir_cluster, dir_index);
         }
     }
 }
@@ -718,5 +878,169 @@ mod tests {
 
         assert_eq!(table.pick_next(), None);
         assert!(!table.is_empty());
+    }
+
+    // Catches fd numbering or capacity drifting: a fresh process must
+    // allocate fds upward from FIRST_FILE_FD and reject the allocation past
+    // MAX_OPEN_FILES with EMFILE.
+    #[test]
+    fn process_allocates_fds_up_to_the_table_limit() {
+        use minios_abi::syscall::{EMFILE, FIRST_FILE_FD, MAX_OPEN_FILES};
+
+        let mut fixture = SpawnFixture::new();
+        let mut process = fixture.spawn("fd-proc");
+
+        for index in 0..MAX_OPEN_FILES {
+            let fd = process
+                .alloc_fd(FileDesc::for_test(9, index as u32), false)
+                .expect("slot must be free");
+            assert_eq!(fd, FIRST_FILE_FD + index);
+        }
+        assert_eq!(
+            process.alloc_fd(FileDesc::for_test(9, 99), false),
+            Err(EMFILE)
+        );
+    }
+
+    // Catches fd state leaking between processes: each process must see only
+    // its own table, so the same fd number resolves to different descriptors
+    // and one process's allocation must not occupy another's slots.
+    #[test]
+    fn fd_tables_are_isolated_per_process() {
+        use minios_abi::syscall::FIRST_FILE_FD;
+
+        let mut fixture = SpawnFixture::new();
+        let mut p0 = fixture.spawn("fd-a");
+        let mut p1 = fixture.spawn("fd-b");
+
+        let fd0 = p0
+            .alloc_fd(FileDesc::for_test(9, 0), false)
+            .expect("p0 slot must be free");
+        let fd1 = p1
+            .alloc_fd(FileDesc::for_test(8, 7), true)
+            .expect("p1 slot must be free");
+        assert_eq!(fd0, FIRST_FILE_FD);
+        assert_eq!(fd1, FIRST_FILE_FD);
+
+        assert_eq!(
+            p0.fd_mut(fd0).map(|fd| fd.desc().dir_location()),
+            Some((9, 0))
+        );
+        assert_eq!(
+            p1.fd_mut(fd1).map(|fd| fd.desc().dir_location()),
+            Some((8, 7))
+        );
+        assert!(p1.fd_mut(fd1 + 1).is_none());
+    }
+
+    // Catches close leaving a slot stuck or double-close reporting success:
+    // closed fds must fail lookup, report false on re-close, free the slot
+    // for reuse, and reject out-of-range numbers.
+    #[test]
+    fn close_fd_frees_the_slot_and_rejects_unknown_fds() {
+        use minios_abi::syscall::FIRST_FILE_FD;
+
+        let mut fixture = SpawnFixture::new();
+        let mut process = fixture.spawn("fd-close");
+
+        let fd = process
+            .alloc_fd(FileDesc::for_test(9, 0), false)
+            .expect("slot must be free");
+        assert!(process.close_fd(fd));
+        assert!(!process.close_fd(fd));
+        assert!(process.fd_mut(fd).is_none());
+        assert!(!process.close_fd(0));
+        assert!(!process.close_fd(FIRST_FILE_FD + 100));
+
+        let again = process
+            .alloc_fd(FileDesc::for_test(9, 1), false)
+            .expect("closed slot must be reusable");
+        assert_eq!(again, fd);
+    }
+
+    // Catches fd bookkeeping losing the position or direction: offset must
+    // advance by I/O counts, lseek must overwrite it, and the writable flag
+    // must survive.
+    #[test]
+    fn fd_tracks_offset_and_direction() {
+        let mut fixture = SpawnFixture::new();
+        let mut process = fixture.spawn("fd-io");
+        let fd = process
+            .alloc_fd(FileDesc::for_test(9, 0), true)
+            .expect("slot must be free");
+
+        let entry = process.fd_mut(fd).expect("fd is live");
+        assert!(entry.writable());
+        assert_eq!(entry.offset(), 0);
+        entry.advance(5);
+        assert_eq!(entry.offset(), 5);
+        entry.set_offset(100);
+        assert_eq!(entry.offset(), 100);
+        assert_eq!(entry.desc().dir_location(), (9, 0));
+    }
+
+    // Catches unlink revoking only the caller's table or skipping writable
+    // fds: revocation must cross every live process and every direction,
+    // while descriptors for other entries stay open.
+    #[test]
+    fn revoke_file_fds_crosses_process_boundaries() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let mut p0 = fixture.spawn("fd-r0");
+        let mut p1 = fixture.spawn("fd-r1");
+
+        let keep0 = p0
+            .alloc_fd(FileDesc::for_test(9, 1), false)
+            .expect("p0 slot must be free");
+        let gone0 = p0
+            .alloc_fd(FileDesc::for_test(4, 2), false)
+            .expect("p0 slot must be free");
+        let gone1 = p1
+            .alloc_fd(FileDesc::for_test(4, 2), true)
+            .expect("p1 slot must be free");
+        let keep1 = p1
+            .alloc_fd(FileDesc::for_test(9, 3), false)
+            .expect("p1 slot must be free");
+        table.insert(p0).expect("insert p0");
+        table.insert(p1).expect("insert p1");
+
+        table.revoke_file_fds(4, 2);
+
+        let p0 = table.get_mut(0).expect("p0 is live");
+        assert!(p0.fd_mut(gone0).is_none());
+        assert!(p0.fd_mut(keep0).is_some());
+        let p1 = table.get_mut(1).expect("p1 is live");
+        assert!(p1.fd_mut(gone1).is_none());
+        assert!(p1.fd_mut(keep1).is_some());
+    }
+
+    // Catches the fd table outliving its process: a process spawned into a
+    // previously occupied slot must start with an empty table instead of
+    // inheriting the predecessor's descriptors.
+    #[test]
+    fn reused_slot_starts_with_empty_fd_table() {
+        use minios_abi::syscall::{FIRST_FILE_FD, MAX_OPEN_FILES};
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let mut p0 = fixture.spawn("fd-old");
+        p0.alloc_fd(FileDesc::for_test(9, 0), false)
+            .expect("slot must be free");
+        p0.alloc_fd(FileDesc::for_test(9, 1), false)
+            .expect("slot must be free");
+        table.insert(p0).expect("insert p0");
+
+        let mut exited = table.take(0).expect("slot 0 is live");
+        exited
+            .reclaim(&mut fixture.frames)
+            .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
+
+        let p1 = fixture.spawn("fd-new");
+        let pid = table.insert(p1).expect("insert p1");
+        assert_eq!(pid, 0);
+        let fresh = table.get_mut(pid).expect("p1 is live");
+        for fd in FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES {
+            assert!(fresh.fd_mut(fd).is_none());
+        }
     }
 }

@@ -86,6 +86,18 @@ impl FileDesc {
     pub const fn size(&self) -> u32 {
         self.size
     }
+
+    /// host testが任意のdir位置を持つ記述子を組み立てるための構築子。
+    /// fd失効の照合だけを検査する用途なので内容値は検証しない。
+    #[cfg(test)]
+    pub(crate) const fn for_test(dir_cluster: u32, dir_index: u32) -> Self {
+        Self {
+            first_cluster: 0,
+            size: 0,
+            dir_cluster,
+            dir_index,
+        }
+    }
 }
 
 /// directory走査中のentryの物理位置。`dir_head`はそのentryを含む
