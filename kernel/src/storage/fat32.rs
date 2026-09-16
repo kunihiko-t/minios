@@ -54,6 +54,15 @@ pub struct Fat32<R> {
     data_cluster_count: u32,
 }
 
+/// `Fat32::open_file`が返すfile位置の記述子。fd tableへそのまま格納できる
+/// plain dataであり、session自身への参照は持たない。
+#[cfg(not(target_arch = "riscv32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileDesc {
+    first_cluster: u32,
+    size: u32,
+}
+
 struct Geometry {
     partition_start: u32,
     volume_sectors: u32,
@@ -213,6 +222,88 @@ impl<R: SectorReader> Fat32<R> {
             return Err(FatError::IsDirectory);
         }
         self.stream_file(&entry, &mut scratch, write)
+    }
+
+    /// `path`を解決してfileを開き、`read_range`へ渡す記述子を返す。
+    /// directoryを指すpathは`IsDirectory`を返す。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn open_file(&mut self, path: &str) -> Result<FileDesc, FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        let entry = self.resolve_path(path, &mut scratch)?;
+        if entry.directory {
+            return Err(FatError::IsDirectory);
+        }
+        Ok(FileDesc {
+            first_cluster: entry.first_cluster,
+            size: entry.size,
+        })
+    }
+
+    /// 開いたfileの`offset` byte目から`output`へ最大`output.len()` byte
+    /// 読み、書いたbyte数を返す。`offset >= size`ならEOFとして0を返す。
+    /// 読み切るまでcluster chainを前方へだけたどる。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn read_range(
+        &mut self,
+        file: &FileDesc,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FatError<R::Error>> {
+        if offset >= file.size as u64 || output.is_empty() {
+            return Ok(0);
+        }
+        if !self.is_data_cluster(file.first_cluster) {
+            return Err(FatError::CorruptChain);
+        }
+        let mut scratch = [0; 512];
+        let bytes_per_cluster = self.sectors_per_cluster as u64 * 512;
+        // offsetが指すclusterまでchainをたどる。有効なfileでskipがchain長を
+        // 超えることはないが、破損したchainは`CorruptChain`として報告する。
+        let mut skip = offset / bytes_per_cluster;
+        if skip >= self.data_cluster_count as u64 {
+            return Err(FatError::CorruptChain);
+        }
+        let mut cluster = file.first_cluster;
+        while skip != 0 {
+            cluster = match self.next_cluster(cluster, &mut scratch)? {
+                Some(next) => next,
+                None => return Err(FatError::CorruptChain),
+            };
+            skip -= 1;
+        }
+
+        let mut intra = (offset % bytes_per_cluster) as usize;
+        let mut remaining = (file.size as u64 - offset).min(output.len() as u64);
+        let mut written = 0usize;
+        let mut clusters_read = 0;
+        while remaining != 0 {
+            if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
+                return Err(FatError::CorruptChain);
+            }
+            let mut sector = (intra / 512) as u32;
+            intra %= 512;
+            while sector < self.sectors_per_cluster.into() && remaining != 0 {
+                let lba = self.data_sector_lba(cluster, sector)?;
+                self.reader
+                    .read_sector(lba, &mut scratch)
+                    .map_err(FatError::Read)?;
+                let take = (512 - intra).min(remaining as usize);
+                output[written..written + take].copy_from_slice(&scratch[intra..intra + take]);
+                written += take;
+                remaining -= take as u64;
+                intra = 0;
+                sector += 1;
+            }
+            if remaining == 0 {
+                break;
+            }
+            clusters_read += 1;
+            cluster = match self.next_cluster(cluster, &mut scratch)? {
+                Some(next) => next,
+                None => return Err(FatError::CorruptChain),
+            };
+        }
+        Ok(written)
     }
 
     /// 解決済みのfile entryを先頭からstreamする。`size`が0のfileは
@@ -878,7 +969,7 @@ impl<R> Fat32<R> {
 mod tests {
     extern crate std;
 
-    use super::{DirEntry, Fat32, FatError, lfn_checksum};
+    use super::{DirEntry, Fat32, FatError, FileDesc, lfn_checksum};
     use crate::storage::SectorReader;
     use std::{string::String, vec::Vec};
 
@@ -1522,6 +1613,77 @@ mod tests {
         assert!(matches!(
             Fat32::mount(MemoryReader::with_sector(0, boot)),
             Err(FatError::Unsupported)
+        ));
+    }
+
+    // Catches open_file not resolving paths, accepting directories, or losing
+    // the entry's cluster and size.
+    #[test]
+    fn open_file_returns_a_descriptor_and_rejects_directories() {
+        let mut fs = mounted_nested_fixture();
+        let desc = fs.open_file("SUBDIR/NOTE.TXT").unwrap();
+        assert_eq!(desc.size, 11);
+
+        assert!(matches!(fs.open_file("SUBDIR"), Err(FatError::IsDirectory)));
+        assert!(matches!(fs.open_file("MISSING"), Err(FatError::NotFound)));
+        assert!(matches!(fs.open_file("A//B"), Err(FatError::InvalidName)));
+    }
+
+    // Catches read_range skipping the wrong clusters, ignoring the output
+    // bound, or not reporting EOF.
+    #[test]
+    fn read_range_streams_from_any_offset_within_the_chain() {
+        let mut content = [0x30u8; 700];
+        for (index, byte) in content.iter_mut().enumerate() {
+            *byte = b'0' + (index % 10) as u8;
+        }
+        let mut fs = mounted_multicluster_file_fixture(&content);
+        let desc = fs.open_file("HELLO.TXT").unwrap();
+
+        let mut output = [0; 700];
+        assert_eq!(fs.read_range(&desc, 0, &mut output).unwrap(), 700);
+        assert_eq!(output, content);
+
+        // cluster境界をまたぐoffset: 1 byte目がcluster 5の先頭。
+        let mut tail = [0; 700];
+        assert_eq!(fs.read_range(&desc, 500, &mut tail).unwrap(), 200);
+        assert_eq!(tail[..200], content[500..]);
+
+        // file末尾を超える要求はsizeで打ち切る。
+        let mut end = [0; 700];
+        assert_eq!(fs.read_range(&desc, 690, &mut end).unwrap(), 10);
+        assert_eq!(end[..10], content[690..]);
+
+        assert_eq!(fs.read_range(&desc, 700, &mut end).unwrap(), 0);
+        assert_eq!(fs.read_range(&desc, 9000, &mut end).unwrap(), 0);
+        assert_eq!(fs.read_range(&desc, 0, &mut []).unwrap(), 0);
+    }
+
+    // Catches read_range treating an empty file's cluster 0 as a chain start
+    // or following a chain past the mounted bound.
+    #[test]
+    fn read_range_handles_empty_files_and_corrupt_chains() {
+        let mut fs = mounted_empty_file_fixture();
+        let desc = fs.open_file("EMPTY.TXT").unwrap();
+        let mut output = [0xaa; 8];
+        assert_eq!(fs.read_range(&desc, 0, &mut output).unwrap(), 0);
+
+        // cluster 0を指す破損descはchainへ入る前にCorruptChain。
+        let bad = FileDesc {
+            first_cluster: 0,
+            size: 10,
+        };
+        assert!(matches!(
+            fs.read_range(&bad, 0, &mut output),
+            Err(FatError::CorruptChain)
+        ));
+
+        // offsetがcluster boundを超える場合も同じくCorruptChain。
+        let mut cyclic = mounted_cyclic_file_fixture();
+        let desc = cyclic.open_file("LOOP.BIN").unwrap();
+        assert!(matches!(
+            cyclic.read_range(&desc, u64::from(u32::MAX) - 512, &mut output),
+            Err(FatError::CorruptChain)
         ));
     }
 }

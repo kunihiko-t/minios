@@ -10,8 +10,8 @@ use crate::{
 use minios_abi::{
     control::FrameKind,
     syscall::{
-        EBADF, EFAULT, EINVAL, ENOSYS, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN,
-        STDOUT, SyscallNumber,
+        EBADF, EFAULT, EINVAL, ENOSYS, FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN,
+        MAX_WRITE_LEN, STDERR, STDIN, STDOUT, SyscallNumber,
     },
 };
 
@@ -37,6 +37,27 @@ pub trait ControlSource {
     /// default実装は`ENOSYS`であり、storageを持たないsourceは実装不要。
     fn read_file(&mut self, path: &str, output: &mut [u8]) -> Result<usize, isize> {
         let _ = (path, output);
+        Err(ENOSYS)
+    }
+
+    /// `path`のfileを開き、割り当てたfd（`FIRST_FILE_FD`以上）を返す。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn open_file(&mut self, path: &str) -> Result<usize, isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
+
+    /// `fd`のfileから`output`へ最大`output.len()` byte読み、読んだbyte数
+    /// （EOFは0）を返す。成功時はfdのoffsetを進める。default実装は`ENOSYS`。
+    fn read_fd(&mut self, fd: usize, output: &mut [u8]) -> Result<usize, isize> {
+        let _ = (fd, output);
+        Err(ENOSYS)
+    }
+
+    /// `fd`のfileを閉じる。`Err`はそのまま`a0`へ返すerrnoである。
+    /// default実装は`ENOSYS`。
+    fn close_fd(&mut self, fd: usize) -> Result<(), isize> {
+        let _ = fd;
         Err(ENOSYS)
     }
 }
@@ -88,6 +109,10 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_read(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::ReadFile as usize {
         dispatch_read_file(context, space, memory, source, read_scratch)
+    } else if number == SyscallNumber::Open as usize {
+        dispatch_open(context, space, memory, source)
+    } else if number == SyscallNumber::Close as usize {
+        dispatch_close(context, source)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -103,7 +128,9 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
     source: &mut R,
     read_scratch: &mut [u8; MAX_READ_LEN],
 ) -> SyscallFlow<E, R::Error> {
-    if context.register(10) != STDIN {
+    let fd = context.register(10);
+    let is_file_fd = (FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd);
+    if fd != STDIN && !is_file_fd {
         context.set_register(10, EBADF as usize);
         return SyscallFlow::Resume;
     }
@@ -122,16 +149,83 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
         context.set_register(10, EFAULT as usize);
         return SyscallFlow::Resume;
     }
-    // `Ok(None)`は入力未到着である。`sepc`はclassifyがecallの次へ進めて
-    // あるため、4 byte戻して再開時に同じecallをやり直す。
-    match source.read_stdin(&mut read_scratch[..len]) {
-        Ok(Some(count)) => SyscallFlow::ReadComplete { start, len: count },
-        Ok(None) => {
-            context.set_sepc(context.sepc() - 4);
-            SyscallFlow::Blocked
-        }
-        Err(error) => SyscallFlow::SourceFatal(error),
+    if fd == STDIN {
+        // `Ok(None)`は入力未到着である。`sepc`はclassifyがecallの次へ進めて
+        // あるため、4 byte戻して再開時に同じecallをやり直す。
+        return match source.read_stdin(&mut read_scratch[..len]) {
+            Ok(Some(count)) => SyscallFlow::ReadComplete { start, len: count },
+            Ok(None) => {
+                context.set_sepc(context.sepc() - 4);
+                SyscallFlow::Blocked
+            }
+            Err(error) => SyscallFlow::SourceFatal(error),
+        };
     }
+    match source.read_fd(fd, &mut read_scratch[..len]) {
+        Ok(count) => SyscallFlow::ReadComplete {
+            start,
+            len: count.min(len),
+        },
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
+}
+
+/// `open` (`a0=path_ptr, a1=path_len`)。検証規約は`read_file`と同じで、
+/// fd割り当てのside effectより先にpathのEFAULT/EINVALを確定する。
+/// 成功時は`a0`へfdを返す。
+fn dispatch_open<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let path_len = context.register(11);
+    if path_len == 0 || path_len > MAX_PATH_LEN {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    if copy_from_user(
+        space,
+        memory,
+        context.register(10) as u64,
+        &mut path_buf[..path_len],
+    )
+    .is_err()
+    {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    };
+    match source.open_file(path) {
+        Ok(fd) => context.set_register(10, fd),
+        Err(errno) => context.set_register(10, errno as usize),
+    }
+    SyscallFlow::Resume
+}
+
+/// `close` (`a0=fd`)。標準streamのfdは`EBADF`として拒否し、file fdは
+/// sourceへ委譲する。成功時は`a0`へ0を返す。
+fn dispatch_close<E, R: ControlSource>(
+    context: &mut UserContext,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let fd = context.register(10);
+    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
+        context.set_register(10, EBADF as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.close_fd(fd) {
+        Ok(()) => context.set_register(10, 0),
+        Err(errno) => context.set_register(10, errno as usize),
+    }
+    SyscallFlow::Resume
 }
 
 /// `ReadComplete`の受信済みbyteを検証済みuser rangeへ移し、`a0`へ長さを書く。
@@ -268,8 +362,8 @@ mod tests {
     use minios_abi::{
         control::FrameKind,
         syscall::{
-            EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, MAX_PATH_LEN,
-            MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT, SyscallNumber,
+            EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, FIRST_FILE_FD,
+            MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT, SyscallNumber,
         },
     };
 
@@ -278,6 +372,8 @@ mod tests {
     const WRITE_NUMBER: usize = SyscallNumber::Write as usize;
     const READ_NUMBER: usize = SyscallNumber::Read as usize;
     const READ_FILE_NUMBER: usize = SyscallNumber::ReadFile as usize;
+    const OPEN_NUMBER: usize = SyscallNumber::Open as usize;
+    const CLOSE_NUMBER: usize = SyscallNumber::Close as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,6 +617,9 @@ mod tests {
         result: Result<(), isize>,
         seen_path: Option<Vec<u8>>,
         reads: usize,
+        open_fd: Result<usize, isize>,
+        fd_reads: usize,
+        closes: usize,
     }
 
     impl FileSource {
@@ -530,6 +629,9 @@ mod tests {
                 result: Ok(()),
                 seen_path: None,
                 reads: 0,
+                open_fd: Ok(FIRST_FILE_FD),
+                fd_reads: 0,
+                closes: 0,
             }
         }
 
@@ -557,12 +659,59 @@ mod tests {
             output[..count].copy_from_slice(&self.script[..count]);
             Ok(count)
         }
+
+        fn open_file(&mut self, path: &str) -> Result<usize, isize> {
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.open_fd
+        }
+
+        fn read_fd(&mut self, _fd: usize, output: &mut [u8]) -> Result<usize, isize> {
+            self.fd_reads += 1;
+            self.result?;
+            let count = core::cmp::min(self.script.len(), output.len());
+            output[..count].copy_from_slice(&self.script[..count]);
+            Ok(count)
+        }
+
+        fn close_fd(&mut self, fd: usize) -> Result<(), isize> {
+            self.closes += 1;
+            if fd == FIRST_FILE_FD {
+                Ok(())
+            } else {
+                Err(EBADF)
+            }
+        }
     }
 
     /// `read_file`用のdispatch fixture。`page_content`をMESSAGE_PAGEへ書き、
     /// `a3`を含む4引数のcontextを組む。
     #[allow(clippy::too_many_arguments)]
     fn dispatch_file_fixture<R: ControlSource<Error = SinkError>>(
+        a0: usize,
+        a1: usize,
+        a2: usize,
+        a3: usize,
+        page_content: &[u8],
+        sink: &mut FakeSink,
+        source: &mut R,
+        read_scratch: &mut [u8; MAX_READ_LEN],
+    ) -> (UserContext, SyscallFlow<SinkError>) {
+        dispatch_numbered_file_fixture(
+            READ_FILE_NUMBER,
+            a0,
+            a1,
+            a2,
+            a3,
+            page_content,
+            sink,
+            source,
+            read_scratch,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_numbered_file_fixture<R: ControlSource<Error = SinkError>>(
+        number: usize,
         a0: usize,
         a1: usize,
         a2: usize,
@@ -583,7 +732,7 @@ mod tests {
             .unwrap();
         builder.copy_into(page, 0, page_content).unwrap();
         let space = builder.finish();
-        let mut context = syscall_context(READ_FILE_NUMBER, a0, a1, a2);
+        let mut context = syscall_context(number, a0, a1, a2);
         context.set_register(13, a3);
         let flow = dispatch_syscall(&mut context, &space, &memory, sink, source, read_scratch);
         (context, flow)
@@ -874,7 +1023,8 @@ mod tests {
     // Catches accepting a descriptor other than 0 or consuming input on EBADF.
     #[test]
     fn read_reports_unknown_descriptors_with_ebadf() {
-        for descriptor in [1, 2, 3] {
+        // 1,2は標準streamの書き込み側、7以降はfd範囲外で`EBADF`。
+        for descriptor in [1, 2, 7, 100] {
             let mut sink = FakeSink::default();
             let mut source = FakeSource::scripted(b"hello");
             let (context, flow) = dispatch_fixture(
@@ -1259,5 +1409,165 @@ mod tests {
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOSYS as usize);
         assert_eq!(source.reads, 0);
+    }
+
+    // Catches open not forwarding the path, the returned fd, or the source's
+    // errno, and path validation being skipped.
+    #[test]
+    fn open_returns_the_allocated_fd_and_validates_the_path() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"file data");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            OPEN_NUMBER,
+            MESSAGE_PAGE,
+            b"HELLO.TXT".len(),
+            0,
+            0,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), FIRST_FILE_FD);
+        assert_eq!(source.seen_path.as_deref(), Some(b"HELLO.TXT".as_slice()));
+
+        for (a0, a1, content, expected) in [
+            (MESSAGE_PAGE, 0, b"HELLO.TXT".as_slice(), EINVAL),
+            (
+                MESSAGE_PAGE,
+                MAX_PATH_LEN + 1,
+                b"HELLO.TXT".as_slice(),
+                EINVAL,
+            ),
+            (0x40_000, 9, b"HELLO.TXT".as_slice(), EFAULT),
+            (MESSAGE_PAGE, 3, b"A\xffB".as_slice(), EINVAL),
+        ] {
+            let mut source = FileSource::serving(b"file data");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                OPEN_NUMBER,
+                a0,
+                a1,
+                0,
+                0,
+                content,
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), expected as usize);
+            assert!(source.seen_path.is_none());
+        }
+
+        let mut source = FileSource::failing(ENOENT);
+        source.open_fd = Err(ENOENT);
+        let (context, flow) = dispatch_numbered_file_fixture(
+            OPEN_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0,
+            0,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOENT as usize);
+    }
+
+    // Catches read on a file fd not reaching read_fd, not truncating at the
+    // buffer, or swallowing source errno.
+    #[test]
+    fn read_on_a_file_fd_streams_via_read_fd() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"file contents");
+        let buf_start = MESSAGE_PAGE + 512;
+        let mut scratch_buf = scratch();
+        let (_context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            FIRST_FILE_FD,
+            buf_start,
+            64,
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+
+        let (start, len) = read_completion(flow);
+        assert_eq!((start, len), (buf_start as u64, 13));
+        assert_eq!(&scratch_buf[..13], b"file contents");
+        assert_eq!(source.fd_reads, 1);
+        assert_eq!(source.reads, 0);
+
+        let mut source = FileSource::failing(EBADF);
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            FIRST_FILE_FD,
+            buf_start,
+            64,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EBADF as usize);
+    }
+
+    // Catches close rejecting standard descriptors and forwarding file fds,
+    // including the source's EBADF for unallocated slots.
+    #[test]
+    fn close_rejects_standard_fds_and_closes_file_fds() {
+        let mut sink = FakeSink::default();
+        for fd in [0, 1, 2, 7] {
+            let mut source = FileSource::serving(b"");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                CLOSE_NUMBER,
+                fd,
+                0,
+                0,
+                0,
+                b"",
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), EBADF as usize);
+            assert_eq!(source.closes, 0);
+        }
+
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            CLOSE_NUMBER,
+            FIRST_FILE_FD,
+            0,
+            0,
+            0,
+            b"",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.closes, 1);
+
+        let (context, flow) = dispatch_numbered_file_fixture(
+            CLOSE_NUMBER,
+            FIRST_FILE_FD + 1,
+            0,
+            0,
+            0,
+            b"",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EBADF as usize);
+        assert_eq!(source.closes, 2);
     }
 }
