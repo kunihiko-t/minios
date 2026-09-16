@@ -9,6 +9,9 @@ pub enum SyscallNumber {
     Close = 6,
     Create = 7,
     Unlink = 8,
+    Lseek = 9,
+    Pread = 10,
+    Pwrite = 11,
 }
 
 pub const STDIN: usize = 0;
@@ -19,6 +22,13 @@ pub const MAX_READ_LEN: usize = 4096;
 pub const MAX_PATH_LEN: usize = 256;
 pub const FIRST_FILE_FD: usize = 3;
 pub const MAX_OPEN_FILES: usize = 4;
+
+/// `lseek`の`a2`が取る基準位置。file先頭からの絶対offset。
+pub const SEEK_SET: usize = 0;
+/// 現在のfd offsetからの相対offset。
+pub const SEEK_CUR: usize = 1;
+/// file末尾からの相対offset。
+pub const SEEK_END: usize = 2;
 
 pub const ENOENT: isize = -2;
 pub const EIO: isize = -5;
@@ -47,6 +57,12 @@ mod tests {
         assert_eq!(SyscallNumber::Close as usize, 6);
         assert_eq!(SyscallNumber::Create as usize, 7);
         assert_eq!(SyscallNumber::Unlink as usize, 8);
+        assert_eq!(SyscallNumber::Lseek as usize, 9);
+        assert_eq!(SyscallNumber::Pread as usize, 10);
+        assert_eq!(SyscallNumber::Pwrite as usize, 11);
+        assert_eq!(SEEK_SET, 0);
+        assert_eq!(SEEK_CUR, 1);
+        assert_eq!(SEEK_END, 2);
         assert_eq!(STDIN, 0);
         assert_eq!(STDOUT, 1);
         assert_eq!(STDERR, 2);
