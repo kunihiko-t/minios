@@ -60,6 +60,20 @@ pub trait ControlSource {
         let _ = fd;
         Err(ENOSYS)
     }
+
+    /// `path`のfileを作成またはwritableに開き、割り当てたfdを返す。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn create_file(&mut self, path: &str) -> Result<usize, isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
+
+    /// `fd`のfileへ`data`を現在offsetから書き、書いたbyte数を返す。
+    /// read-onlyのfdは`EBADF`で拒否すること。default実装は`ENOSYS`。
+    fn write_fd(&mut self, fd: usize, data: &[u8]) -> Result<usize, isize> {
+        let _ = (fd, data);
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -104,13 +118,15 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
 ) -> SyscallFlow<S::Error, R::Error> {
     let number = context.register(17);
     if number == SyscallNumber::Write as usize {
-        dispatch_write(context, space, memory, sink)
+        dispatch_write(context, space, memory, sink, source)
     } else if number == SyscallNumber::Read as usize {
         dispatch_read(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::ReadFile as usize {
         dispatch_read_file(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Open as usize {
-        dispatch_open(context, space, memory, source)
+        dispatch_open(context, space, memory, source, false)
+    } else if number == SyscallNumber::Create as usize {
+        dispatch_open(context, space, memory, source, true)
     } else if number == SyscallNumber::Close as usize {
         dispatch_close(context, source)
     } else if number == SyscallNumber::Exit as usize {
@@ -173,14 +189,16 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
     }
 }
 
-/// `open` (`a0=path_ptr, a1=path_len`)。検証規約は`read_file`と同じで、
-/// fd割り当てのside effectより先にpathのEFAULT/EINVALを確定する。
+/// `open`と`create` (`a0=path_ptr, a1=path_len`)。検証規約は`read_file`と
+/// 同じで、fd割り当てやdir entry作成のside effectより先にpathの
+/// EFAULT/EINVALを確定する。`create`はfileをwritableに開く。
 /// 成功時は`a0`へfdを返す。
 fn dispatch_open<M: FrameStore, E, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace,
     memory: &M,
     source: &mut R,
+    create: bool,
 ) -> SyscallFlow<E, R::Error> {
     let path_len = context.register(11);
     if path_len == 0 || path_len > MAX_PATH_LEN {
@@ -203,7 +221,12 @@ fn dispatch_open<M: FrameStore, E, R: ControlSource>(
         context.set_register(10, EINVAL as usize);
         return SyscallFlow::Resume;
     };
-    match source.open_file(path) {
+    let result = if create {
+        source.create_file(path)
+    } else {
+        source.open_file(path)
+    };
+    match result {
         Ok(fd) => context.set_register(10, fd),
         Err(errno) => context.set_register(10, errno as usize),
     }
@@ -302,15 +325,22 @@ fn dispatch_read_file<M: FrameStore, E, R: ControlSource>(
     }
 }
 
-fn dispatch_write<M: FrameStore, S: ControlSink, SE>(
+/// `write` (`a0=fd, a1=ptr, a2=len`)。fd 1/2はframe sinkへ、file fd
+/// （3以上）は`source.write_fd`へ委譲する。どちらの経路でも、副作用の
+/// 前にuser buffer全体の`EFAULT`を確定する規約は同じである。
+fn dispatch_write<M: FrameStore, S: ControlSink, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace,
     memory: &M,
     sink: &mut S,
-) -> SyscallFlow<S::Error, SE> {
-    let kind = match context.register(10) {
-        STDOUT => FrameKind::Stdout,
-        STDERR => FrameKind::Stderr,
+    source: &mut R,
+) -> SyscallFlow<S::Error, R::Error> {
+    let fd = context.register(10);
+    let is_file_fd = (FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd);
+    let kind = match fd {
+        STDOUT => Some(FrameKind::Stdout),
+        STDERR => Some(FrameKind::Stderr),
+        _ if is_file_fd => None,
         _ => {
             context.set_register(10, EBADF as usize);
             return SyscallFlow::Resume;
@@ -338,12 +368,24 @@ fn dispatch_write<M: FrameStore, S: ControlSink, SE>(
         }
     }
 
-    match sink.frame(kind, &buffer[..len]) {
-        Ok(()) => {
-            context.set_register(10, len);
-            SyscallFlow::Resume
-        }
-        Err(error) => SyscallFlow::Fatal(error),
+    match kind {
+        Some(kind) => match sink.frame(kind, &buffer[..len]) {
+            Ok(()) => {
+                context.set_register(10, len);
+                SyscallFlow::Resume
+            }
+            Err(error) => SyscallFlow::Fatal(error),
+        },
+        None => match source.write_fd(fd, &buffer[..len]) {
+            Ok(count) => {
+                context.set_register(10, count.min(len));
+                SyscallFlow::Resume
+            }
+            Err(errno) => {
+                context.set_register(10, errno as usize);
+                SyscallFlow::Resume
+            }
+        },
     }
 }
 
@@ -363,7 +405,8 @@ mod tests {
         control::FrameKind,
         syscall::{
             EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, FIRST_FILE_FD,
-            MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT, SyscallNumber,
+            MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT,
+            SyscallNumber,
         },
     };
 
@@ -374,6 +417,7 @@ mod tests {
     const READ_FILE_NUMBER: usize = SyscallNumber::ReadFile as usize;
     const OPEN_NUMBER: usize = SyscallNumber::Open as usize;
     const CLOSE_NUMBER: usize = SyscallNumber::Close as usize;
+    const CREATE_NUMBER: usize = SyscallNumber::Create as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,6 +664,9 @@ mod tests {
         open_fd: Result<usize, isize>,
         fd_reads: usize,
         closes: usize,
+        creates: usize,
+        writes: usize,
+        written: Vec<u8>,
     }
 
     impl FileSource {
@@ -632,6 +679,9 @@ mod tests {
                 open_fd: Ok(FIRST_FILE_FD),
                 fd_reads: 0,
                 closes: 0,
+                creates: 0,
+                writes: 0,
+                written: Vec::new(),
             }
         }
 
@@ -680,6 +730,19 @@ mod tests {
             } else {
                 Err(EBADF)
             }
+        }
+
+        fn create_file(&mut self, path: &str) -> Result<usize, isize> {
+            self.creates += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.open_fd
+        }
+
+        fn write_fd(&mut self, _fd: usize, data: &[u8]) -> Result<usize, isize> {
+            self.writes += 1;
+            self.result?;
+            self.written.extend_from_slice(data);
+            Ok(data.len())
         }
     }
 
@@ -775,7 +838,7 @@ mod tests {
         let mut source = FakeSource::scripted(b"");
         let (context, flow) = dispatch_fixture(
             WRITE_NUMBER,
-            3,
+            FIRST_FILE_FD + MAX_OPEN_FILES,
             MESSAGE_PAGE,
             MESSAGE.len(),
             &mut sink,
@@ -1569,5 +1632,98 @@ mod tests {
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), EBADF as usize);
         assert_eq!(source.closes, 2);
+    }
+
+    // Catches create routing to create_file rather than open_file, so a
+    // writable fd never reaches a guest that only asked to read.
+    #[test]
+    fn create_routes_to_create_file_and_validates_the_path() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            CREATE_NUMBER,
+            MESSAGE_PAGE,
+            b"NEW.TXT".len(),
+            0,
+            0,
+            b"NEW.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), FIRST_FILE_FD);
+        assert_eq!(source.creates, 1);
+        assert_eq!(source.seen_path.as_deref(), Some(b"NEW.TXT".as_slice()));
+
+        // path検証はopenと同じく、sourceへ触れる前にerrnoを確定する。
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            CREATE_NUMBER,
+            0x40_000,
+            9,
+            0,
+            0,
+            b"NEW.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.creates, 0);
+    }
+
+    // Catches write on a file fd reaching neither write_fd nor the errno
+    // path, and frame output never leaking to fd 3+.
+    #[test]
+    fn write_on_a_file_fd_routes_to_write_fd() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_fixture(
+            WRITE_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), MESSAGE.len());
+        assert_eq!(source.writes, 1);
+        assert_eq!(source.written, MESSAGE);
+        assert!(sink.frames.is_empty());
+
+        // sourceのerrnoはそのままa0へ返る。
+        let mut source = FileSource::failing(EBADF);
+        let (context, flow) = dispatch_fixture(
+            WRITE_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EBADF as usize);
+
+        // 検証できないuser pointerはsourceへ届く前にEFAULT。
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_fixture(
+            WRITE_NUMBER,
+            FIRST_FILE_FD,
+            0x40_000,
+            64,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.writes, 0);
     }
 }

@@ -7,6 +7,7 @@ pub enum SyscallNumber {
     ReadFile = 4,
     Open = 5,
     Close = 6,
+    Create = 7,
 }
 
 pub const STDIN: usize = 0;
@@ -28,6 +29,7 @@ pub const ENOTDIR: isize = -20;
 pub const EISDIR: isize = -21;
 pub const EINVAL: isize = -22;
 pub const EMFILE: isize = -24;
+pub const ENOSPC: isize = -28;
 pub const ENOSYS: isize = -38;
 
 #[cfg(test)]
@@ -42,6 +44,7 @@ mod tests {
         assert_eq!(SyscallNumber::ReadFile as usize, 4);
         assert_eq!(SyscallNumber::Open as usize, 5);
         assert_eq!(SyscallNumber::Close as usize, 6);
+        assert_eq!(SyscallNumber::Create as usize, 7);
         assert_eq!(STDIN, 0);
         assert_eq!(STDOUT, 1);
         assert_eq!(STDERR, 2);
@@ -60,6 +63,7 @@ mod tests {
         assert_eq!(EISDIR, -21);
         assert_eq!(EINVAL, -22);
         assert_eq!(EMFILE, -24);
+        assert_eq!(ENOSPC, -28);
         assert_eq!(ENOSYS, -38);
     }
 }

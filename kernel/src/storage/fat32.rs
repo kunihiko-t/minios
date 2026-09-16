@@ -1,4 +1,6 @@
 use super::SectorReader;
+#[cfg(not(target_arch = "riscv32"))]
+use super::SectorWriter;
 
 // read-only FAT32 parser。BPBとFATの値はaddress計算の前にすべて検証し、
 // checked演算とdata cluster数上限でvolume外参照と無限loopを防ぐ。
@@ -12,6 +14,10 @@ pub enum FatError<E> {
     NotDirectory,
     InvalidName,
     CorruptChain,
+    /// free clusterやdir slotが枯渇した。
+    NoSpace,
+    /// write offsetがfile sizeを越えた（穴あきwriteは非対応）。
+    InvalidOffset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,13 +60,27 @@ pub struct Fat32<R> {
     data_cluster_count: u32,
 }
 
-/// `Fat32::open_file`が返すfile位置の記述子。fd tableへそのまま格納できる
-/// plain dataであり、session自身への参照は持たない。
+/// `Fat32::open_file`/`create_file`が返すfile位置の記述子。fd tableへ
+/// そのまま格納できるplain dataであり、session自身への参照は持たない。
+/// `dir_cluster`/`dir_index`はdir entryの物理位置で、sizeや
+/// first_clusterのwrite-backに使う。
 #[cfg(not(target_arch = "riscv32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileDesc {
     first_cluster: u32,
     size: u32,
+    dir_cluster: u32,
+    dir_index: u32,
+}
+
+/// directory走査中のentryの物理位置。`cluster`はrecordを含むcluster、
+/// `index`はそのcluster内のrecord番号（`sector * 16 + record`）。
+/// RV32はlocをwrite-backへ使わないため、fieldの未読は許容する。
+#[cfg_attr(target_arch = "riscv32", allow(dead_code))]
+#[derive(Clone, Copy)]
+struct DirLoc {
+    cluster: u32,
+    index: u32,
 }
 
 struct Geometry {
@@ -158,7 +178,7 @@ impl<R: SectorReader> Fat32<R> {
         mut visit: impl FnMut(&DirEntry),
     ) -> Result<(), FatError<R::Error>> {
         let mut scratch = [0; 512];
-        self.walk_dir(self.root_cluster, &mut scratch, |entry| {
+        self.walk_dir(self.root_cluster, &mut scratch, |entry, _loc| {
             visit(entry);
             false
         })
@@ -173,7 +193,7 @@ impl<R: SectorReader> Fat32<R> {
     ) -> Result<(), FatError<R::Error>> {
         normalize_input_name(name).ok_or(FatError::InvalidName)?;
         let mut scratch = [0; 512];
-        let entry = self
+        let (entry, _loc) = self
             .find_entry_in(self.root_cluster, name, &mut scratch)?
             .ok_or(FatError::NotFound)?;
         if entry.directory {
@@ -196,13 +216,13 @@ impl<R: SectorReader> Fat32<R> {
         let dir_cluster = if path.is_empty() {
             self.root_cluster
         } else {
-            let entry = self.resolve_path(path, &mut scratch)?;
+            let (entry, _loc) = self.resolve_path(path, &mut scratch)?;
             if !entry.directory {
                 return Err(FatError::NotDirectory);
             }
             entry.first_cluster
         };
-        self.walk_dir(dir_cluster, &mut scratch, |entry| {
+        self.walk_dir(dir_cluster, &mut scratch, |entry, _loc| {
             visit(entry);
             false
         })
@@ -217,7 +237,7 @@ impl<R: SectorReader> Fat32<R> {
         write: impl FnMut(&[u8]),
     ) -> Result<(), FatError<R::Error>> {
         let mut scratch = [0; 512];
-        let entry = self.resolve_path(path, &mut scratch)?;
+        let (entry, _loc) = self.resolve_path(path, &mut scratch)?;
         if entry.directory {
             return Err(FatError::IsDirectory);
         }
@@ -229,13 +249,15 @@ impl<R: SectorReader> Fat32<R> {
     #[cfg(not(target_arch = "riscv32"))]
     pub fn open_file(&mut self, path: &str) -> Result<FileDesc, FatError<R::Error>> {
         let mut scratch = [0; 512];
-        let entry = self.resolve_path(path, &mut scratch)?;
+        let (entry, loc) = self.resolve_path(path, &mut scratch)?;
         if entry.directory {
             return Err(FatError::IsDirectory);
         }
         Ok(FileDesc {
             first_cluster: entry.first_cluster,
             size: entry.size,
+            dir_cluster: loc.cluster,
+            dir_index: loc.index,
         })
     }
 
@@ -357,14 +379,15 @@ impl<R: SectorReader> Fat32<R> {
         Ok(())
     }
 
-    /// `path`をrootから順に解決し、最終要素のentryを返す。途中の要素は
-    /// directory必須、空要素と`.`/`..`は`InvalidName`として拒否する。
+    /// `path`をrootから順に解決し、最終要素のentryと物理位置を返す。
+    /// 途中の要素はdirectory必須、空要素と`.`/`..`は`InvalidName`として
+    /// 拒否する。
     #[cfg(not(target_arch = "riscv32"))]
     fn resolve_path(
         &mut self,
         path: &str,
         scratch: &mut [u8; 512],
-    ) -> Result<DirEntry, FatError<R::Error>> {
+    ) -> Result<(DirEntry, DirLoc), FatError<R::Error>> {
         // diskへ触れる前に全要素を検査し、不正なpathは存在の有無に
         // 関係なく`InvalidName`で拒否する。要素は8.3に限らず、LFNが
         // 許す印字可能ASCIIを受理する。
@@ -376,11 +399,11 @@ impl<R: SectorReader> Fat32<R> {
         let mut dir_cluster = self.root_cluster;
         let mut parts = path.split('/').peekable();
         while let Some(part) = parts.next() {
-            let entry = self
+            let (entry, loc) = self
                 .find_entry_in(dir_cluster, part, scratch)?
                 .ok_or(FatError::NotFound)?;
             if parts.peek().is_none() {
-                return Ok(entry);
+                return Ok((entry, loc));
             }
             if !entry.directory {
                 return Err(FatError::NotDirectory);
@@ -396,11 +419,11 @@ impl<R: SectorReader> Fat32<R> {
         dir_cluster: u32,
         part: &str,
         scratch: &mut [u8; 512],
-    ) -> Result<Option<DirEntry>, FatError<R::Error>> {
+    ) -> Result<Option<(DirEntry, DirLoc)>, FatError<R::Error>> {
         let mut found = None;
-        self.walk_dir(dir_cluster, scratch, |entry| {
+        self.walk_dir(dir_cluster, scratch, |entry, loc| {
             if matches_component(entry, part) {
-                found = Some(*entry);
+                found = Some((*entry, loc));
                 true
             } else {
                 false
@@ -416,7 +439,7 @@ impl<R: SectorReader> Fat32<R> {
         mut visit: F,
     ) -> Result<(), FatError<R::Error>>
     where
-        F: FnMut(&DirEntry) -> bool,
+        F: FnMut(&DirEntry, DirLoc) -> bool,
     {
         let mut cluster = dir_cluster;
         let mut clusters_read = 0;
@@ -450,7 +473,11 @@ impl<R: SectorReader> Fat32<R> {
                     }
                     if let Some(mut entry) = parse_dir_entry(record) {
                         lfn.apply(&mut entry, record);
-                        if visit(&entry) {
+                        let loc = DirLoc {
+                            cluster,
+                            index: sector_in_cluster as u32 * 16 + offset as u32 / 32,
+                        };
+                        if visit(&entry, loc) {
                             return Ok(());
                         }
                     }
@@ -537,6 +564,390 @@ impl<R: SectorReader> Fat32<R> {
             return Err(FatError::CorruptChain);
         }
         Ok(Some(value))
+    }
+}
+
+/// FAT chainの終端印。`0x0fff_fff8`以上はEOCとして扱われる。
+#[cfg(not(target_arch = "riscv32"))]
+const FAT_EOC: u32 = 0x0fff_ffff;
+
+/// file作成時に使うarchive attribute。
+#[cfg(not(target_arch = "riscv32"))]
+const DIR_ATTR_FILE: u8 = 0x20;
+
+/// `Fat32`のwrite API。block deviceがsector書き込みを提供する場合だけ
+/// 使える。`SectorWriter`自体がRV32へ公開されないため、このimpl blockは
+/// RV32ではそもそも構成されない。
+#[cfg(not(target_arch = "riscv32"))]
+impl<R: SectorReader + SectorWriter> Fat32<R> {
+    /// `path`が示すfileを作成またはwritableに開く。fileが既にあれば
+    /// 内容を保ったまま記述子を返す。無ければ親directoryへ8.3 entryを
+    /// 追加し、空のfileとして返す。最終要素は8.3へ正規化できる名前のみ
+    /// 受理し（小文字は大文字化）、LFN名での作成は`InvalidName`とする。
+    pub fn create_file(&mut self, path: &str) -> Result<FileDesc, FatError<R::Error>> {
+        for part in path.split('/') {
+            if !is_valid_component(part) {
+                return Err(FatError::InvalidName);
+            }
+        }
+        let (parent, name) = match path.rfind('/') {
+            Some(index) => (&path[..index], &path[index + 1..]),
+            None => ("", path),
+        };
+        let Some(short) = to_short_name(name) else {
+            return Err(FatError::InvalidName);
+        };
+
+        let mut scratch = [0; 512];
+        let dir_cluster = if parent.is_empty() {
+            self.root_cluster
+        } else {
+            let (entry, _loc) = self.resolve_path(parent, &mut scratch)?;
+            if !entry.directory {
+                return Err(FatError::NotDirectory);
+            }
+            entry.first_cluster
+        };
+
+        // 正規化済みのraw 8.3名で照合する。小文字で作ったfileは既存の
+        // 大文字entryと一致し、LFNを持つ無関係なfileとは衝突しない。
+        let mut found = None;
+        self.walk_dir(dir_cluster, &mut scratch, |entry, loc| {
+            if entry.short_name == short {
+                found = Some((*entry, loc));
+                true
+            } else {
+                false
+            }
+        })?;
+        if let Some((entry, loc)) = found {
+            if entry.directory {
+                return Err(FatError::IsDirectory);
+            }
+            return Ok(FileDesc {
+                first_cluster: entry.first_cluster,
+                size: entry.size,
+                dir_cluster: loc.cluster,
+                dir_index: loc.index,
+            });
+        }
+
+        let (cluster, index, terminator) = self.find_free_dir_slot(dir_cluster, &mut scratch)?;
+        let sector = index / 16;
+        let record = (index % 16) as usize;
+        let lba = self.data_sector_lba(cluster, sector)?;
+        self.reader
+            .read_sector(lba, &mut scratch)
+            .map_err(FatError::Read)?;
+        let offset = record * 32;
+        scratch[offset..offset + 32].fill(0);
+        scratch[offset..offset + 11].copy_from_slice(&short);
+        scratch[offset + 11] = DIR_ATTR_FILE;
+        if terminator && index % 16 != 15 {
+            // 終端slotを消費したら、同じsector内の次recordへ終端印を置く。
+            scratch[offset + 32..offset + 64].fill(0);
+        }
+        self.reader
+            .write_sector(lba, &scratch)
+            .map_err(FatError::Read)?;
+        if terminator && index % 16 == 15 {
+            // 終端がsector末尾にあったので、同じcluster内の次sectorを
+            // zero-fillして先頭recordを終端にする。cluster末尾なら、
+            // chainの次clusterをzero-fillするか新規clusterを繋ぐ。
+            if index + 1 < self.sectors_per_cluster as u32 * 16 {
+                let next_lba = self.data_sector_lba(cluster, index / 16 + 1)?;
+                self.reader
+                    .write_sector(next_lba, &[0; 512])
+                    .map_err(FatError::Read)?;
+            } else {
+                match self.next_cluster(cluster, &mut scratch)? {
+                    Some(next) => self.zero_cluster(next)?,
+                    None => {
+                        let new = self.alloc_cluster(&mut scratch)?;
+                        self.set_fat_entry(cluster, new, &mut scratch)?;
+                    }
+                }
+            }
+        }
+        Ok(FileDesc {
+            first_cluster: 0,
+            size: 0,
+            dir_cluster: cluster,
+            dir_index: index,
+        })
+    }
+
+    /// 開いたfileの`offset` byte目へ`data`を書き、`desc.size`を更新して
+    /// dir entryへwrite-backする。`offset > size`の穴あきwriteは
+    /// `InvalidOffset`として拒否する。
+    pub fn write_range(
+        &mut self,
+        file: &mut FileDesc,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, FatError<R::Error>> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        if offset > file.size as u64 {
+            return Err(FatError::InvalidOffset);
+        }
+        // file sizeはu32 fieldなので、4 GiBをまたぐ延長は受理しない。
+        let end = offset
+            .checked_add(data.len() as u64)
+            .filter(|end| *end <= u64::from(u32::MAX))
+            .ok_or(FatError::InvalidOffset)?;
+
+        let mut scratch = [0; 512];
+        self.ensure_capacity(file, end, &mut scratch)?;
+
+        let bytes_per_cluster = self.sectors_per_cluster as u64 * 512;
+        let mut cluster = file.first_cluster;
+        let mut skip = offset / bytes_per_cluster;
+        while skip != 0 {
+            cluster = match self.next_cluster(cluster, &mut scratch)? {
+                Some(next) => next,
+                None => return Err(FatError::CorruptChain),
+            };
+            skip -= 1;
+        }
+
+        let mut intra = (offset % bytes_per_cluster) as usize;
+        let mut written = 0usize;
+        while written < data.len() {
+            let mut sector = (intra / 512) as u32;
+            intra %= 512;
+            while sector < self.sectors_per_cluster.into() && written < data.len() {
+                let lba = self.data_sector_lba(cluster, sector)?;
+                let take = (512 - intra).min(data.len() - written);
+                if intra == 0 && take == 512 {
+                    // sector全体を覆うwriteはread-modify-writeを省ける。
+                    let block: &[u8; 512] = data[written..written + 512]
+                        .try_into()
+                        .expect("full sector slice");
+                    self.reader
+                        .write_sector(lba, block)
+                        .map_err(FatError::Read)?;
+                } else {
+                    self.reader
+                        .read_sector(lba, &mut scratch)
+                        .map_err(FatError::Read)?;
+                    scratch[intra..intra + take].copy_from_slice(&data[written..written + take]);
+                    self.reader
+                        .write_sector(lba, &scratch)
+                        .map_err(FatError::Read)?;
+                }
+                written += take;
+                intra = 0;
+                sector += 1;
+            }
+            if written == data.len() {
+                break;
+            }
+            cluster = match self.next_cluster(cluster, &mut scratch)? {
+                Some(next) => next,
+                None => return Err(FatError::CorruptChain),
+            };
+        }
+
+        if end > file.size as u64 {
+            file.size = end as u32;
+        }
+        self.sync_dir_entry(file, &mut scratch)?;
+        Ok(written)
+    }
+
+    /// `file`のcluster chainを`end` byteが収まるまで延ばす。空fileは
+    /// `first_cluster`を確保し、末尾はfree clusterをFAT検査で割当てる。
+    fn ensure_capacity(
+        &mut self,
+        file: &mut FileDesc,
+        end: u64,
+        scratch: &mut [u8; 512],
+    ) -> Result<(), FatError<R::Error>> {
+        let bytes_per_cluster = self.sectors_per_cluster as u64 * 512;
+        let needed = end.div_ceil(bytes_per_cluster);
+        if needed == 0 {
+            return Ok(());
+        }
+        let (mut last, mut count) = if file.first_cluster == 0 {
+            let first = self.alloc_cluster(scratch)?;
+            file.first_cluster = first;
+            (first, 1u64)
+        } else {
+            if !self.is_data_cluster(file.first_cluster) {
+                return Err(FatError::CorruptChain);
+            }
+            self.chain_tail(file.first_cluster, scratch)?
+        };
+        while count < needed {
+            let new = self.alloc_cluster(scratch)?;
+            self.set_fat_entry(last, new, scratch)?;
+            last = new;
+            count += 1;
+        }
+        Ok(())
+    }
+
+    /// chainの末尾clusterと長さを返す。loopするchainは`CorruptChain`。
+    fn chain_tail(
+        &mut self,
+        first: u32,
+        scratch: &mut [u8; 512],
+    ) -> Result<(u32, u64), FatError<R::Error>> {
+        let mut cluster = first;
+        let mut count = 1u64;
+        loop {
+            match self.next_cluster(cluster, scratch)? {
+                Some(next) => {
+                    cluster = next;
+                    count += 1;
+                    if count > self.data_cluster_count as u64 {
+                        return Err(FatError::CorruptChain);
+                    }
+                }
+                None => return Ok((cluster, count)),
+            }
+        }
+    }
+
+    /// freeなclusterを1つ割り当て、EOCを印してzero-fillして返す。
+    /// FAT sector単位で走査し、cluster単位の読み直しを避ける。
+    fn alloc_cluster(&mut self, scratch: &mut [u8; 512]) -> Result<u32, FatError<R::Error>> {
+        for fat_offset in 0..self.fat_sectors {
+            let lba = self
+                .fat_start
+                .checked_add(fat_offset)
+                .ok_or(FatError::InvalidFilesystem)?;
+            self.reader
+                .read_sector(lba, scratch)
+                .map_err(FatError::Read)?;
+            for index in 0..128u32 {
+                let cluster = fat_offset * 128 + index;
+                if !self.is_data_cluster(cluster) {
+                    continue;
+                }
+                if read_u32(scratch, index as usize * 4) & 0x0fff_ffff == 0 {
+                    self.set_fat_entry(cluster, FAT_EOC, scratch)?;
+                    self.zero_cluster(cluster)?;
+                    return Ok(cluster);
+                }
+            }
+        }
+        Err(FatError::NoSpace)
+    }
+
+    /// FATの`cluster`番目のentryへ`value`を書く。上位4 bitの予約位は
+    /// 保持する。
+    fn set_fat_entry(
+        &mut self,
+        cluster: u32,
+        value: u32,
+        scratch: &mut [u8; 512],
+    ) -> Result<(), FatError<R::Error>> {
+        let entry_offset = cluster.checked_mul(4).ok_or(FatError::CorruptChain)?;
+        let fat_sector = entry_offset / 512;
+        let byte_offset = (entry_offset % 512) as usize;
+        let lba = self
+            .fat_start
+            .checked_add(fat_sector)
+            .ok_or(FatError::InvalidFilesystem)?;
+        let fat_end = self
+            .fat_start
+            .checked_add(self.fat_sectors)
+            .ok_or(FatError::InvalidFilesystem)?;
+        if lba >= fat_end {
+            return Err(FatError::InvalidFilesystem);
+        }
+        self.reader
+            .read_sector(lba, scratch)
+            .map_err(FatError::Read)?;
+        let old = read_u32(scratch, byte_offset);
+        write_u32(
+            scratch,
+            byte_offset,
+            (old & 0xf000_0000) | (value & 0x0fff_ffff),
+        );
+        self.reader
+            .write_sector(lba, scratch)
+            .map_err(FatError::Read)
+    }
+
+    /// clusterの全sectorをzero-fillする。新規割当てclusterの未定義byteと
+    /// dir拡張時のstale entryを排除する。
+    fn zero_cluster(&mut self, cluster: u32) -> Result<(), FatError<R::Error>> {
+        let zero = [0u8; 512];
+        for sector in 0..self.sectors_per_cluster as u32 {
+            let lba = self.data_sector_lba(cluster, sector)?;
+            self.reader
+                .write_sector(lba, &zero)
+                .map_err(FatError::Read)?;
+        }
+        Ok(())
+    }
+
+    /// `dir_cluster`のchainから書き込み可能なentry slotを返す。
+    /// `0xe5`の削除跡を優先し、`0x00`の終端slotを取る場合は
+    /// `terminator=true`でcallerへ終端の後始末を委ねる。全clusterが
+    /// 満杯なら末尾へ新規clusterを繋いでその先頭を返す。
+    fn find_free_dir_slot(
+        &mut self,
+        dir_cluster: u32,
+        scratch: &mut [u8; 512],
+    ) -> Result<(u32, u32, bool), FatError<R::Error>> {
+        let mut cluster = dir_cluster;
+        let mut clusters_read = 0;
+        loop {
+            if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
+                return Err(FatError::CorruptChain);
+            }
+            for sector in 0..self.sectors_per_cluster as u32 {
+                let lba = self.data_sector_lba(cluster, sector)?;
+                self.reader
+                    .read_sector(lba, scratch)
+                    .map_err(FatError::Read)?;
+                for record in 0..16u32 {
+                    let index = sector * 16 + record;
+                    match scratch[record as usize * 32] {
+                        0xe5 => return Ok((cluster, index, false)),
+                        0x00 => return Ok((cluster, index, true)),
+                        _ => {}
+                    }
+                }
+            }
+            clusters_read += 1;
+            match self.next_cluster(cluster, scratch)? {
+                Some(next) => cluster = next,
+                None => break,
+            }
+        }
+        // 全slotが埋まっていたので、末尾へ新規clusterを繋ぐ。
+        // `alloc_cluster`はzero-fill済みのため、残りがそのまま終端になる。
+        let new = self.alloc_cluster(scratch)?;
+        self.set_fat_entry(cluster, new, scratch)?;
+        Ok((new, 0, false))
+    }
+
+    /// `file`の`first_cluster`と`size`をdir entryへ書き戻す。
+    fn sync_dir_entry(
+        &mut self,
+        file: &FileDesc,
+        scratch: &mut [u8; 512],
+    ) -> Result<(), FatError<R::Error>> {
+        let sector = file.dir_index / 16;
+        let record = (file.dir_index % 16) as usize;
+        let lba = self.data_sector_lba(file.dir_cluster, sector)?;
+        self.reader
+            .read_sector(lba, scratch)
+            .map_err(FatError::Read)?;
+        let offset = record * 32;
+        // offset 20はfirst_clusterの上位16 bit、26は下位16 bit。
+        write_u16(scratch, offset + 20, (file.first_cluster >> 16) as u16);
+        write_u16(scratch, offset + 26, (file.first_cluster & 0xffff) as u16);
+        write_u32(scratch, offset + 28, file.size);
+        self.reader
+            .write_sector(lba, scratch)
+            .map_err(FatError::Read)
     }
 }
 
@@ -803,6 +1214,69 @@ fn read_u16(sector: &[u8; 512], offset: usize) -> u16 {
     u16::from_le_bytes([sector[offset], sector[offset + 1]])
 }
 
+#[cfg(not(target_arch = "riscv32"))]
+fn write_u16(sector: &mut [u8; 512], offset: usize, value: u16) {
+    sector[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+fn write_u32(sector: &mut [u8; 512], offset: usize, value: u32) {
+    sector[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// `name`をFATのraw 8.3名へ正規化する。小文字ASCIIは大文字化し、
+/// base 1..=8文字・ext 0..=3文字の`BASE.EXT`形だけを受理する。
+/// 変換できない名前（空白・`.`重複・長すぎる要素など）は`None`。
+#[cfg(not(target_arch = "riscv32"))]
+fn to_short_name(name: &str) -> Option<[u8; 11]> {
+    fn is_83_byte(byte: u8) -> bool {
+        byte.is_ascii_uppercase()
+            || byte.is_ascii_digit()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'-'
+                    | b'@'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'{'
+                    | b'}'
+                    | b'~'
+            )
+    }
+
+    let (base, ext) = match name.split_once('.') {
+        Some((base, ext)) => (base, ext),
+        None => (name, ""),
+    };
+    if base.is_empty() || base.len() > 8 || ext.len() > 3 || ext.contains('.') {
+        return None;
+    }
+    let mut short = [b' '; 11];
+    for (index, byte) in base.bytes().enumerate() {
+        let byte = byte.to_ascii_uppercase();
+        if !is_83_byte(byte) {
+            return None;
+        }
+        short[index] = byte;
+    }
+    for (index, byte) in ext.bytes().enumerate() {
+        let byte = byte.to_ascii_uppercase();
+        if !is_83_byte(byte) {
+            return None;
+        }
+        short[8 + index] = byte;
+    }
+    Some(short)
+}
+
 fn read_u32(sector: &[u8; 512], offset: usize) -> u32 {
     u32::from_le_bytes([
         sector[offset],
@@ -969,8 +1443,10 @@ impl<R> Fat32<R> {
 mod tests {
     extern crate std;
 
-    use super::{DirEntry, Fat32, FatError, FileDesc, lfn_checksum};
-    use crate::storage::SectorReader;
+    use super::{
+        DirEntry, Fat32, FatError, FileDesc, lfn_checksum, read_u16, read_u32, to_short_name,
+    };
+    use crate::storage::{SectorReader, SectorWriter};
     use std::{string::String, vec::Vec};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1014,6 +1490,20 @@ mod tests {
             for &(sector_lba, ref sector) in &self.sectors {
                 if sector_lba == lba {
                     destination.copy_from_slice(sector);
+                    return Ok(());
+                }
+            }
+            Err(ReadError::MissingSector(lba))
+        }
+    }
+
+    /// fixtureに無いlbaへのwriteは`MissingSector`で失敗させ、volume外の
+    /// 書き込みをテストで検出できるようにする。
+    impl<const N: usize> SectorWriter for MemoryReader<N> {
+        fn write_sector(&mut self, lba: u32, source: &[u8; 512]) -> Result<(), Self::Error> {
+            for &mut (sector_lba, ref mut sector) in &mut self.sectors {
+                if sector_lba == lba {
+                    sector.copy_from_slice(source);
                     return Ok(());
                 }
             }
@@ -1672,6 +2162,8 @@ mod tests {
         let bad = FileDesc {
             first_cluster: 0,
             size: 10,
+            dir_cluster: 2,
+            dir_index: 0,
         };
         assert!(matches!(
             fs.read_range(&bad, 0, &mut output),
@@ -1684,6 +2176,273 @@ mod tests {
         assert!(matches!(
             cyclic.read_range(&desc, u64::from(u32::MAX) - 512, &mut output),
             Err(FatError::CorruptChain)
+        ));
+    }
+
+    /// write検証用の最小volume。`fat_count=1`、`fat_sectors=1`なので
+    /// data領域はlba 33から始まり、cluster `n`はlba `31 + n`。
+    /// fatはentry 0..=127だけを記述し、2(root)/4(HELLO)/5(SUBDIR)を
+    /// 使用済みとしてマークする。
+    fn writable_boot_sector() -> [u8; 512] {
+        let mut boot = valid_boot_sector();
+        write_u16(&mut boot, 14, 32);
+        boot[16] = 1;
+        write_u32(&mut boot, 36, 1);
+        write_u32(&mut boot, 32, 66_000);
+        boot
+    }
+
+    fn writable_fat() -> [u8; 512] {
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+        write_fat_entry(&mut fat, 4, 0x0fff_ffff);
+        write_fat_entry(&mut fat, 5, 0x0fff_ffff);
+        fat
+    }
+
+    /// root: [0]=HELLO.TXT(cluster 4, 11B), [1]=SUBDIR(cluster 5),
+    /// [2]=終端。cluster 3と6以降はfree。
+    fn mounted_writable_fixture() -> Fat32<MemoryReader<10>> {
+        let mut root = [0; 512];
+        write_directory_entry(&mut root, 0, b"HELLO   TXT", 0x20, 4, 11);
+        write_directory_entry(&mut root, 1, b"SUBDIR     ", 0x10, 5, 0);
+
+        let mut hello = [0; 512];
+        hello[..11].copy_from_slice(b"hello world");
+
+        let mut subdir = [0; 512];
+        write_directory_entry(&mut subdir, 0, b".          ", 0x10, 5, 0);
+        write_directory_entry(&mut subdir, 1, b"..         ", 0x10, 2, 0);
+
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, writable_boot_sector()),
+            (32, writable_fat()),
+            (33, root),
+            (34, [0; 512]),
+            (35, hello),
+            (36, subdir),
+            (37, [0; 512]),
+            (38, [0; 512]),
+            (39, [0; 512]),
+            (40, [0; 512]),
+        ]))
+        .unwrap()
+    }
+
+    fn sector_of<const N: usize>(fs: &Fat32<MemoryReader<N>>, lba: u32) -> &[u8; 512] {
+        &fs.reader
+            .sectors
+            .iter()
+            .find(|(sector_lba, _)| *sector_lba == lba)
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn short_name_normalizes_and_rejects_unconvertible_names() {
+        assert_eq!(to_short_name("guest.txt"), Some(*b"GUEST   TXT"));
+        assert_eq!(to_short_name("A"), Some(*b"A          "));
+        assert_eq!(to_short_name("A.B"), Some(*b"A       B  "));
+        assert_eq!(to_short_name("MYFILE~1.DAT"), Some(*b"MYFILE~1DAT"));
+        assert!(to_short_name("long file.txt").is_none());
+        assert!(to_short_name("TOOLONGNM.TXT").is_none());
+        assert!(to_short_name("A.TXTEX").is_none());
+        assert!(to_short_name("A.B.C").is_none());
+        assert!(to_short_name(".hidden").is_none());
+    }
+
+    // Catches create_file writing a malformed entry, skipping the
+    // terminator, or failing to match an existing normalized name.
+    #[test]
+    fn create_file_writes_entry_and_reuses_existing() {
+        let mut fs = mounted_writable_fixture();
+        let desc = fs.create_file("new.txt").unwrap();
+        assert_eq!((desc.first_cluster, desc.size), (0, 0));
+        assert_eq!((desc.dir_cluster, desc.dir_index), (2, 2));
+
+        // 書かれたentryの名前・属性と、次slotの終端印を確認する。
+        let root = sector_of(&fs, 33);
+        assert_eq!(&root[64..75], b"NEW     TXT");
+        assert_eq!(root[75], 0x20);
+        assert_eq!(root[96], 0x00);
+
+        let mut names = Vec::new();
+        fs.for_each_root_entry(|entry| names.push(String::from(entry.name())));
+        assert!(names.contains(&String::from("NEW.TXT")));
+
+        // 大文字で作り直してもLFNではなく同じentryを返し、subdirの
+        // directory名や8.3に直せない名前は拒否する。
+        let again = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!((again.dir_cluster, again.dir_index), (2, 2));
+        assert!(matches!(
+            fs.create_file("subdir"),
+            Err(FatError::IsDirectory)
+        ));
+        assert!(matches!(
+            fs.create_file("long file.txt"),
+            Err(FatError::InvalidName)
+        ));
+        assert!(matches!(
+            fs.create_file("HELLO.TXT/CHILD.TXT"),
+            Err(FatError::NotDirectory)
+        ));
+    }
+
+    // Catches write_range skipping cluster allocation, writing the wrong
+    // LBA, or forgetting the dir entry write-back.
+    #[test]
+    fn write_range_allocates_clusters_and_syncs_dir_entry() {
+        let mut fs = mounted_writable_fixture();
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, b"hi").unwrap(), 2);
+        assert_eq!((desc.first_cluster, desc.size), (3, 2));
+
+        // data sectorへ内容が書かれ、残りは割当時のzero-fillのまま。
+        let data = sector_of(&fs, 34);
+        assert_eq!(&data[..4], b"hi\0\0");
+        // dir entryがcluster 3・size 2へ更新されている。
+        let root = sector_of(&fs, 33);
+        assert_eq!(read_u32(root, 64 + 28), 2);
+        assert_eq!(read_u16(root, 64 + 26), 3);
+
+        // 開き直して同じ内容が読める。
+        let reopened = fs.open_file("NEW.TXT").unwrap();
+        let mut buf = [0; 8];
+        assert_eq!(fs.read_range(&reopened, 0, &mut buf).unwrap(), 2);
+        assert_eq!(&buf[..2], b"hi");
+    }
+
+    // Catches write_range breaking at a cluster boundary, corrupting the
+    // FAT chain, or accepting a sparse offset.
+    #[test]
+    fn write_range_extends_across_clusters_and_rejects_sparse_offsets() {
+        let mut fs = mounted_writable_fixture();
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        let data = [0xab; 700];
+        assert_eq!(fs.write_range(&mut desc, 0, &data).unwrap(), 700);
+        assert_eq!(desc.size, 700);
+
+        // spc=1なのでcluster 3と4を繋ぐはずだったが、4はHELLO.TXT使用中。
+        // 実際は3と6が割り当てられ、fat[3]=6・fat[6]=EOCになる。
+        let fat = sector_of(&fs, 32);
+        assert_eq!(read_u32(fat, 3 * 4) & 0x0fff_ffff, 6);
+        assert_eq!(read_u32(fat, 6 * 4) & 0x0fff_ffff, 0x0fff_ffff);
+        assert_eq!(&sector_of(&fs, 34)[..4], &[0xab; 4]);
+        assert_eq!(&sector_of(&fs, 37)[..4], &[0xab; 4]);
+        // 2 cluster目は188 byteだけ書かれ、残りは割当時のzero-fillのまま。
+        assert_eq!(
+            &sector_of(&fs, 37)[184..192],
+            &[0xab, 0xab, 0xab, 0xab, 0, 0, 0, 0]
+        );
+
+        // cluster境界をまたぐ部分を読み戻す。
+        let reopened = fs.open_file("NEW.TXT").unwrap();
+        let mut buf = [0; 700];
+        assert_eq!(fs.read_range(&reopened, 0, &mut buf).unwrap(), 700);
+        assert_eq!(buf, data);
+
+        // sizeを越えるoffsetは穴あきwriteになるため拒否する。
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert!(matches!(
+            fs.write_range(&mut desc, 701, b"x"),
+            Err(FatError::InvalidOffset)
+        ));
+        // 末尾への追記は受理され、sizeが延びる。
+        assert_eq!(fs.write_range(&mut desc, 700, b"zz").unwrap(), 2);
+        assert_eq!(desc.size, 702);
+    }
+
+    // Catches find_free_dir_slot failing to extend a full directory's
+    // cluster chain.
+    #[test]
+    fn create_file_extends_a_full_directory() {
+        let mut root = [0; 512];
+        for index in 0..16u32 {
+            let mut name = [b' '; 11];
+            name[..6].copy_from_slice(b"FILE00");
+            name[4] = b'0' + (index / 10) as u8;
+            name[5] = b'0' + (index % 10) as u8;
+            write_directory_entry(&mut root, index as usize, &name, 0x20, 10 + index, 0);
+        }
+        let mut fs = Fat32::mount(MemoryReader::with_sectors([
+            (0, writable_boot_sector()),
+            (32, writable_fat()),
+            (33, root),
+            (34, [0; 512]),
+            (37, [0; 512]),
+        ]))
+        .unwrap();
+
+        let desc = fs.create_file("NEW.TXT").unwrap();
+        // root chainがcluster 3へ延び、先頭slotへentryが作られる。
+        assert_eq!((desc.dir_cluster, desc.dir_index), (3, 0));
+        let fat = sector_of(&fs, 32);
+        assert_eq!(read_u32(fat, 2 * 4) & 0x0fff_ffff, 3);
+        assert_eq!(read_u32(fat, 3 * 4) & 0x0fff_ffff, 0x0fff_ffff);
+        let extended = sector_of(&fs, 34);
+        assert_eq!(&extended[..11], b"NEW     TXT");
+        assert_eq!(extended[32], 0x00);
+    }
+
+    // Catches create_file writing the terminator one slot past a
+    // sector-boundary slot into the same scratch buffer (which would
+    // overflow) instead of zeroing the following sector.
+    #[test]
+    fn create_file_moves_a_sector_boundary_terminator_to_the_next_sector() {
+        // spc=2のvolume: cluster 2はlba 33と34、終端はslot 15（sector 0の
+        // 末尾）にあり、次の終端はsector 1の先頭へ移るはずである。
+        let mut boot = writable_boot_sector();
+        boot[13] = 2;
+        write_u32(&mut boot, 32, 131_100);
+
+        let mut root_first = [0; 512];
+        for index in 0..15u32 {
+            let mut name = [b' '; 11];
+            name[..6].copy_from_slice(b"FILE00");
+            name[4] = b'0' + (index / 10) as u8;
+            name[5] = b'0' + (index % 10) as u8;
+            write_directory_entry(&mut root_first, index as usize, &name, 0x20, 10 + index, 0);
+        }
+        let mut root_second = [0; 512];
+        root_second[7] = 0xaa; // stale garbage: 終端の次sectorは上書きで消す
+
+        let mut fs = Fat32::mount(MemoryReader::with_sectors([
+            (0, boot),
+            (32, writable_fat()),
+            (33, root_first),
+            (34, root_second),
+            (35, [0; 512]),
+            (36, [0; 512]),
+        ]))
+        .unwrap();
+
+        let desc = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!((desc.dir_cluster, desc.dir_index), (2, 15));
+        // entryはsector 0の末尾へ、終端はsector 1の先頭へ書かれる。
+        let first = sector_of(&fs, 33);
+        assert_eq!(&first[480..491], b"NEW     TXT");
+        assert!(sector_of(&fs, 34).iter().all(|byte| *byte == 0));
+    }
+
+    // Catches alloc_cluster ignoring a fully-used FAT or set_fat_entry
+    // clobbering the reserved high nibble.
+    #[test]
+    fn exhausted_fat_reports_no_space() {
+        let mut fat = [0; 512];
+        for cluster in 0..128u32 {
+            write_fat_entry(&mut fat, cluster, 0x0fff_ffff);
+        }
+        let mut fs = Fat32::mount(MemoryReader::with_sectors([
+            (0, writable_boot_sector()),
+            (32, fat),
+            (33, [0; 512]),
+        ]))
+        .unwrap();
+
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert!(matches!(
+            fs.write_range(&mut desc, 0, b"x"),
+            Err(FatError::NoSpace)
         ));
     }
 }

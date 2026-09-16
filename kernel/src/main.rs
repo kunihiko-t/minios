@@ -1567,13 +1567,15 @@ unsafe fn borrow_file_storage() -> Result<&'static mut shell::Rv64Storage, shell
     Ok(storage.as_mut().expect("mounted above"))
 }
 
-/// 開いたfileのfd slot。`desc`はFAT32の位置記述子、`offset`は次に読む
-/// byte位置である。
+/// 開いたfileのfd slot。`desc`はFAT32の位置記述子、`offset`は次に読み
+/// 書きするbyte位置、`writable`は`create`で開かれたfdを示す。fdは
+/// read専用またはwrite専用であり、両方は許さない。
 #[cfg(target_arch = "riscv64")]
 #[derive(Clone, Copy)]
 struct FileFd {
     desc: minios_kernel::storage::fat32::FileDesc,
     offset: u64,
+    writable: bool,
 }
 
 /// processごとのfd table。slot indexはpid、fd番号は`FIRST_FILE_FD`からの
@@ -1600,15 +1602,19 @@ unsafe fn set_current_pid(pid: usize) {
     unsafe { *&raw mut CURRENT_PID = pid };
 }
 
-/// 現在processへfile記述子を割り当て、fd番号を返す。pid未設定なら`ENOSYS`、
-/// 空きslotがなければ`EMFILE`を返す。
+/// 現在processへfile記述子を割り当て、fd番号を返す。`writable`のfdは
+/// `write`だけを受理し、それ以外のfdは`read`だけを受理する。
+/// pid未設定なら`ENOSYS`、空きslotがなければ`EMFILE`を返す。
 ///
 /// # Safety
 ///
 /// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
-unsafe fn alloc_file_fd(desc: minios_kernel::storage::fat32::FileDesc) -> Result<usize, isize> {
+unsafe fn alloc_file_fd(
+    desc: minios_kernel::storage::fat32::FileDesc,
+    writable: bool,
+) -> Result<usize, isize> {
     let pid = unsafe { *&raw const CURRENT_PID };
     if pid >= MAX_PROCS {
         return Err(minios_abi::syscall::ENOSYS);
@@ -1618,7 +1624,11 @@ unsafe fn alloc_file_fd(desc: minios_kernel::storage::fat32::FileDesc) -> Result
         .iter()
         .position(Option::is_none)
         .ok_or(minios_abi::syscall::EMFILE)?;
-    slots[pid][slot] = Some(FileFd { desc, offset: 0 });
+    slots[pid][slot] = Some(FileFd {
+        desc,
+        offset: 0,
+        writable,
+    });
     Ok(minios_abi::syscall::FIRST_FILE_FD + slot)
 }
 
