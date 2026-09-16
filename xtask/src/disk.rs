@@ -18,6 +18,10 @@ pub const HELLO_TXT: &[u8] = b"hello from virtio\n";
 /// path解決とsubdirectory読み出しをend-to-endで検査する。
 pub const NOTE_TXT: &[u8] = b"note inside docs\n";
 
+/// rootの`Long File Name.txt`（8.3 alias `LONGFI~1.TXT`）の内容。
+/// `ls`の長い名前表示と`cat`のLFN解決を検査する。
+pub const LFN_TXT: &[u8] = b"long file contents\n";
+
 const SECTOR: usize = 512;
 const SECTORS_PER_CLUSTER: u8 = 1;
 const RESERVED_SECTORS: u16 = 32;
@@ -26,6 +30,7 @@ const ROOT_CLUSTER: u32 = 2;
 const FILE_CLUSTER: u32 = 3;
 const DOCS_CLUSTER: u32 = 4;
 const NOTE_CLUSTER: u32 = 5;
+const LFN_CLUSTER: u32 = 6;
 
 /// `data_cluster_count >= 65_525` (FAT32の最小cluster数) を余裕を持って
 /// 満たすvolume sector数。fat_sectorsは下記で固定点反復して求める。
@@ -61,6 +66,42 @@ fn write_sector(file: &mut std::fs::File, lba: u32, bytes: &[u8]) -> Result<(), 
     debug_assert_eq!(bytes.len(), SECTOR);
     file.seek(SeekFrom::Start(u64::from(lba) * SECTOR as u64))?;
     file.write_all(bytes)
+}
+
+/// raw 8.3名に対するLFN checksum。kernel側`storage::fat32`の同名関数と
+/// 同じ式で、`0x40`flag付き末尾chunkへ書き込む値を求める。
+fn lfn_checksum(short_name: &[u8; 11]) -> u8 {
+    let mut sum = 0u8;
+    for &byte in short_name {
+        sum = ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(byte);
+    }
+    sum
+}
+
+/// `name`を表すLFN record列を`dir`の`index`以降へ書く。disk上は
+/// `0x40`flag付きの末尾chunkから順に並び、seq `s`はnameの
+/// `(s-1)*13`文字目からの13文字を保持する。
+fn write_lfn_entries(dir: &mut [u8], index: usize, name: &str, short_name: &[u8; 11]) {
+    const CHAR_OFFSETS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+    let chars: Vec<u16> = name.encode_utf16().collect();
+    let chunks = chars.len().div_ceil(13);
+    let checksum = lfn_checksum(short_name);
+    for chunk in 0..chunks {
+        let seq = (chunks - chunk) as u8;
+        let record = &mut dir[(index + chunk) * 32..(index + chunk) * 32 + 32];
+        record[0] = if chunk == 0 { seq | 0x40 } else { seq };
+        record[11] = 0x0f;
+        record[13] = checksum;
+        for (position, &offset) in CHAR_OFFSETS.iter().enumerate() {
+            let ch_index = (seq as usize - 1) * 13 + position;
+            let ch = if ch_index == chars.len() {
+                0x0000
+            } else {
+                chars.get(ch_index).copied().unwrap_or(0xffff)
+            };
+            record[offset..offset + 2].copy_from_slice(&ch.to_le_bytes());
+        }
+    }
 }
 
 /// `build_fat32_image`が生成したimageの検査で使うメモリ上のreader。
@@ -121,6 +162,7 @@ fn image_bytes() -> Vec<u8> {
     set(&mut fat, FILE_CLUSTER, 0x0fff_ffff);
     set(&mut fat, DOCS_CLUSTER, 0x0fff_ffff);
     set(&mut fat, NOTE_CLUSTER, 0x0fff_ffff);
+    set(&mut fat, LFN_CLUSTER, 0x0fff_ffff);
     for copy in 0..FAT_COUNT {
         let start = (u32::from(RESERVED_SECTORS) + u32::from(copy) * fat_sectors) as usize * SECTOR;
         image[start..start + fat.len()].copy_from_slice(&fat);
@@ -148,6 +190,15 @@ fn image_bytes() -> Vec<u8> {
             HELLO_TXT.len() as u32,
         );
         dir_entry(root, 1, b"DOCS       ", 0x10, DOCS_CLUSTER, 0);
+        write_lfn_entries(root, 2, "Long File Name.txt", b"LONGFI~1TXT");
+        dir_entry(
+            root,
+            4,
+            b"LONGFI~1TXT",
+            0x20,
+            LFN_CLUSTER,
+            LFN_TXT.len() as u32,
+        );
     }
 
     // --- DOCS directory (cluster 4): `.`/`..` + NOTE.TXT ---
@@ -171,6 +222,8 @@ fn image_bytes() -> Vec<u8> {
     image[file_start..file_start + HELLO_TXT.len()].copy_from_slice(HELLO_TXT);
     let note_start = (data_start + (NOTE_CLUSTER - 2)) as usize * SECTOR;
     image[note_start..note_start + NOTE_TXT.len()].copy_from_slice(NOTE_TXT);
+    let lfn_start = (data_start + (LFN_CLUSTER - 2)) as usize * SECTOR;
+    image[lfn_start..lfn_start + LFN_TXT.len()].copy_from_slice(LFN_TXT);
 
     image
 }
@@ -230,7 +283,7 @@ impl Drop for DiskImage {
 
 #[cfg(test)]
 mod tests {
-    use super::{HELLO_TXT, NOTE_TXT, SliceReader, fat_sectors, image_bytes};
+    use super::{HELLO_TXT, LFN_TXT, NOTE_TXT, SliceReader, fat_sectors, image_bytes};
     use minios_kernel::storage::fat32::Fat32;
     use std::vec::Vec;
 
@@ -245,7 +298,7 @@ mod tests {
         let mut names = Vec::new();
         fs.for_each_root_entry(|entry| names.push(entry.name().to_owned()))
             .expect("root listing must succeed");
-        assert_eq!(names, ["HELLO.TXT", "DOCS"]);
+        assert_eq!(names, ["HELLO.TXT", "DOCS", "Long File Name.txt"]);
 
         let mut content = Vec::new();
         fs.read_root_file("HELLO.TXT", |chunk| content.extend_from_slice(chunk))
@@ -261,6 +314,14 @@ mod tests {
         fs.read_file("DOCS/NOTE.TXT", |chunk| note.extend_from_slice(chunk))
             .expect("DOCS/NOTE.TXT must be readable");
         assert_eq!(note, NOTE_TXT);
+
+        // LFN名でも8.3 aliasでも同じfileを読める。
+        for name in ["Long File Name.txt", "LONGFI~1.TXT"] {
+            let mut lfn = Vec::new();
+            fs.read_file(name, |chunk| lfn.extend_from_slice(chunk))
+                .expect("LFN file must be readable");
+            assert_eq!(lfn, LFN_TXT);
+        }
     }
 
     // Catches a fat_sectors estimate that leaves data_cluster_count under the

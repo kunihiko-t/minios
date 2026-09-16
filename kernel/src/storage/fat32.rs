@@ -16,8 +16,12 @@ pub enum FatError<E> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirEntry {
-    name: [u8; 12],
+    /// 表示名。直前のLFN record列がchecksum一致した場合は長い名前、
+    /// それ以外は8.3の`BASE.EXT`形。
+    name: [u8; 255],
     name_len: u8,
+    /// alias照合用のraw 8.3名（space padding済み・大文字）。
+    short_name: [u8; 11],
     first_cluster: u32,
     size: u32,
     directory: bool,
@@ -158,10 +162,10 @@ impl<R: SectorReader> Fat32<R> {
         name: &str,
         write: impl FnMut(&[u8]),
     ) -> Result<(), FatError<R::Error>> {
-        let wanted = normalize_input_name(name).ok_or(FatError::InvalidName)?;
+        normalize_input_name(name).ok_or(FatError::InvalidName)?;
         let mut scratch = [0; 512];
         let entry = self
-            .find_entry_in(self.root_cluster, &wanted, &mut scratch)?
+            .find_entry_in(self.root_cluster, name, &mut scratch)?
             .ok_or(FatError::NotFound)?;
         if entry.directory {
             return Err(FatError::IsDirectory);
@@ -271,19 +275,18 @@ impl<R: SectorReader> Fat32<R> {
         scratch: &mut [u8; 512],
     ) -> Result<DirEntry, FatError<R::Error>> {
         // diskへ触れる前に全要素を検査し、不正なpathは存在の有無に
-        // 関係なく`InvalidName`で拒否する。
+        // 関係なく`InvalidName`で拒否する。要素は8.3に限らず、LFNが
+        // 許す印字可能ASCIIを受理する。
         for part in path.split('/') {
-            if part.is_empty() || part == "." || part == ".." {
+            if !is_valid_component(part) {
                 return Err(FatError::InvalidName);
             }
-            normalize_input_name(part).ok_or(FatError::InvalidName)?;
         }
         let mut dir_cluster = self.root_cluster;
         let mut parts = path.split('/').peekable();
         while let Some(part) = parts.next() {
-            let wanted = normalize_input_name(part).expect("validated above");
             let entry = self
-                .find_entry_in(dir_cluster, &wanted, scratch)?
+                .find_entry_in(dir_cluster, part, scratch)?
                 .ok_or(FatError::NotFound)?;
             if parts.peek().is_none() {
                 return Ok(entry);
@@ -300,12 +303,12 @@ impl<R: SectorReader> Fat32<R> {
     fn find_entry_in(
         &mut self,
         dir_cluster: u32,
-        wanted: &[u8; 11],
+        part: &str,
         scratch: &mut [u8; 512],
     ) -> Result<Option<DirEntry>, FatError<R::Error>> {
         let mut found = None;
         self.walk_dir(dir_cluster, scratch, |entry| {
-            if entry_short_name(entry) == *wanted {
+            if matches_component(entry, part) {
                 found = Some(*entry);
                 true
             } else {
@@ -326,6 +329,7 @@ impl<R: SectorReader> Fat32<R> {
     {
         let mut cluster = dir_cluster;
         let mut clusters_read = 0;
+        let mut lfn = PendingLfn::new();
         loop {
             if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
                 return Err(FatError::CorruptChain);
@@ -342,10 +346,22 @@ impl<R: SectorReader> Fat32<R> {
                     if scratch[offset] == 0 {
                         return Ok(());
                     }
-                    if let Some(entry) = parse_dir_entry(&scratch[offset..offset + 32])
-                        && visit(&entry)
-                    {
-                        return Ok(());
+                    let record = &scratch[offset..offset + 32];
+                    if record[11] == 0x0f {
+                        // LFN chunk。直後のshort entryへ名を引き継ぐ。
+                        lfn.push(record);
+                        continue;
+                    }
+                    if record[0] == 0xe5 {
+                        // deleted entryはLFNとshort entryの対応を切る。
+                        lfn.reset();
+                        continue;
+                    }
+                    if let Some(mut entry) = parse_dir_entry(record) {
+                        lfn.apply(&mut entry, record);
+                        if visit(&entry) {
+                            return Ok(());
+                        }
                     }
                 }
                 sector_in_cluster += 1;
@@ -519,7 +535,7 @@ fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
         }
     }
 
-    let mut name = [0; 12];
+    let mut name = [0; 255];
     let mut name_len = 0;
     for &byte in &record[..base_len] {
         name[name_len] = uppercase_ascii(byte);
@@ -539,31 +555,153 @@ fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
     Some(DirEntry {
         name,
         name_len: name_len as u8,
+        short_name: record[..11].try_into().expect("11-byte FAT name field"),
         first_cluster: (high << 16) | low,
         size: u32::from_le_bytes([record[28], record[29], record[30], record[31]]),
         directory: attributes & 0x10 != 0,
     })
 }
 
-fn entry_short_name(entry: &DirEntry) -> [u8; 11] {
-    let mut normalized = [b' '; 11];
-    let mut source = 0;
-    let mut destination = 0;
-    while source < entry.name_len as usize && entry.name[source] != b'.' {
-        normalized[destination] = entry.name[source];
-        source += 1;
-        destination += 1;
+/// path要素がentryへ一致するか。LFN表示名のASCII大小文字無視比較と、
+/// 8.3 aliasへの正規化比較の両方を試す。
+fn matches_component(entry: &DirEntry, part: &str) -> bool {
+    part.eq_ignore_ascii_case(entry.name())
+        || normalize_input_name(part).is_some_and(|wanted| wanted == entry.short_name)
+}
+
+/// path要素として受理する文字種。LFNは空白を含む印字可能ASCIIを許すが、
+/// 区切りと衝突する`/`と`\`、`.`と`..`そのものは拒否する。
+#[cfg(not(target_arch = "riscv32"))]
+fn is_valid_component(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && part.len() <= 255
+        && part
+            .bytes()
+            .all(|byte| (0x20..=0x7e).contains(&byte) && byte != b'\\')
+}
+
+/// raw 8.3名に対するLFN checksum。LFN record列がどのshort entryへ
+/// 属するかを照合するために使う。
+#[cfg(not(target_arch = "riscv32"))]
+fn lfn_checksum(short_name: &[u8; 11]) -> u8 {
+    let mut sum = 0u8;
+    for &byte in short_name {
+        sum = ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(byte);
     }
-    if source < entry.name_len as usize {
-        source += 1;
-        destination = 8;
-        while source < entry.name_len as usize {
-            normalized[destination] = entry.name[source];
-            source += 1;
-            destination += 1;
+    sum
+}
+
+/// walk中に集めたLFN chunk列。RV32ではZSTのno-opとして実装し、
+/// IMEMへ機構を載せない。
+#[cfg(not(target_arch = "riscv32"))]
+struct PendingLfn {
+    /// chunk番号順にdecodeしたASCII byte。chunk `s`は`(s-1)*13`から始まる。
+    name: [u8; 255],
+    /// 連続性を検査する次に来るべきseq。0は未収集または中断。
+    expected_seq: u8,
+    /// 最終chunk（disk上では先頭）が持つchunk総数。
+    chunk_count: u8,
+    checksum: u8,
+    /// seq 1まで揃ったか。
+    complete: bool,
+    /// 非ASCIIやbuf超過など、decode不能にした印。
+    invalid: bool,
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+impl PendingLfn {
+    const fn new() -> Self {
+        Self {
+            name: [0; 255],
+            expected_seq: 0,
+            chunk_count: 0,
+            checksum: 0,
+            complete: false,
+            invalid: false,
         }
     }
-    normalized
+
+    fn reset(&mut self) {
+        self.expected_seq = 0;
+        self.complete = false;
+    }
+
+    /// 1 record分のLFN chunkをdecodeして蓄える。`0x40`flag付きは
+    /// 新しい列の開始として状態を張り直す。
+    fn push(&mut self, record: &[u8]) {
+        const CHAR_OFFSETS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+        let seq = record[0] & 0x1f;
+        if record[0] & 0x40 != 0 {
+            self.reset();
+            self.chunk_count = seq;
+            self.checksum = record[13];
+            self.expected_seq = seq;
+            self.invalid = seq == 0 || seq > 20;
+        }
+        if self.invalid || seq == 0 || seq != self.expected_seq {
+            self.reset();
+            return;
+        }
+        let start = (seq as usize - 1) * 13;
+        if start + 13 > self.name.len() {
+            self.invalid = true;
+            self.reset();
+            return;
+        }
+        for (index, &offset) in CHAR_OFFSETS.iter().enumerate() {
+            let ch = u16::from_le_bytes([record[offset], record[offset + 1]]);
+            let decoded = match ch {
+                0x0000 | 0xffff => 0,
+                0x20..=0x7e => ch as u8,
+                _ => {
+                    self.invalid = true;
+                    0
+                }
+            };
+            self.name[start + index] = decoded;
+        }
+        self.expected_seq = seq - 1;
+        if seq == 1 {
+            self.complete = true;
+        }
+    }
+
+    /// `record`が引き受けるLFN名を`entry`へ適用する。checksumまたは
+    /// 収集条件が合わなければ8.3名のままにし、どちらでも状態をresetする。
+    fn apply(&mut self, entry: &mut DirEntry, record: &[u8]) {
+        if self.complete
+            && !self.invalid
+            && self.checksum == lfn_checksum(record[..11].try_into().unwrap())
+        {
+            let end = self.chunk_count as usize * 13;
+            let name_len = self.name[..end]
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(end);
+            entry.name[..name_len].copy_from_slice(&self.name[..name_len]);
+            entry.name_len = name_len as u8;
+        }
+        self.reset();
+    }
+}
+
+/// RV32では状態を持たず、全ての操作をinlinedなno-opへ畳む。
+#[cfg(target_arch = "riscv32")]
+struct PendingLfn;
+
+#[cfg(target_arch = "riscv32")]
+impl PendingLfn {
+    const fn new() -> Self {
+        Self
+    }
+
+    fn reset(&mut self) {}
+
+    fn push(&mut self, _record: &[u8]) {}
+
+    fn apply(&mut self, _entry: &mut DirEntry, _record: &[u8]) {}
 }
 
 fn is_extended_partition(partition_type: u8) -> bool {
@@ -740,7 +878,7 @@ impl<R> Fat32<R> {
 mod tests {
     extern crate std;
 
-    use super::{DirEntry, Fat32, FatError};
+    use super::{DirEntry, Fat32, FatError, lfn_checksum};
     use crate::storage::SectorReader;
     use std::{string::String, vec::Vec};
 
@@ -906,6 +1044,81 @@ mod tests {
         .unwrap()
     }
 
+    /// `short_name`に対するLFN checksum record列を`sector`の`index`以降へ
+    /// 書く。disk上は最終chunkから順に並ぶ。
+    fn write_lfn_records(sector: &mut [u8; 512], index: usize, name: &str, short_name: &[u8; 11]) {
+        let chars: Vec<u16> = name.encode_utf16().collect();
+        let chunks = chars.len().div_ceil(13);
+        let checksum = lfn_checksum(short_name);
+        for chunk in 0..chunks {
+            // disk上は末尾chunk（seq=N, `0x40`flag付き）から並ぶ。seq `s`の
+            // recordはnameの`(s-1)*13`文字目からの13文字を保持する。
+            let seq = (chunks - chunk) as u8;
+            let record = &mut sector[(index + chunk) * 32..(index + chunk) * 32 + 32];
+            record[0] = if chunk == 0 { seq | 0x40 } else { seq };
+            record[11] = 0x0f;
+            record[13] = checksum;
+            for position in 0..13 {
+                let ch_index = (seq as usize - 1) * 13 + position;
+                // name直後の`0x0000`終端、その後は`0xffff`で埋める。
+                let ch = if ch_index == chars.len() {
+                    0x0000
+                } else {
+                    chars.get(ch_index).copied().unwrap_or(0xffff)
+                };
+                let offset = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30][position];
+                record[offset..offset + 2].copy_from_slice(&ch.to_le_bytes());
+            }
+        }
+    }
+
+    /// rootに`Long File Name.txt`（alias `LONGFI~1.TXT`）を持つfixture。
+    /// `corrupt`を立てるとchecksumを壊して8.3名へfallbackさせる。
+    fn mounted_lfn_fixture(corrupt: bool) -> Fat32<MemoryReader<4>> {
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+        write_fat_entry(&mut fat, 4, 0x0fff_ffff);
+
+        let mut root = [0; 512];
+        write_lfn_records(&mut root, 0, "Long File Name.txt", b"LONGFI~1TXT");
+        if corrupt {
+            // `0x40`flag付きの末尾chunkが持つchecksumを壊す。
+            root[13] ^= 0xff;
+        }
+        write_directory_entry(&mut root, 2, b"LONGFI~1TXT", 0x20, 4, 8);
+
+        let mut data = [0; 512];
+        data[..8].copy_from_slice(b"lfn data");
+
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, fat),
+            (288, root),
+            (290, data),
+        ]))
+        .unwrap()
+    }
+
+    /// LFN record列とshort entryの間にdeleted entryが挟まるfixture。
+    /// 対応が切れて8.3名へfallbackすることを確認する。
+    fn mounted_severed_lfn_fixture() -> Fat32<MemoryReader<3>> {
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+
+        let mut root = [0; 512];
+        write_lfn_records(&mut root, 0, "Long File Name.txt", b"LONGFI~1TXT");
+        // LFN列の直後をdeleted entryで区切り、対応を断つ。
+        root[64] = 0xe5;
+        write_directory_entry(&mut root, 3, b"LONGFI~1TXT", 0x20, 0, 0);
+
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, fat),
+            (288, root),
+        ]))
+        .unwrap()
+    }
+
     fn mounted_multicluster_file_fixture(content: &[u8]) -> Fat32<MemoryReader<5>> {
         let mut fat = [0; 512];
         write_fat_entry(&mut fat, 2, 0x0fff_ffff);
@@ -1051,13 +1264,18 @@ mod tests {
             Err(FatError::IsDirectory)
         );
         // `A`がrootに存在しないため、path解決は`NotFound`で止まる。
-        assert_eq!(volume.read_file("A/B.TXT", |_| {}), Err(FatError::NotFound));
+        // `.TXT`や`A..TXT`のように8.3では不正でもLFNでは有効な要素は
+        // 同じくlookupへ進み`NotFound`となる。
+        for name in ["A/B.TXT", ".TXT", "TOO-LONG9.TXT", "A..TXT"] {
+            assert_eq!(
+                volume.read_file(name, |_| {}),
+                Err(FatError::NotFound),
+                "{name} unexpectedly accepted"
+            );
+        }
         for name in [
             "",
-            ".TXT",
-            "TOO-LONG9.TXT",
             "A\\\\B.TXT",
-            "A..TXT",
             "A//B.TXT",
             "/HELLO.TXT",
             "HELLO.TXT/",
@@ -1114,6 +1332,49 @@ mod tests {
             Err(FatError::NotDirectory)
         );
         assert!(!visited);
+    }
+
+    #[test]
+    fn lfn_name_appears_in_listing_and_resolves_for_reads() {
+        let mut volume = mounted_lfn_fixture(false);
+        let mut names = Vec::new();
+        volume
+            .for_each_entry("", |entry| names.push(String::from(entry.name())))
+            .unwrap();
+        assert_eq!(names, ["Long File Name.txt"]);
+
+        // LFN名でも8.3 aliasでも読める。大小文字は区別しない。
+        for name in ["Long File Name.txt", "long file name.txt", "LONGFI~1.TXT"] {
+            let mut output = Vec::new();
+            volume
+                .read_file(name, |bytes| output.extend_from_slice(bytes))
+                .unwrap_or_else(|error| panic!("{name} must resolve: {error:?}"));
+            assert_eq!(output, b"lfn data");
+        }
+    }
+
+    #[test]
+    fn lfn_falls_back_to_the_short_name_on_a_bad_checksum() {
+        let mut volume = mounted_lfn_fixture(true);
+        let mut names = Vec::new();
+        volume
+            .for_each_entry("", |entry| names.push(String::from(entry.name())))
+            .unwrap();
+        assert_eq!(names, ["LONGFI~1.TXT"]);
+        assert_eq!(
+            volume.read_file("Long File Name.txt", |_| {}),
+            Err(FatError::NotFound)
+        );
+    }
+
+    #[test]
+    fn lfn_falls_back_when_a_deleted_entry_severs_the_association() {
+        let mut volume = mounted_severed_lfn_fixture();
+        let mut names = Vec::new();
+        volume
+            .for_each_entry("", |entry| names.push(String::from(entry.name())))
+            .unwrap();
+        assert_eq!(names, ["LONGFI~1.TXT"]);
     }
 
     #[test]
