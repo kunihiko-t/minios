@@ -80,6 +80,12 @@ impl FileDesc {
     pub const fn dir_location(&self) -> (u32, u32) {
         (self.dir_cluster, self.dir_index)
     }
+
+    /// 現在のfileサイズ。`write_range`が伸ばした分も反映される。
+    /// `lseek`の`SEEK_END`基準に使う。
+    pub const fn size(&self) -> u32 {
+        self.size
+    }
 }
 
 /// directory走査中のentryの物理位置。`dir_head`はそのentryを含む

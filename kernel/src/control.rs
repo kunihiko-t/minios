@@ -145,6 +145,66 @@ impl ControlSource for UartControlSource<'_> {
         Ok(())
     }
 
+    /// guestの`lseek`をfdのoffset更新として処理する。`SEEK_END`は
+    /// FileDescの現在sizeを基準にする。負になる指定と未知のwhenceは
+    /// `EINVAL`で拒否する。
+    #[cfg(target_arch = "riscv64")]
+    fn seek_fd(&mut self, fd: usize, offset: isize, whence: usize) -> Result<u64, isize> {
+        use minios_abi::syscall::{EBADF, EINVAL, SEEK_CUR, SEEK_END, SEEK_SET};
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        let base: u64 = match whence {
+            SEEK_SET => 0,
+            SEEK_CUR => entry.offset,
+            SEEK_END => entry.desc.size() as u64,
+            _ => return Err(EINVAL),
+        };
+        let next = base as i128 + offset as i128;
+        if next < 0 || next > u64::MAX as i128 {
+            return Err(EINVAL);
+        }
+        entry.offset = next as u64;
+        Ok(entry.offset)
+    }
+
+    /// guestの`pread`をfdのfileの明示offsetから読む。fd保持のoffsetと
+    /// 方向性（writable fdは`EBADF`）は`read`と同じ規約で扱う。
+    #[cfg(target_arch = "riscv64")]
+    fn pread_fd(&mut self, fd: usize, offset: u64, output: &mut [u8]) -> Result<usize, isize> {
+        use minios_abi::syscall::EBADF;
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        if entry.writable {
+            return Err(EBADF);
+        }
+        // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        session
+            .read_range(&entry.desc, offset, output)
+            .map_err(fat_errno)
+    }
+
+    /// guestの`pwrite`をfdのfileの明示offsetへ書く。fd保持のoffsetと
+    /// 方向性（read-only fdは`EBADF`）は`write`と同じ規約で扱う。
+    /// FileDescのsize/first_clusterは`write_range`が更新する。
+    #[cfg(target_arch = "riscv64")]
+    fn pwrite_fd(&mut self, fd: usize, offset: u64, data: &[u8]) -> Result<usize, isize> {
+        use minios_abi::syscall::EBADF;
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        if !entry.writable {
+            return Err(EBADF);
+        }
+        // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        session
+            .write_range(&mut entry.desc, offset, data)
+            .map_err(fat_errno)
+    }
+
     /// guestの`write`をwritableなfdの現在offsetから書き、offsetを進める。
     /// read-onlyのfdへのwriteは`EBADF`で拒否する。
     #[cfg(target_arch = "riscv64")]

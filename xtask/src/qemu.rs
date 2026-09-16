@@ -55,9 +55,12 @@ const FILE_WRITE_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=file-write\n";
 const FILE_UNLINK_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2d\0\0\0MiniOS sched: spawned pid=0 name=file-unlink\n";
+const FILE_SEEK_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-seek\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
+const FILE_SEEK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0seek verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -91,6 +94,7 @@ pub enum TestKind {
     FileFd,
     FileWrite,
     FileUnlink,
+    FileSeek,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -121,6 +125,9 @@ impl TestKind {
             Self::FileWrite => unreachable!("the file-write test boots the normal kernel"),
             Self::FileUnlink => {
                 unreachable!("the file-unlink test boots the normal kernel")
+            }
+            Self::FileSeek => {
+                unreachable!("the file-seek test boots the normal kernel")
             }
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -156,6 +163,9 @@ impl TestKind {
             }
             Self::FileUnlink => {
                 unreachable!("the file-unlink test verifies raw control frames")
+            }
+            Self::FileSeek => {
+                unreachable!("the file-seek test verifies raw control frames")
             }
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -440,6 +450,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
         );
+    }
+
+    if kind == TestKind::FileSeek {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_seek()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_seek_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Sched {
@@ -1120,6 +1145,16 @@ const FILE_UNLINK_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file-seek検査で期待されるcontrol frame列。guestがpread/pwrite/lseekの
+/// 位置指定I/O経路を通してから、検証済みの旨をstdoutへ出力する。
+const FILE_SEEK_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    FILE_SEEK_SPAWNED_FRAME,
+    FILE_SEEK_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1217,6 +1252,27 @@ fn verify_file_unlink_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_UNLINK_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+fn verify_file_seek_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_SEEK_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -1518,6 +1574,11 @@ impl PayloadBundle {
         Self::create_with(payload_file_unlink_bundle_bytes(&elf)?)
     }
 
+    fn create_file_seek() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_SEEK)?;
+        Self::create_with(payload_file_seek_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -1700,6 +1761,14 @@ fn payload_file_write_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// 内容をstdoutへ書きexit(42)する。
 fn payload_file_unlink_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-unlink\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-seek検査用bundle: file_seek guestのELFと引数なしmanifestを
+/// 組み立てる。guestはpread/pwrite/lseekの位置指定I/Oを確かめて
+/// `seek verified`をstdoutへ書きexit(42)する。
+fn payload_file_seek_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-seek\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 

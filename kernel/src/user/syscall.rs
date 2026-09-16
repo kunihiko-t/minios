@@ -81,6 +81,30 @@ pub trait ControlSource {
         let _ = path;
         Err(ENOSYS)
     }
+
+    /// `fd`のoffsetを`whence`（`SEEK_SET`/`SEEK_CUR`/`SEEK_END`）基準の
+    /// `offset`へ更新し、新しいoffsetを返す。`Err`はそのまま`a0`へ返す
+    /// errnoである。default実装は`ENOSYS`。
+    fn seek_fd(&mut self, fd: usize, offset: isize, whence: usize) -> Result<u64, isize> {
+        let _ = (fd, offset, whence);
+        Err(ENOSYS)
+    }
+
+    /// `fd`のfileの`offset` byte目から`output`へ最大`output.len()` byte
+    /// 読み、読んだbyte数を返す。fd保持のoffsetは動かさない。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn pread_fd(&mut self, fd: usize, offset: u64, output: &mut [u8]) -> Result<usize, isize> {
+        let _ = (fd, offset, output);
+        Err(ENOSYS)
+    }
+
+    /// `fd`のfileの`offset` byte目へ`data`を書き、書いたbyte数を返す。
+    /// fd保持のoffsetは動かさない。`Err`はそのまま`a0`へ返すerrnoである。
+    /// default実装は`ENOSYS`。
+    fn pwrite_fd(&mut self, fd: usize, offset: u64, data: &[u8]) -> Result<usize, isize> {
+        let _ = (fd, offset, data);
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -136,6 +160,12 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_open(context, space, memory, source, true)
     } else if number == SyscallNumber::Unlink as usize {
         dispatch_unlink(context, space, memory, source)
+    } else if number == SyscallNumber::Lseek as usize {
+        dispatch_lseek(context, source)
+    } else if number == SyscallNumber::Pread as usize {
+        dispatch_pread(context, space, memory, source, read_scratch)
+    } else if number == SyscallNumber::Pwrite as usize {
+        dispatch_pwrite(context, space, memory, source)
     } else if number == SyscallNumber::Close as usize {
         dispatch_close(context, source)
     } else if number == SyscallNumber::Exit as usize {
@@ -276,6 +306,107 @@ fn dispatch_unlink<M: FrameStore, E, R: ControlSource>(
     };
     match source.unlink(path) {
         Ok(()) => context.set_register(10, 0),
+        Err(errno) => context.set_register(10, errno as usize),
+    }
+    SyscallFlow::Resume
+}
+
+/// `lseek` (`a0=fd, a1=offset(isize), a2=whence`)。file fdのみが対象で、
+/// 標準streamや未割当fdは`EBADF`を返す。新offsetを`a0`へ返す。
+fn dispatch_lseek<E, R: ControlSource>(
+    context: &mut UserContext,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let fd = context.register(10);
+    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
+        context.set_register(10, EBADF as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.seek_fd(fd, context.register(11) as isize, context.register(12)) {
+        Ok(offset) => context.set_register(10, offset as usize),
+        Err(errno) => context.set_register(10, errno as usize),
+    }
+    SyscallFlow::Resume
+}
+
+/// `pread` (`a0=fd, a1=buf_ptr, a2=len, a3=offset`)。検証規約は`read`と
+/// 同じで、fdの保持するoffsetは動かさない。`ReadComplete`経路を再利用する。
+fn dispatch_pread<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let fd = context.register(10);
+    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
+        context.set_register(10, EBADF as usize);
+        return SyscallFlow::Resume;
+    }
+    let len = context.register(12);
+    if len > MAX_READ_LEN {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    if len == 0 {
+        context.set_register(10, 0);
+        return SyscallFlow::Resume;
+    }
+    let start = context.register(11) as u64;
+    // storageのlazy mountを起こし得るsourceへ触れる前にEFAULTを確定する。
+    if check_user_writable_range(space, memory, start, len).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.pread_fd(fd, context.register(13) as u64, &mut read_scratch[..len]) {
+        Ok(count) => SyscallFlow::ReadComplete {
+            start,
+            len: count.min(len),
+        },
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
+}
+
+/// `pwrite` (`a0=fd, a1=buf_ptr, a2=len, a3=offset`)。検証規約は`write`
+/// と同じで、fdの保持するoffsetは動かさない。
+fn dispatch_pwrite<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let fd = context.register(10);
+    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
+        context.set_register(10, EBADF as usize);
+        return SyscallFlow::Resume;
+    }
+    let len = context.register(12);
+    if len > MAX_WRITE_LEN {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    if len == 0 {
+        context.set_register(10, 0);
+        return SyscallFlow::Resume;
+    }
+    let mut buffer = [0u8; MAX_WRITE_LEN];
+    // storageのlazy mountを起こし得るsourceへ触れる前にEFAULTを確定する。
+    if copy_from_user(
+        space,
+        memory,
+        context.register(11) as u64,
+        &mut buffer[..len],
+    )
+    .is_err()
+    {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.pwrite_fd(fd, context.register(13) as u64, &buffer[..len]) {
+        Ok(count) => context.set_register(10, count.min(len)),
         Err(errno) => context.set_register(10, errno as usize),
     }
     SyscallFlow::Resume
@@ -467,6 +598,9 @@ mod tests {
     const CLOSE_NUMBER: usize = SyscallNumber::Close as usize;
     const CREATE_NUMBER: usize = SyscallNumber::Create as usize;
     const UNLINK_NUMBER: usize = SyscallNumber::Unlink as usize;
+    const LSEEK_NUMBER: usize = SyscallNumber::Lseek as usize;
+    const PREAD_NUMBER: usize = SyscallNumber::Pread as usize;
+    const PWRITE_NUMBER: usize = SyscallNumber::Pwrite as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,6 +851,12 @@ mod tests {
         writes: usize,
         written: Vec<u8>,
         unlinks: usize,
+        seeks: usize,
+        preads: usize,
+        pwrites: usize,
+        seen_offset: Option<u64>,
+        seen_seek: Option<(isize, usize)>,
+        seek_result: Result<u64, isize>,
     }
 
     impl FileSource {
@@ -733,6 +873,12 @@ mod tests {
                 writes: 0,
                 written: Vec::new(),
                 unlinks: 0,
+                seeks: 0,
+                preads: 0,
+                pwrites: 0,
+                seen_offset: None,
+                seen_seek: None,
+                seek_result: Ok(8),
             }
         }
 
@@ -800,6 +946,29 @@ mod tests {
             self.unlinks += 1;
             self.seen_path = Some(Vec::from(path.as_bytes()));
             self.result
+        }
+
+        fn seek_fd(&mut self, _fd: usize, offset: isize, whence: usize) -> Result<u64, isize> {
+            self.seeks += 1;
+            self.seen_seek = Some((offset, whence));
+            self.seek_result
+        }
+
+        fn pread_fd(&mut self, _fd: usize, offset: u64, output: &mut [u8]) -> Result<usize, isize> {
+            self.preads += 1;
+            self.seen_offset = Some(offset);
+            self.result?;
+            let count = core::cmp::min(self.script.len(), output.len());
+            output[..count].copy_from_slice(&self.script[..count]);
+            Ok(count)
+        }
+
+        fn pwrite_fd(&mut self, _fd: usize, offset: u64, data: &[u8]) -> Result<usize, isize> {
+            self.pwrites += 1;
+            self.seen_offset = Some(offset);
+            self.result?;
+            self.written.extend_from_slice(data);
+            Ok(data.len())
         }
     }
 
@@ -1813,6 +1982,275 @@ mod tests {
             0,
             0,
             b"OLD.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches lseek dropping the signed offset or whence on the floor,
+    // accepting non-file descriptors, or swallowing the source's errno.
+    #[test]
+    fn lseek_routes_the_signed_offset_and_validates_the_fd() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_fixture(
+            LSEEK_NUMBER,
+            FIRST_FILE_FD,
+            (-3isize) as usize,
+            1,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 8);
+        assert_eq!(source.seeks, 1);
+        assert_eq!(source.seen_seek, Some((-3, 1)));
+
+        // 標準streamと未割当fdはEBADFで、sourceへ届かない。
+        for fd in [0usize, STDOUT, STDERR, FIRST_FILE_FD + MAX_OPEN_FILES] {
+            let mut source = FileSource::serving(b"");
+            let (context, flow) = dispatch_fixture(
+                LSEEK_NUMBER,
+                fd,
+                0,
+                0,
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), EBADF as usize);
+            assert_eq!(source.seeks, 0);
+        }
+
+        let mut source = FileSource::serving(b"");
+        source.seek_result = Err(EINVAL);
+        let (context, flow) = dispatch_fixture(
+            LSEEK_NUMBER,
+            FIRST_FILE_FD,
+            usize::MAX,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EINVAL as usize);
+    }
+
+    // Catches the default ControlSource::seek_fd implementation leaking a
+    // successful result: without storage the guest must see ENOSYS.
+    #[test]
+    fn lseek_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_fixture(
+            LSEEK_NUMBER,
+            FIRST_FILE_FD,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches pread ignoring a3's explicit offset, not capping the count,
+    // or letting reads through on non-file descriptors.
+    #[test]
+    fn pread_reads_at_the_explicit_offset() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"0123456789");
+        let mut read_scratch = scratch();
+        let (context, flow) = dispatch_numbered_file_fixture(
+            PREAD_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            8,
+            4,
+            b"",
+            &mut sink,
+            &mut source,
+            &mut read_scratch,
+        );
+
+        assert_eq!(
+            flow,
+            SyscallFlow::ReadComplete {
+                start: MESSAGE_PAGE as u64,
+                len: 8
+            }
+        );
+        assert_eq!(source.preads, 1);
+        assert_eq!(source.seen_offset, Some(4));
+        assert_eq!(&read_scratch[..8], b"01234567");
+        // a0はcomplete_readが長さを書くまでfdのままである。
+        assert_eq!(context.register(10), FIRST_FILE_FD);
+    }
+
+    // Catches pread skipping descriptor/length/buffer validation or letting
+    // EFAULT leak past the storage side effect.
+    #[test]
+    fn pread_validates_the_descriptor_length_and_buffer() {
+        let mut sink = FakeSink::default();
+
+        // fd検証・len検証・buf検証をそれぞれ個別に確認する。
+        for (fd, len, buf, expected) in [
+            (STDIN, 8usize, MESSAGE_PAGE, EBADF),
+            (FIRST_FILE_FD + MAX_OPEN_FILES, 8, MESSAGE_PAGE, EBADF),
+            (FIRST_FILE_FD, MAX_READ_LEN + 1, MESSAGE_PAGE, EINVAL),
+            (FIRST_FILE_FD, 8, 0x40_000usize, EFAULT),
+        ] {
+            let mut source = FileSource::serving(b"0123456789");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                PREAD_NUMBER,
+                fd,
+                buf,
+                len,
+                0,
+                b"",
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), expected as usize);
+            assert_eq!(source.preads, 0);
+        }
+
+        // len==0はsourceを呼ばず0を返す。
+        let mut source = FileSource::serving(b"0123456789");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            PREAD_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            0,
+            0,
+            b"",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.preads, 0);
+    }
+
+    // Catches the default ControlSource::pread_fd implementation leaking a
+    // successful result: without storage the guest must see ENOSYS.
+    #[test]
+    fn pread_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            PREAD_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            4,
+            0,
+            b"",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches pwrite ignoring a3's explicit offset or writing through
+    // non-file descriptors.
+    #[test]
+    fn pwrite_writes_at_the_explicit_offset() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            PWRITE_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            2,
+            MESSAGE,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), MESSAGE.len());
+        assert_eq!(source.pwrites, 1);
+        assert_eq!(source.seen_offset, Some(2));
+        assert_eq!(source.written, MESSAGE);
+    }
+
+    // Catches pwrite skipping descriptor/length/buffer validation or letting
+    // EFAULT leak past the storage side effect.
+    #[test]
+    fn pwrite_validates_the_descriptor_length_and_buffer() {
+        let mut sink = FakeSink::default();
+
+        for (fd, len, buf, expected) in [
+            (STDIN, 3usize, MESSAGE_PAGE, EBADF),
+            (FIRST_FILE_FD + MAX_OPEN_FILES, 3, MESSAGE_PAGE, EBADF),
+            (FIRST_FILE_FD, MAX_WRITE_LEN + 1, MESSAGE_PAGE, EINVAL),
+            (FIRST_FILE_FD, 3, 0x40_000usize, EFAULT),
+        ] {
+            let mut source = FileSource::serving(b"");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                PWRITE_NUMBER,
+                fd,
+                buf,
+                len,
+                0,
+                MESSAGE,
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), expected as usize);
+            assert_eq!(source.pwrites, 0);
+        }
+
+        let mut source = FileSource::failing(EINVAL);
+        let (context, flow) = dispatch_numbered_file_fixture(
+            PWRITE_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            3,
+            10,
+            MESSAGE,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EINVAL as usize);
+        assert_eq!(source.pwrites, 1);
+    }
+
+    // Catches the default ControlSource::pwrite_fd implementation leaking a
+    // successful result: without storage the guest must see ENOSYS.
+    #[test]
+    fn pwrite_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            PWRITE_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            3,
+            0,
+            MESSAGE,
             &mut sink,
             &mut source,
             &mut scratch(),
