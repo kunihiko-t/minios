@@ -157,18 +157,27 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 1 | `write` | `a0=fd`、`a1=pointer`、`a2=length` | `fd=1`は標準出力、`fd=2`は標準エラー出力。出力は一回につき4 KiB以下 |
 | 2 | `exit` | `a0=code` | 下位8ビットをアプリケーション終了コードとしてホストへ渡し、アプリケーションへ戻らない |
 | 3 | `read` | `a0=fd`、`a1=pointer`、`a2=length` | `fd=0`は標準入力。入力は一回につき4 KiB以下。戻り値はbyte数、EOFは0 |
+| 4 | `read_file` | `a0=path pointer`、`a1=path length`、`a2=buffer pointer`、`a3=buffer length` | `path`はUTF-8のFAT32パスで256 byte以下。戻り値は読んだbyte数。fileがbufferより長い場合は先頭で打ち切る |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
 長さ0の`read`は入力へ触れず0を返します。
+`read_file`は、path範囲が読み取り可能でbuffer範囲が書き込み可能であることを要求し、両方の検証を通ってからstorageへ触れます。
+長さ0の`read_file`は0を返します。`read_file`は呼び出しのたびにfile全体を先頭から読む1回限りの操作であり、offsetやopen中のhandleは持ちません。
 負のABI error値は次のとおりです。
 
 | 値 | 名前 | 条件 |
 | ---: | --- | --- |
-| `-38` | `ENOSYS` | 未知のsyscall番号 |
+| `-2` | `ENOENT` | fileが存在しない |
+| `-5` | `EIO` | storageの読み取りまたはfilesystem構造の失敗 |
 | `-9` | `EBADF` | 未知のfile descriptor |
+| `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
-| `-22` | `EINVAL` | 4 KiBを超える入出力長 |
+| `-19` | `ENODEV` | block deviceが見つからない |
+| `-20` | `ENOTDIR` | パス途中の要素がfileである |
+| `-21` | `EISDIR` | `read_file`の対象がdirectoryである |
+| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素 |
+| `-38` | `ENOSYS` | 未知のsyscall番号、またはstorageを持たない経路での`read_file` |
 
 ## 初期スタック ABI v1
 

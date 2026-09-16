@@ -59,6 +59,57 @@ impl ControlSource for UartControlSource<'_> {
             Err(error) => Err(error),
         }
     }
+
+    /// guestの`read_file`を遅延mount済みのstorage sessionへ委譲する。
+    /// `output`より長いfileは先頭`output.len()` byteで打ち切る。
+    #[cfg(target_arch = "riscv64")]
+    fn read_file(&mut self, path: &str, output: &mut [u8]) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
+        // 外へ持ち出さない。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let mut written = 0usize;
+        session
+            .read_file(path, |chunk| {
+                let take = core::cmp::min(chunk.len(), output.len() - written);
+                output[written..written + take].copy_from_slice(&chunk[..take]);
+                written += take;
+            })
+            .map_err(fat_errno)?;
+        Ok(written)
+    }
+}
+
+/// probe/mountの失敗をguest向けerrnoへ写像する。
+#[cfg(target_arch = "riscv64")]
+fn storage_errno(error: crate::shell::Rv64StorageError) -> isize {
+    use crate::shell::Rv64StorageError;
+    use minios_abi::syscall::{ENODEV, ENOMEM};
+
+    match error {
+        Rv64StorageError::NoDevice | Rv64StorageError::Init(_) => ENODEV,
+        Rv64StorageError::NoFrames => ENOMEM,
+        Rv64StorageError::Fat(error) => fat_errno(error),
+    }
+}
+
+/// FAT32/parserの失敗をguest向けerrnoへ写像する。
+#[cfg(target_arch = "riscv64")]
+fn fat_errno(
+    error: minios_kernel::storage::fat32::FatError<crate::storage::virtio_blk::VirtioError>,
+) -> isize {
+    use minios_abi::syscall::{EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
+    use minios_kernel::storage::fat32::FatError;
+
+    match error {
+        FatError::NotFound => ENOENT,
+        FatError::IsDirectory => EISDIR,
+        FatError::NotDirectory => ENOTDIR,
+        FatError::InvalidName => EINVAL,
+        FatError::Read(_)
+        | FatError::Unsupported
+        | FatError::InvalidFilesystem
+        | FatError::CorruptChain => EIO,
+    }
 }
 
 fn send_frame(kind: FrameKind, payload: &[u8]) {

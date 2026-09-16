@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|payload|payload-args|payload-stdin|sched|sched-io|sched-io-partial|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|sched|sched-io|sched-io-partial|shell]
 cargo xtask check
 ```
 
@@ -59,19 +59,21 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 12. QEMU user-exitテスト
 13. QEMU FDTテスト
 14. QEMUヒープテスト
-15. QEMU payloadテスト
-16. QEMU payload-argsテスト
-17. QEMU payload-stdinテスト
-18. QEMU schedテスト
-19. QEMU sched-ioテスト
-20. QEMU sched-io-partialテスト
-21. QEMUシェルテスト
+15. QEMU VirtIOテスト
+16. QEMU payloadテスト
+17. QEMU payload-argsテスト
+18. QEMU payload-stdinテスト
+19. QEMU fileテスト
+20. QEMU schedテスト
+21. QEMU sched-ioテスト
+22. QEMU sched-io-partialテスト
+23. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、payload、payload-args、payload-stdin、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順にゲストの19経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順にゲストの21経路を確認します。
 
 ### QEMUの三つの検証モード
 
-起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、FDT、ヒープのテストは**マーカーモード**です。
+起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、FDT、ヒープ、VirtIOのテストは**マーカーモード**です。
 テストごとのCargo機能を有効にしてカーネルをビルドし、UARTの記録、終了ステータス0、次の完全一致するマーカーを要求します。
 
 ```text
@@ -92,7 +94,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`sched`、`sched-io`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -102,9 +104,10 @@ MiniContainer control protocolのframeを解析し、Ready、標準出力、標�
 入力frameは`b3`を観測してから送るため、`b3 < r2`の順序は「block中も他processが進む」ことの直接証拠です。
 `sched-io-partial`では同じimageへStdin frameを分割して送り、header途中で書き込みを止めてから残りを送ります。
 途中受信でもreaderが再びblockしてframeが正しく完結することを、`r2`到達と正常な`ProcExit`で検証します。
+`file`ではfile_read guestのimageをpayload loaderとvirtio-blk diskの両方とともに起動し、guestが`read_file` syscallで`DOCS/NOTE.TXT`を読んで内容を標準出力へ出し、終了コード42を返すことを要求します。
 
 シェルテストは**対話モード**です。
-通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`not-a-command`、`shutdown`を標準入力へ送ります。
+通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`not-a-command`、`shutdown`を標準入力へ送ります。
 検証部は、各コマンドのエコー、毎回の新しいプロンプト、安定した応答、`hart id: 0`、稼働時間とティックとメモリー統計の数値形式、最後の終了ステータス0を要求します。
 最初のプロンプト以降を順序付きの記録として読み、`help`が返す六行を含めて各行の位置を検査します。
 応答の並べ替え、プロンプトの重複、`minios> helper`のような前方一致、途中の予期しない行は失敗です。
@@ -162,14 +165,15 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 29. QEMU payload test
 30. QEMU payload-args test
 31. QEMU payload-stdin test
-32. QEMU sched test
-33. QEMU sched-io test
-34. QEMU sched-io-partial test
-35. QEMU shell test
+32. QEMU file test
+33. QEMU sched test
+34. QEMU sched-io test
+35. QEMU sched-io-partial test
+36. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 35 phases`を表示します。
+全段階に成功すると`summary: PASSED all 36 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -204,12 +208,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/35] cargo fmt --all -- --check
-phase 1/35 passed (elapsed: ...s)
+[1/36] cargo fmt --all -- --check
+phase 1/36 passed (elapsed: ...s)
 ...
-[35/35] QEMU shell test
-phase 35/35 passed (elapsed: ...s)
-summary: PASSED all 35 phases (elapsed: ...s)
+[36/36] QEMU shell test
+phase 36/36 passed (elapsed: ...s)
+summary: PASSED all 36 phases (elapsed: ...s)
 ```
 
 この実行例の段階数は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。
