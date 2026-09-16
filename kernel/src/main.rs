@@ -441,9 +441,8 @@ impl core::ops::DerefMut for VirtioRegionPage {
 #[cfg(target_arch = "riscv64")]
 impl Drop for VirtioRegionPage {
     fn drop(&mut self) {
-        // `VirtioBlk::init`が失敗した場合にframeをpoolへ返す。
-        // device確立後のdropはkernel終了時のみで、その際poolへ戻す意味は
-        // ないが、所有権の行き先を明示するため同じ経路を通す。
+        // `VirtioBlk::init`が失敗した場合と、確立済みsessionをrun終了時に
+        // 閉じる場合にframeをpoolへ返す。
         if let Some(frame) = self.frame.take() {
             let _ = GlobalFrames.deallocate(frame);
         }
@@ -1534,6 +1533,40 @@ unsafe fn borrow_stdin_staging() -> &'static mut StdinStaging {
     unsafe { &mut *&raw mut USER_STDIN_STAGING }
 }
 
+/// guestの`read_file`が使うstorage session。shell sessionとは別にprobeし、
+/// 確立に使ったqueue frameをこのstaticが存続させる。
+#[cfg(target_arch = "riscv64")]
+static mut FILE_STORAGE: Option<shell::Rv64Storage> = None;
+
+/// run終了時に`read_file`のstorage sessionを閉じ、queue frameをpoolへ返す。
+///
+/// # Safety
+///
+/// 全user processが終了し、trap handlerからの借用が残っていない後にだけ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn close_file_storage() {
+    unsafe { *&raw mut FILE_STORAGE = None };
+}
+
+/// `read_file` syscall向けのstorage sessionを借りる。初回だけFDT probeと
+/// FAT32 mountを行い、以降は同じsessionを返す。
+///
+/// # Safety
+///
+/// stdin stagingと同じくtrap handlerの実行窓からのみ呼び、借用をtrapの外へ
+/// 持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn borrow_file_storage() -> Result<&'static mut shell::Rv64Storage, shell::Rv64StorageError>
+{
+    let storage = unsafe { &mut *&raw mut FILE_STORAGE };
+    if storage.is_none() {
+        *storage = Some(shell::probe_and_mount(&mut GlobalFrames)?);
+    }
+    Ok(storage.as_mut().expect("mounted above"))
+}
+
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
 #[cfg(target_arch = "riscv64")]
 fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
@@ -2379,6 +2412,12 @@ fn run_boot_payload(
                 USER_RUN_OUTCOME.load(Ordering::Relaxed)
             )),
         }
+    }
+
+    // guestが開いたstorage sessionを閉じ、queue frameをpoolへ返す。
+    // 全processが終了済みでhandlerからの借用は残っていない。
+    unsafe {
+        close_file_storage();
     }
 
     let after = frames.stats();

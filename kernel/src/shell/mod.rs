@@ -56,7 +56,7 @@ type Rv32Storage = crate::storage::fat32::Fat32<
 /// RV64 shellが保持する単一のvirtio-blk/FAT32 session。初回の`ls`/`cat`で
 /// FDTのslotをprobeしてmountし、以降は同じsessionを使い回す。
 #[cfg(target_arch = "riscv64")]
-type Rv64Storage = crate::storage::fat32::Fat32<
+pub(crate) type Rv64Storage = crate::storage::fat32::Fat32<
     crate::storage::virtio_blk::VirtioBlk<
         crate::drivers::virtio_mmio::MmioRegs,
         crate::VirtioRegionPage,
@@ -66,7 +66,7 @@ type Rv64Storage = crate::storage::fat32::Fat32<
 /// RV64の`mount_storage`が返す失敗。device未到達とFAT32側の失敗を分け、
 /// どちらもshellを止めない診断messageへ写像する。
 #[cfg(target_arch = "riscv64")]
-enum Rv64StorageError {
+pub(crate) enum Rv64StorageError {
     /// 全slotをprobeしたがblock deviceが見つからなかった。
     NoDevice,
     /// queue/request領域のframeを確保できなかった。
@@ -312,7 +312,9 @@ fn mount_storage<'a>(
 /// deviceだけがsessionを所有する。失敗したprobeのregionはdropでframeを
 /// poolへ返す。
 #[cfg(target_arch = "riscv64")]
-fn probe_and_mount(frames: &mut dyn FrameSource) -> Result<Rv64Storage, Rv64StorageError> {
+pub(crate) fn probe_and_mount(
+    frames: &mut dyn FrameSource,
+) -> Result<Rv64Storage, Rv64StorageError> {
     use crate::storage::virtio_blk::{VirtioBlk, VirtioError};
 
     let spec = crate::machine::spec();

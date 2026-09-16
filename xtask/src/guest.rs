@@ -6,6 +6,8 @@ use std::{fmt, path::PathBuf, process::Command};
 pub const GUEST_PACKAGE: &str = "minios-guest";
 /// stdin転送sampleのbin名。
 pub const GUEST_STDIN_CAT: &str = "minios-guest-stdin-cat";
+/// read_file sampleのbin名。
+pub const GUEST_FILE_READ: &str = "minios-guest-file-read";
 /// scheduler検証のCPU-bound側bin名。
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 /// scheduler検証の短命側bin名。

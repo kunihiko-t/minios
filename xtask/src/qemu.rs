@@ -47,6 +47,9 @@ const PAYLOAD_SPAWNED_HELLO_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x27\0\0\0MiniOS sched: spawned pid=0 name=hello\n";
 const PAYLOAD_SPAWNED_STDIN_CAT_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=stdin-cat\n";
+const FILE_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-read\n";
+const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -76,6 +79,7 @@ pub enum TestKind {
     Heap,
     Virtio,
     Payload,
+    File,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -101,6 +105,7 @@ impl TestKind {
             Self::Heap => "qemu-test-heap",
             Self::Virtio => "qemu-test-virtio",
             Self::Payload => unreachable!("the payload test boots the normal kernel"),
+            Self::File => unreachable!("the file test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
@@ -128,6 +133,7 @@ impl TestKind {
             Self::Heap => HEAP_MARKER,
             Self::Virtio => VIRTIO_MARKER,
             Self::Payload => unreachable!("the payload test verifies raw control frames"),
+            Self::File => unreachable!("the file test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
                 unreachable!("the payload-stdin test verifies raw control frames")
@@ -347,6 +353,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
         );
+    }
+
+    if kind == TestKind::File {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Sched {
@@ -987,6 +1008,15 @@ const PAYLOAD_STDIN_EXPECTED_FRAMES: [&[u8]; 6] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file検査で期待されるcontrol frame列 (Ready→spawned→file内容→Exit→cleanup)。
+const FILE_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    FILE_SPAWNED_FRAME,
+    FILE_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1000,6 +1030,27 @@ fn verify_payload_stdin_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &PAYLOAD_STDIN_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+fn verify_file_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -1281,6 +1332,11 @@ impl PayloadBundle {
         Self::create_with(payload_stdin_bundle_bytes(&elf)?)
     }
 
+    fn create_file() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_READ)?;
+        Self::create_with(payload_file_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -1435,6 +1491,14 @@ fn payload_stdin_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     assemble_test_bundle(MANIFEST, elf)
 }
 
+/// file検査用bundle: file_read guestのELFと引数なしmanifestを
+/// 正規のMiniBundleへ組み立てる。guestは`DOCS/NOTE.TXT`を読んで
+/// stdoutへ書きexit(42)する。
+fn payload_file_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-read\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
 /// payload ELF: stdout "MK6"、stderr "MK6"、exit(42)を順に発行するだけの
 /// 決定的な1 segment RV64実行fileである。
 fn payload_elf_bytes() -> Vec<u8> {
@@ -1504,6 +1568,32 @@ fn payload_elf_bytes() -> Vec<u8> {
 
 fn qemu_command_with_disk(kernel: &Path, disk: &Path) -> (Command, String) {
     let mut args = qemu_args(kernel);
+    args.push("-drive".to_owned());
+    args.push(format!(
+        "file={},format=raw,if=none,id=blk0",
+        disk.display()
+    ));
+    args.push("-global".to_owned());
+    args.push("virtio-mmio.force-legacy=false".to_owned());
+    args.push("-device".to_owned());
+    args.push("virtio-blk-device,drive=blk0,bus=virtio-mmio-bus.0".to_owned());
+    let command_line = render_command(QEMU_PROGRAM, &args);
+    let mut command = Command::new(QEMU_PROGRAM);
+    command.args(&args);
+    (command, command_line)
+}
+
+fn qemu_command_with_payload_and_disk(
+    kernel: &Path,
+    bundle: &Path,
+    disk: &Path,
+) -> (Command, String) {
+    let mut args = qemu_args(kernel);
+    args.push("-device".to_owned());
+    args.push(format!(
+        "loader,file={},addr=0x87800000,force-raw=on",
+        bundle.display()
+    ));
     args.push("-drive".to_owned());
     args.push(format!(
         "file={},format=raw,if=none,id=blk0",

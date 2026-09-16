@@ -10,8 +10,8 @@ use crate::{
 use minios_abi::{
     control::FrameKind,
     syscall::{
-        EBADF, EFAULT, EINVAL, ENOSYS, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT,
-        SyscallNumber,
+        EBADF, EFAULT, EINVAL, ENOSYS, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN,
+        STDOUT, SyscallNumber,
     },
 };
 
@@ -31,6 +31,14 @@ pub trait ControlSource {
     /// `Blocked`へ回して後でやり直す。この契約によりsourceは受信待ちで
     /// 停まってはならない。
     fn read_stdin(&mut self, output: &mut [u8]) -> Result<Option<usize>, Self::Error>;
+
+    /// `path`のfile内容を`output`の先頭へ最大`output.len()` byte書き、
+    /// 書いたbyte数を返す。戻り値の`Err`はそのまま`a0`へ返すerrnoである。
+    /// default実装は`ENOSYS`であり、storageを持たないsourceは実装不要。
+    fn read_file(&mut self, path: &str, output: &mut [u8]) -> Result<usize, isize> {
+        let _ = (path, output);
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -78,6 +86,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_write(context, space, memory, sink)
     } else if number == SyscallNumber::Read as usize {
         dispatch_read(context, space, memory, source, read_scratch)
+    } else if number == SyscallNumber::ReadFile as usize {
+        dispatch_read_file(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -140,6 +150,64 @@ pub unsafe fn complete_read(context: &mut UserContext, start: u64, len: usize, d
     context.set_register(10, len);
 }
 
+/// `read_file` (`a0=path_ptr, a1=path_len, a2=buf_ptr, a3=buf_len`)。
+/// mountでframeを確保し得るside effectの前に、path copyとbuf検証を
+/// 済ませて`EFAULT`を確定する（`dispatch_read`と同じ規約）。成功時は
+/// `ReadComplete`経由でscratchの先頭`n` byteがbufへcopyされる。
+fn dispatch_read_file<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let path_len = context.register(11);
+    let buf_len = context.register(13);
+    if path_len == 0 || path_len > MAX_PATH_LEN || buf_len > MAX_READ_LEN {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    if buf_len == 0 {
+        context.set_register(10, 0);
+        return SyscallFlow::Resume;
+    }
+
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    if copy_from_user(
+        space,
+        memory,
+        context.register(10) as u64,
+        &mut path_buf[..path_len],
+    )
+    .is_err()
+    {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    let buf_start = context.register(12) as u64;
+    if check_user_writable_range(space, memory, buf_start, buf_len).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    };
+
+    match source.read_file(path, &mut read_scratch[..buf_len]) {
+        // sourceの契約は`output.len()`以下のcountだが、逸脱しても
+        // scratchの範囲外をReadCompleteへ渡さないよう打ち切る。
+        Ok(count) => SyscallFlow::ReadComplete {
+            start: buf_start,
+            len: count.min(buf_len),
+        },
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
+}
+
 fn dispatch_write<M: FrameStore, S: ControlSink, SE>(
     context: &mut UserContext,
     space: &AddressSpace,
@@ -200,8 +268,8 @@ mod tests {
     use minios_abi::{
         control::FrameKind,
         syscall::{
-            EBADF, EFAULT, EINVAL, ENOSYS, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT,
-            SyscallNumber,
+            EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, MAX_PATH_LEN,
+            MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT, SyscallNumber,
         },
     };
 
@@ -209,6 +277,7 @@ mod tests {
     const MESSAGE_PAGE: usize = 0x0010_1000;
     const WRITE_NUMBER: usize = SyscallNumber::Write as usize;
     const READ_NUMBER: usize = SyscallNumber::Read as usize;
+    const READ_FILE_NUMBER: usize = SyscallNumber::ReadFile as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,6 +512,81 @@ mod tests {
 
     fn scratch() -> [u8; MAX_READ_LEN] {
         [0xaa; MAX_READ_LEN]
+    }
+
+    /// `read_file`の返答を組み込んだsource。stdin側は未使用で、呼ばれた
+    /// pathを記録する。
+    struct FileSource {
+        script: Vec<u8>,
+        result: Result<(), isize>,
+        seen_path: Option<Vec<u8>>,
+        reads: usize,
+    }
+
+    impl FileSource {
+        fn serving(bytes: &[u8]) -> Self {
+            Self {
+                script: Vec::from(bytes),
+                result: Ok(()),
+                seen_path: None,
+                reads: 0,
+            }
+        }
+
+        fn failing(errno: isize) -> Self {
+            Self {
+                result: Err(errno),
+                ..Self::serving(b"")
+            }
+        }
+    }
+
+    impl ControlSource for FileSource {
+        type Error = SinkError;
+
+        fn read_stdin(&mut self, _output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+            self.reads += 1;
+            Ok(None)
+        }
+
+        fn read_file(&mut self, path: &str, output: &mut [u8]) -> Result<usize, isize> {
+            self.reads += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.result?;
+            let count = core::cmp::min(self.script.len(), output.len());
+            output[..count].copy_from_slice(&self.script[..count]);
+            Ok(count)
+        }
+    }
+
+    /// `read_file`用のdispatch fixture。`page_content`をMESSAGE_PAGEへ書き、
+    /// `a3`を含む4引数のcontextを組む。
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_file_fixture<R: ControlSource<Error = SinkError>>(
+        a0: usize,
+        a1: usize,
+        a2: usize,
+        a3: usize,
+        page_content: &[u8],
+        sink: &mut FakeSink,
+        source: &mut R,
+        read_scratch: &mut [u8; MAX_READ_LEN],
+    ) -> (UserContext, SyscallFlow<SinkError>) {
+        let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
+        let mut memory = TestFrameStore::default();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
+        let page = builder
+            .map_new_zeroed(
+                VirtPage::from_start(MESSAGE_PAGE as u64).unwrap(),
+                PageFlags::new(true, true, false, true).unwrap(),
+            )
+            .unwrap();
+        builder.copy_into(page, 0, page_content).unwrap();
+        let space = builder.finish();
+        let mut context = syscall_context(READ_FILE_NUMBER, a0, a1, a2);
+        context.set_register(13, a3);
+        let flow = dispatch_syscall(&mut context, &space, &memory, sink, source, read_scratch);
+        (context, flow)
     }
 
     // Catches missing frames, duplicated frames, wrong frame kinds, wrong
@@ -923,5 +1067,197 @@ mod tests {
         assert_eq!(flow, SyscallFlow::SourceFatal(SinkError::Injected));
         assert_eq!(context.register(10), STDIN);
         assert!(sink.frames.is_empty());
+    }
+
+    // Catches missing read_file dispatch, path truncation, a missing
+    // ReadComplete flow, or a byte count larger than the buffer.
+    #[test]
+    fn read_file_streams_into_scratch_and_reports_read_complete() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"file data");
+        let buf_start = MESSAGE_PAGE + 512;
+        let mut scratch_buf = scratch();
+        let (context, flow) = dispatch_file_fixture(
+            MESSAGE_PAGE,
+            b"HELLO.TXT".len(),
+            buf_start,
+            64,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+
+        let (start, len) = read_completion(flow);
+        assert_eq!((start, len), (buf_start as u64, 9));
+        assert_eq!(&scratch_buf[..9], b"file data");
+        assert_eq!(source.seen_path.as_deref(), Some(b"HELLO.TXT".as_slice()));
+        assert_eq!(source.reads, 1);
+        assert_eq!(context.register(10), MESSAGE_PAGE);
+    }
+
+    // Catches reads exceeding the guest buffer not being truncated.
+    #[test]
+    fn read_file_truncates_the_stream_at_the_guest_buffer() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(&[0x5a; 8192]);
+        let buf_start = MESSAGE_PAGE + 512;
+        let mut scratch_buf = scratch();
+        let (_context, flow) = dispatch_file_fixture(
+            MESSAGE_PAGE,
+            b"HELLO.TXT".len(),
+            buf_start,
+            100,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+
+        let (start, len) = read_completion(flow);
+        assert_eq!((start, len), (buf_start as u64, 100));
+        assert!(scratch_buf[..100].iter().all(|b| *b == 0x5a));
+    }
+
+    // Catches storage errors reaching the guest as errno rather than
+    // aborting the process or returning a partial count.
+    #[test]
+    fn read_file_maps_source_errors_to_errno() {
+        for errno in [ENOENT, ENOTDIR, EISDIR, ENODEV] {
+            let mut sink = FakeSink::default();
+            let mut source = FileSource::failing(errno);
+            let (context, flow) = dispatch_file_fixture(
+                MESSAGE_PAGE,
+                b"HELLO.TXT".len(),
+                MESSAGE_PAGE + 512,
+                64,
+                b"HELLO.TXT",
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), errno as usize);
+        }
+    }
+
+    // Catches missing argument validation: an empty or overlong path and a
+    // buffer beyond MAX_READ_LEN must be EINVAL before any source call.
+    #[test]
+    fn read_file_rejects_bad_arguments_before_touching_the_source() {
+        for (a1, a3) in [(0, 64), (MAX_PATH_LEN + 1, 64), (9, MAX_READ_LEN + 1)] {
+            let mut sink = FakeSink::default();
+            let mut source = FileSource::serving(b"file data");
+            let (context, flow) = dispatch_file_fixture(
+                MESSAGE_PAGE,
+                a1,
+                MESSAGE_PAGE + 512,
+                a3,
+                b"HELLO.TXT",
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), EINVAL as usize);
+            assert_eq!(source.reads, 0);
+        }
+
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"file data");
+        let (context, flow) = dispatch_file_fixture(
+            MESSAGE_PAGE,
+            9,
+            MESSAGE_PAGE + 512,
+            0,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.reads, 0);
+    }
+
+    // Catches EFAULT not being reported for an unreadable path pointer or an
+    // unwritable destination range, and the source being touched anyway.
+    #[test]
+    fn read_file_reports_efault_for_bad_user_ranges() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"file data");
+        let (context, flow) = dispatch_file_fixture(
+            0x40_000,
+            9,
+            MESSAGE_PAGE + 512,
+            64,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.reads, 0);
+
+        let (context, flow) = dispatch_file_fixture(
+            MESSAGE_PAGE,
+            9,
+            0x40_000,
+            64,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.reads, 0);
+    }
+
+    // Catches a non-UTF-8 path being passed to the filesystem rather than
+    // rejected with EINVAL.
+    #[test]
+    fn read_file_rejects_a_non_utf8_path() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"file data");
+        let (context, flow) = dispatch_file_fixture(
+            MESSAGE_PAGE,
+            3,
+            MESSAGE_PAGE + 512,
+            64,
+            b"A\xffB",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EINVAL as usize);
+        assert_eq!(source.reads, 0);
+    }
+
+    // Catches the default ControlSource::read_file implementation leaking a
+    // successful result: without storage the guest must see ENOSYS.
+    #[test]
+    fn read_file_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_file_fixture(
+            MESSAGE_PAGE,
+            9,
+            MESSAGE_PAGE + 512,
+            64,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+        assert_eq!(source.reads, 0);
     }
 }
