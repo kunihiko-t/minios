@@ -94,7 +94,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 - `user/context.rs`：entry、user stack、`sstatus.SPP=0`を持つ`UserContext`を定義します。
 - `user/memory.rs`：user pointerを参照として解釈せず、pageごとに`U=1`とread権限を確認してcopyします。
-- `user/syscall.rs`：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`をdispatchします。
+- `user/syscall.rs`：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`をdispatchします。
 - `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
 - `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 
@@ -131,7 +131,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、schedを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、schedを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
 - `guest.rs`：Rust guestのrelease buildと、kernelのELF parserによる配置契約のhost検査を担当します。
@@ -200,7 +200,8 @@ IMEM契約は実効32 KiBであり、RV32 buildは`opt-level=z`で収めます�
 
 queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`として所有し、恒等写像済みのため物理アドレスをそのままdeviceへ渡します。
 `storage::fat32`は`SectorReader`境界で`VirtioBlk`へ差し替わるため、parser本体はRV32経路と共有です。
-書き込み経路（`create_file`、`write_range`、`unlink_file`）は`SectorWriter`境界を追加で要求するため、read-only想定のRV32 SD経路では構成されません。
+書き込み経路（`create_file`、`write_range`、`unlink_file`、`rename_file`）は`SectorWriter`境界を追加で要求するため、read-only想定のRV32 SD経路では構成されません。
 `unlink_file`はdir entryと先行する長い名前のrecord列を`0xe5`へ書き換えてcluster chainを解放し、削除したentryを指すfdはkernelが`ProcessTable`内の全processから失効させます。
+`rename_file`は同一directory内でentryの8.3名を書き換えます。fileのcluster chainと内容、entryの物理位置は変わらないため、開いているfdは有効なままです。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。別directoryへの移動は`CrossDirectory`として拒否します。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

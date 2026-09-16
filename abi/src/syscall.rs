@@ -12,6 +12,7 @@ pub enum SyscallNumber {
     Lseek = 9,
     Pread = 10,
     Pwrite = 11,
+    Rename = 12,
 }
 
 pub const STDIN: usize = 0;
@@ -35,6 +36,7 @@ pub const EIO: isize = -5;
 pub const EBADF: isize = -9;
 pub const ENOMEM: isize = -12;
 pub const EFAULT: isize = -14;
+pub const EXDEV: isize = -18;
 pub const ENODEV: isize = -19;
 pub const ENOTDIR: isize = -20;
 pub const EISDIR: isize = -21;
@@ -60,6 +62,7 @@ mod tests {
         assert_eq!(SyscallNumber::Lseek as usize, 9);
         assert_eq!(SyscallNumber::Pread as usize, 10);
         assert_eq!(SyscallNumber::Pwrite as usize, 11);
+        assert_eq!(SyscallNumber::Rename as usize, 12);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
@@ -76,6 +79,7 @@ mod tests {
         assert_eq!(EBADF, -9);
         assert_eq!(ENOMEM, -12);
         assert_eq!(EFAULT, -14);
+        assert_eq!(EXDEV, -18);
         assert_eq!(ENODEV, -19);
         assert_eq!(ENOTDIR, -20);
         assert_eq!(EISDIR, -21);

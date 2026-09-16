@@ -105,6 +105,17 @@ pub trait ControlSource {
         let _ = (fd, offset, data);
         Err(ENOSYS)
     }
+
+    /// `old_path`のfileを`new_path`へrenameする。fileの中身とclusterは
+    /// 変わらず、dir entryの8.3名だけが書き換わる。同名へのrenameは
+    /// no-opの成功、既存fileへのrenameはPOSIXと同じく置き換えで、
+    /// 置き換えられたfileを指すfdは失効する。sourceとtargetは同じdir
+    /// に限り、別dirへの移動は`EINVAL`で拒否する。`Err`はそのまま
+    /// `a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
+        let _ = (old_path, new_path);
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -166,6 +177,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_pread(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Pwrite as usize {
         dispatch_pwrite(context, space, memory, source)
+    } else if number == SyscallNumber::Rename as usize {
+        dispatch_rename(context, space, memory, source)
     } else if number == SyscallNumber::Close as usize {
         dispatch_close(context, source)
     } else if number == SyscallNumber::Exit as usize {
@@ -238,7 +251,21 @@ fn copy_user_path<M: FrameStore>(
     memory: &M,
     path_buf: &mut [u8; MAX_PATH_LEN],
 ) -> Option<usize> {
-    let path_len = context.register(11);
+    copy_user_path_at(context, space, memory, 10, 11, path_buf)
+}
+
+/// `ptr_register`/`len_register`が指すuser memoryのpathを`path_buf`へ
+/// copyする。失敗時は`a0`へerrnoを書いて`None`を返す。2つのpathを取る
+/// `rename`ではsourceに`a0`/`a1`、targetに`a2`/`a3`を指定する。
+fn copy_user_path_at<M: FrameStore>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    ptr_register: usize,
+    len_register: usize,
+    path_buf: &mut [u8; MAX_PATH_LEN],
+) -> Option<usize> {
+    let path_len = context.register(len_register);
     if path_len == 0 || path_len > MAX_PATH_LEN {
         context.set_register(10, EINVAL as usize);
         return None;
@@ -246,7 +273,7 @@ fn copy_user_path<M: FrameStore>(
     if copy_from_user(
         space,
         memory,
-        context.register(10) as u64,
+        context.register(ptr_register) as u64,
         &mut path_buf[..path_len],
     )
     .is_err()
@@ -305,6 +332,38 @@ fn dispatch_unlink<M: FrameStore, E, R: ControlSource>(
         return SyscallFlow::Resume;
     };
     match source.unlink(path) {
+        Ok(()) => context.set_register(10, 0),
+        Err(errno) => context.set_register(10, errno as usize),
+    }
+    SyscallFlow::Resume
+}
+
+/// `rename` (`a0=old_ptr, a1=old_len, a2=new_ptr, a3=new_len`)。
+/// 両pathのEFAULT/EINVALをstorageのside effectより先に確定するため、
+/// sourceへ渡す前に2つともcopyとUTF-8検証を済ませる。成功時は`a0`へ0を
+/// 返す。
+fn dispatch_rename<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let mut old_buf = [0u8; MAX_PATH_LEN];
+    let Some(old_len) = copy_user_path_at(context, space, memory, 10, 11, &mut old_buf) else {
+        return SyscallFlow::Resume;
+    };
+    let mut new_buf = [0u8; MAX_PATH_LEN];
+    let Some(new_len) = copy_user_path_at(context, space, memory, 12, 13, &mut new_buf) else {
+        return SyscallFlow::Resume;
+    };
+    let (Ok(old_path), Ok(new_path)) = (
+        core::str::from_utf8(&old_buf[..old_len]),
+        core::str::from_utf8(&new_buf[..new_len]),
+    ) else {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    };
+    match source.rename(old_path, new_path) {
         Ok(()) => context.set_register(10, 0),
         Err(errno) => context.set_register(10, errno as usize),
     }
@@ -598,6 +657,7 @@ mod tests {
     const CLOSE_NUMBER: usize = SyscallNumber::Close as usize;
     const CREATE_NUMBER: usize = SyscallNumber::Create as usize;
     const UNLINK_NUMBER: usize = SyscallNumber::Unlink as usize;
+    const RENAME_NUMBER: usize = SyscallNumber::Rename as usize;
     const LSEEK_NUMBER: usize = SyscallNumber::Lseek as usize;
     const PREAD_NUMBER: usize = SyscallNumber::Pread as usize;
     const PWRITE_NUMBER: usize = SyscallNumber::Pwrite as usize;
@@ -851,6 +911,8 @@ mod tests {
         writes: usize,
         written: Vec<u8>,
         unlinks: usize,
+        renames: usize,
+        seen_new_path: Option<Vec<u8>>,
         seeks: usize,
         preads: usize,
         pwrites: usize,
@@ -873,6 +935,8 @@ mod tests {
                 writes: 0,
                 written: Vec::new(),
                 unlinks: 0,
+                renames: 0,
+                seen_new_path: None,
                 seeks: 0,
                 preads: 0,
                 pwrites: 0,
@@ -945,6 +1009,13 @@ mod tests {
         fn unlink(&mut self, path: &str) -> Result<(), isize> {
             self.unlinks += 1;
             self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.result
+        }
+
+        fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
+            self.renames += 1;
+            self.seen_path = Some(Vec::from(old_path.as_bytes()));
+            self.seen_new_path = Some(Vec::from(new_path.as_bytes()));
             self.result
         }
 
@@ -1967,6 +2038,141 @@ mod tests {
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOENT as usize);
         assert_eq!(source.unlinks, 1);
+    }
+
+    // Catches rename dropping one of the paths, forwarding them in the
+    // wrong order, or running the source before validating both buffers:
+    // both EFAULT/EINVAL results must be decided before any rename.
+    #[test]
+    fn rename_forwards_both_paths_and_validates_them_first() {
+        let mut sink = FakeSink::default();
+        let mut page = [0u8; 512];
+        page[..7].copy_from_slice(b"OLD.TXT");
+        page[256..263].copy_from_slice(b"NEW.TXT");
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            RENAME_NUMBER,
+            MESSAGE_PAGE,
+            7,
+            MESSAGE_PAGE + 256,
+            7,
+            &page,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.renames, 1);
+        assert_eq!(source.seen_path.as_deref(), Some(b"OLD.TXT".as_slice()));
+        assert_eq!(source.seen_new_path.as_deref(), Some(b"NEW.TXT".as_slice()));
+
+        // 検証で落ちる組合せはsourceへ届かない。target側のEFAULTも
+        // source側のcopyと同じく呼び出し前に確定する。
+        for (a0, a1, a2, a3, content, expected) in [
+            (
+                MESSAGE_PAGE,
+                0,
+                MESSAGE_PAGE + 256,
+                7,
+                page.as_slice(),
+                EINVAL,
+            ),
+            (
+                MESSAGE_PAGE,
+                MAX_PATH_LEN + 1,
+                MESSAGE_PAGE + 256,
+                7,
+                page.as_slice(),
+                EINVAL,
+            ),
+            (0x40_000, 7, MESSAGE_PAGE + 256, 7, page.as_slice(), EFAULT),
+            (
+                MESSAGE_PAGE,
+                7,
+                MESSAGE_PAGE + 256,
+                0,
+                page.as_slice(),
+                EINVAL,
+            ),
+            (MESSAGE_PAGE, 7, 0x40_000, 7, page.as_slice(), EFAULT),
+        ] {
+            let mut source = FileSource::serving(b"");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                RENAME_NUMBER,
+                a0,
+                a1,
+                a2,
+                a3,
+                content,
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), expected as usize);
+            assert_eq!(source.renames, 0);
+        }
+
+        // 非UTF-8と、source側のerrnoもそのまま`a0`へ返る。
+        let mut bad = [0u8; 512];
+        bad[..3].copy_from_slice(b"A\xffB");
+        bad[256..263].copy_from_slice(b"NEW.TXT");
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_numbered_file_fixture(
+            RENAME_NUMBER,
+            MESSAGE_PAGE,
+            3,
+            MESSAGE_PAGE + 256,
+            7,
+            &bad,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), EINVAL as usize);
+        assert_eq!(source.renames, 0);
+
+        let mut source = FileSource::failing(ENOENT);
+        let (context, _) = dispatch_numbered_file_fixture(
+            RENAME_NUMBER,
+            MESSAGE_PAGE,
+            7,
+            MESSAGE_PAGE + 256,
+            7,
+            &page,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), ENOENT as usize);
+        assert_eq!(source.renames, 1);
+    }
+
+    // Catches the default ControlSource::rename implementation leaking a
+    // successful result: without storage the guest must see ENOSYS.
+    #[test]
+    fn rename_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let mut page = [0u8; 512];
+        page[..7].copy_from_slice(b"OLD.TXT");
+        page[256..263].copy_from_slice(b"NEW.TXT");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            RENAME_NUMBER,
+            MESSAGE_PAGE,
+            7,
+            MESSAGE_PAGE + 256,
+            7,
+            &page,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
     }
 
     // Catches the default ControlSource::unlink implementation leaking a
