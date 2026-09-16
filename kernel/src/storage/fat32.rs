@@ -18,6 +18,8 @@ pub enum FatError<E> {
     NoSpace,
     /// write offsetがfile sizeを越えた（穴あきwriteは非対応）。
     InvalidOffset,
+    /// `rename`の新旧pathが異なるdirectoryを指した（dir間移動は非対応）。
+    CrossDirectory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,6 +607,12 @@ const FAT_EOC: u32 = 0x0fff_ffff;
 #[cfg(not(target_arch = "riscv32"))]
 const DIR_ATTR_FILE: u8 = 0x20;
 
+/// dir chain内のrecord位置 `(cluster, index)`。`index`はcluster内の
+/// record番号で、sectorとbyte offsetは`index / 16`と`index % 16 * 32`
+/// から得る。
+#[cfg(not(target_arch = "riscv32"))]
+type DirRecordPos = (u32, u32);
+
 /// `Fat32`のwrite API。block deviceがsector書き込みを提供する場合だけ
 /// 使える。`SectorWriter`自体がRV32へ公開されないため、このimpl blockは
 /// RV32ではそもそも構成されない。
@@ -1001,22 +1009,125 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         }
         // entryの直前にある連続LFN record列から消し始める。`0xe5`は
         // `find_free_dir_slot`が再利用するため、slotはすぐ回収される。
-        let start = self.lfn_run_start(&loc, &mut scratch)?;
+        let (start, _) = self.lfn_run_bounds(&loc, &mut scratch)?;
         self.mark_deleted_range(loc.dir_head, start, (loc.cluster, loc.index), &mut scratch)?;
         self.free_chain(entry.first_cluster, &mut scratch)?;
         Ok((loc.cluster, loc.index))
     }
 
-    /// `loc`のentry直前に並ぶ連続LFN record列の先頭位置を返す。
-    /// LFN recordが無ければentry自身の位置を返す。LFN runはclusterを
-    /// またぎ得るため、entryを含むdir chainの先頭からrecordを辿る。
-    fn lfn_run_start(
+    /// 同一directory内で`old_path`のfileの名を`new_path`の最終要素へ
+    /// 書き換える。sourceのdir entryは同じ物理位置に残るため、sourceを
+    /// 指すfdは有効のまま（POSIXのrename不変条件）。既存の同名fileは
+    /// POSIX置換規約で削除してから書き換え、その物理位置を返す。
+    ///
+    /// 新旧の親directoryが異なる場合は`CrossDirectory`（dir間移動は
+    /// 非対応）、sourceやtargetがdirectoryなら`IsDirectory`、新名が
+    /// 8.3へ正規化できなければ`InvalidName`として拒否する。全検証を
+    /// 書き込み前に済ませるのは`unlink_file`と同じ規約である。
+    pub fn rename_file(
+        &mut self,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<Option<(u32, u32)>, FatError<R::Error>> {
+        for part in old_path.split('/').chain(new_path.split('/')) {
+            if !is_valid_component(part) {
+                return Err(FatError::InvalidName);
+            }
+        }
+        let (new_parent, new_name) = match new_path.rfind('/') {
+            Some(index) => (&new_path[..index], &new_path[index + 1..]),
+            None => ("", new_path),
+        };
+        let Some(short) = to_short_name(new_name) else {
+            return Err(FatError::InvalidName);
+        };
+
+        let mut scratch = [0; 512];
+        let (entry, loc) = self.resolve_path(old_path, &mut scratch)?;
+        if entry.directory {
+            return Err(FatError::IsDirectory);
+        }
+        let new_dir = if new_parent.is_empty() {
+            self.root_cluster
+        } else {
+            let (parent, _ploc) = self.resolve_path(new_parent, &mut scratch)?;
+            if !parent.directory {
+                return Err(FatError::NotDirectory);
+            }
+            parent.first_cluster
+        };
+        if new_dir != loc.dir_head {
+            return Err(FatError::CrossDirectory);
+        }
+
+        // 正規化済みのraw 8.3名で照合する（create_fileと同じ規約）。
+        let mut found = None;
+        self.walk_dir(new_dir, &mut scratch, |candidate, cloc| {
+            if candidate.short_name == short {
+                found = Some((*candidate, cloc));
+                true
+            } else {
+                false
+            }
+        })?;
+        let mut replaced = None;
+        if let Some((target, tloc)) = found {
+            if tloc.cluster == loc.cluster && tloc.index == loc.index {
+                // 同じentryへのrenameはno-op成功。
+                return Ok(None);
+            }
+            if target.directory {
+                return Err(FatError::IsDirectory);
+            }
+            // 置換対象のchainが破損しているなら、何も触らずに失敗する。
+            if target.first_cluster != 0 {
+                if !self.is_data_cluster(target.first_cluster) {
+                    return Err(FatError::CorruptChain);
+                }
+                self.chain_tail(target.first_cluster, &mut scratch)?;
+            }
+            replaced = Some((target, tloc));
+        }
+
+        // ここから書き込み。sourceのLFN runを消し、置換対象を削除して
+        // から、entryのname byteを新8.3名へ書き換える。
+        let (run_start, run_end) = self.lfn_run_bounds(&loc, &mut scratch)?;
+        if run_start != (loc.cluster, loc.index) {
+            self.mark_deleted_range(loc.dir_head, run_start, run_end, &mut scratch)?;
+        }
+        if let Some((target, tloc)) = replaced {
+            let (tstart, _) = self.lfn_run_bounds(&tloc, &mut scratch)?;
+            self.mark_deleted_range(
+                tloc.dir_head,
+                tstart,
+                (tloc.cluster, tloc.index),
+                &mut scratch,
+            )?;
+            self.free_chain(target.first_cluster, &mut scratch)?;
+        }
+        let lba = self.data_sector_lba(loc.cluster, loc.index / 16)?;
+        self.reader
+            .read_sector(lba, &mut scratch)
+            .map_err(FatError::Read)?;
+        let offset = (loc.index % 16) as usize * 32;
+        scratch[offset..offset + 11].copy_from_slice(&short);
+        self.reader
+            .write_sector(lba, &scratch)
+            .map_err(FatError::Read)?;
+        Ok(replaced.map(|(_, tloc)| (tloc.cluster, tloc.index)))
+    }
+
+    /// `loc`のentry直前に並ぶ連続LFN record列の先頭と末尾の位置を返す。
+    /// LFN recordが無ければ両端ともentry自身の位置を返す。LFN runは
+    /// clusterをまたぎ得るため、entryを含むdir chainの先頭からrecordを
+    /// 辿る。
+    fn lfn_run_bounds(
         &mut self,
         loc: &DirLoc,
         scratch: &mut [u8; 512],
-    ) -> Result<(u32, u32), FatError<R::Error>> {
+    ) -> Result<(DirRecordPos, DirRecordPos), FatError<R::Error>> {
         let mut cluster = loc.dir_head;
-        let mut run: Option<(u32, u32)> = None;
+        let mut run: Option<(DirRecordPos, DirRecordPos)> = None;
         let mut clusters_read = 0;
         loop {
             if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
@@ -1030,7 +1141,8 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
                 for record in 0..16u32 {
                     let index = sector * 16 + record;
                     if cluster == loc.cluster && index == loc.index {
-                        return Ok(run.unwrap_or((cluster, index)));
+                        let here = (cluster, index);
+                        return Ok(run.unwrap_or((here, here)));
                     }
                     let offset = record as usize * 32;
                     match scratch[offset] {
@@ -1040,8 +1152,10 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
                         0xe5 => run = None,
                         _ => {
                             if scratch[offset + 11] == 0x0f {
-                                if run.is_none() {
-                                    run = Some((cluster, index));
+                                let pos = (cluster, index);
+                                match run {
+                                    Some((start, _)) => run = Some((start, pos)),
+                                    None => run = Some((pos, pos)),
                                 }
                             } else {
                                 run = None;
@@ -2817,5 +2931,155 @@ mod tests {
         assert_eq!(second[32], 0xe5);
         assert_eq!(second[64], 0x00);
         assert_eq!(read_u32(sector_of(&fs, 32), 4 * 4) & 0x0fff_ffff, 0);
+    }
+
+    // Catches rename moving the entry, corrupting the name bytes, or
+    // freeing the chain: the entry must stay at its slot with only the
+    // 8.3 name rewritten and contents intact.
+    #[test]
+    fn rename_rewrites_the_entry_name_and_preserves_contents() {
+        let mut fs = mounted_writable_fixture();
+        assert_eq!(fs.rename_file("HELLO.TXT", "GREET.TXT").unwrap(), None);
+
+        let root = sector_of(&fs, 33);
+        assert_eq!(&root[0..11], b"GREET   TXT");
+        assert_eq!(root[11], 0x20);
+        // 旧名は解決不能、新名は同じdir位置と内容を持つ。
+        assert!(matches!(fs.open_file("HELLO.TXT"), Err(FatError::NotFound)));
+        let desc = fs.open_file("GREET.TXT").unwrap();
+        assert_eq!(desc.dir_location(), (2, 0));
+        let mut buf = [0; 11];
+        assert_eq!(fs.read_range(&desc, 0, &mut buf).unwrap(), 11);
+        assert_eq!(&buf, b"hello world");
+    }
+
+    // Catches rename duplicating the entry or failing on a same-name
+    // rename: renaming an entry to its own name must be a no-op success.
+    #[test]
+    fn rename_to_the_same_name_is_a_noop() {
+        let mut fs = mounted_writable_fixture();
+        assert_eq!(fs.rename_file("HELLO.TXT", "hello.txt").unwrap(), None);
+        assert_eq!(&sector_of(&fs, 33)[0..11], b"HELLO   TXT");
+        let desc = fs.open_file("HELLO.TXT").unwrap();
+        assert_eq!(desc.size, 11);
+    }
+
+    // Catches rename leaving the replaced file reachable or leaking its
+    // chain: the target's entry must be deleted, its clusters freed, and
+    // the caller must learn the deleted slot for fd revocation.
+    #[test]
+    fn rename_replaces_an_existing_file_and_reports_its_slot() {
+        let mut fs = mounted_writable_fixture();
+        let mut desc = fs.create_file("OLD.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, b"new data").unwrap(), 8);
+
+        assert_eq!(
+            fs.rename_file("OLD.TXT", "HELLO.TXT").unwrap(),
+            Some((2, 0))
+        );
+
+        let root = sector_of(&fs, 33);
+        // 旧HELLOのslotは`0xe5`、chain 4は解放され、sourceは旧名を引き継ぐ。
+        assert_eq!(root[0], 0xe5);
+        assert_eq!(&root[2 * 32..2 * 32 + 11], b"HELLO   TXT");
+        let fat = sector_of(&fs, 32);
+        assert_eq!(read_u32(fat, 4 * 4) & 0x0fff_ffff, 0);
+        assert_eq!(read_u32(fat, 3 * 4) & 0x0fff_ffff, 0x0fff_ffff);
+
+        let desc = fs.open_file("HELLO.TXT").unwrap();
+        assert_eq!(desc.dir_location(), (2, 2));
+        let mut buf = [0; 8];
+        assert_eq!(fs.read_range(&desc, 0, &mut buf).unwrap(), 8);
+        assert_eq!(&buf, b"new data");
+    }
+
+    // Catches rename deleting the entry along with its LFN records: only
+    // the LFN run may be deleted; the renamed entry keeps its slot and
+    // cluster chain.
+    #[test]
+    fn rename_drops_the_lfn_run_but_keeps_the_entry() {
+        let mut fs = mounted_unlink_lfn_fixture();
+        assert_eq!(
+            fs.rename_file("Long File Name.txt", "NEW.TXT").unwrap(),
+            None
+        );
+
+        let root = sector_of(&fs, 33);
+        assert_eq!(root[0], 0xe5);
+        assert_eq!(root[32], 0xe5);
+        assert_eq!(&root[64..75], b"NEW     TXT");
+        // chain 4→5はfileが生きているので解放されない。
+        let fat = sector_of(&fs, 32);
+        assert_eq!(read_u32(fat, 4 * 4) & 0x0fff_ffff, 5);
+        assert_eq!(read_u32(fat, 5 * 4) & 0x0fff_ffff, 0x0fff_ffff);
+
+        assert!(matches!(
+            fs.open_file("LONGFI~1.TXT"),
+            Err(FatError::NotFound)
+        ));
+        let desc = fs.open_file("NEW.TXT").unwrap();
+        assert_eq!(desc.size, 13);
+        assert_eq!(desc.dir_location(), (2, 2));
+        let mut buf = [0; 7];
+        assert_eq!(fs.read_range(&desc, 0, &mut buf).unwrap(), 7);
+        assert_eq!(&buf, b"long da");
+    }
+
+    // Catches rename accepting a directory, crossing directories, or
+    // writing before validating: every rejection must leave the disk
+    // untouched.
+    #[test]
+    fn rename_rejects_directories_cross_dir_and_bad_names_before_writing() {
+        let mut fs = mounted_writable_fixture();
+        assert!(matches!(
+            fs.rename_file("SUBDIR", "X.TXT"),
+            Err(FatError::IsDirectory)
+        ));
+        assert!(matches!(
+            fs.rename_file("HELLO.TXT", "SUBDIR/X.TXT"),
+            Err(FatError::CrossDirectory)
+        ));
+        assert!(matches!(
+            fs.rename_file("HELLO.TXT", "SUBDIR"),
+            Err(FatError::IsDirectory)
+        ));
+        assert!(matches!(
+            fs.rename_file("HELLO.TXT", "long name.txt"),
+            Err(FatError::InvalidName)
+        ));
+        assert!(matches!(
+            fs.rename_file("MISSING.TXT", "X.TXT"),
+            Err(FatError::NotFound)
+        ));
+        // 拒否はdiskを変えない。
+        let root = sector_of(&fs, 33);
+        assert_eq!(&root[0..11], b"HELLO   TXT");
+        assert_eq!(&root[32..43], b"SUBDIR     ");
+    }
+
+    // Catches the parent-directory check comparing the wrong thing:
+    // rename inside a subdirectory must be allowed (same dir_head) while
+    // moving the same entry to root must report CrossDirectory.
+    #[test]
+    fn rename_inside_a_subdirectory_is_allowed() {
+        let mut fs = mounted_nested_fixture();
+        assert!(matches!(
+            fs.rename_file("SUBDIR/NOTE.TXT", "NEW.TXT"),
+            Err(FatError::CrossDirectory)
+        ));
+        assert_eq!(
+            fs.rename_file("SUBDIR/NOTE.TXT", "SUBDIR/NEW.TXT").unwrap(),
+            None
+        );
+
+        let subdir = sector_of(&fs, 291);
+        assert_eq!(&subdir[64..75], b"NEW     TXT");
+        assert!(matches!(
+            fs.open_file("SUBDIR/NOTE.TXT"),
+            Err(FatError::NotFound)
+        ));
+        let desc = fs.open_file("SUBDIR/NEW.TXT").unwrap();
+        assert_eq!(desc.size, 11);
+        assert_eq!(desc.dir_location(), (5, 2));
     }
 }

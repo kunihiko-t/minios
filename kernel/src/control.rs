@@ -145,6 +145,21 @@ impl ControlSource for UartControlSource<'_> {
         Ok(())
     }
 
+    /// guestの`rename`をstorage sessionへ委譲する。dir entryの位置は
+    /// 変わらないためsource fileのfdはそのまま有効だが、置き換えられた
+    /// target fileのclusterは解放されるため、そのfdは失効させる。
+    #[cfg(target_arch = "riscv64")]
+    fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let replaced = session.rename_file(old_path, new_path).map_err(fat_errno)?;
+        if let Some((dir_cluster, dir_index)) = replaced {
+            // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
+            unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
+        }
+        Ok(())
+    }
+
     /// guestの`lseek`をfdのoffset更新として処理する。`SEEK_END`は
     /// FileDescの現在sizeを基準にする。負になる指定と未知のwhenceは
     /// `EINVAL`で拒否する。
@@ -253,6 +268,7 @@ fn fat_errno(
         FatError::IsDirectory => EISDIR,
         FatError::NotDirectory => ENOTDIR,
         FatError::InvalidName | FatError::InvalidOffset => EINVAL,
+        FatError::CrossDirectory => minios_abi::syscall::EXDEV,
         FatError::NoSpace => minios_abi::syscall::ENOSPC,
         FatError::Read(_)
         | FatError::Unsupported

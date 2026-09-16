@@ -17,6 +17,7 @@ pub const GUEST_FILE_WRITE: &str = "minios-guest-file-write";
 pub const GUEST_FILE_UNLINK: &str = "minios-guest-file-unlink";
 /// `lseek`/`pread`/`pwrite` syscallを検証するguest bin名。
 pub const GUEST_FILE_SEEK: &str = "minios-guest-file-seek";
+pub const GUEST_FILE_RENAME: &str = "minios-guest-file-rename";
 /// scheduler検証のCPU-bound側bin名。
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 /// scheduler検証の短命側bin名。
