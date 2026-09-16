@@ -10,7 +10,7 @@ pub enum Command<'a> {
     #[cfg(any(test, target_arch = "riscv32"))]
     Echo(&'a str),
     #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
-    Ls,
+    Ls(&'a str),
     #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
     Cat(&'a str),
     Unknown(&'a str),
@@ -31,14 +31,19 @@ pub fn parse_command(input: &str) -> Command<'_> {
         #[cfg(any(test, target_arch = "riscv32"))]
         input if input.starts_with("echo ") => Command::Echo(input[5..].trim_start_matches(' ')),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
-        "ls" => Command::Ls,
+        "ls" => Command::Ls(""),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         "cat" => Command::Cat(""),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
-        input => match input.strip_prefix("cat ") {
-            Some(argument) => Command::Cat(argument.trim_start_matches(' ')),
-            None => Command::Unknown(input),
-        },
+        input => {
+            if let Some(argument) = input.strip_prefix("ls ") {
+                Command::Ls(argument.trim_start_matches(' '))
+            } else if let Some(argument) = input.strip_prefix("cat ") {
+                Command::Cat(argument.trim_start_matches(' '))
+            } else {
+                Command::Unknown(input)
+            }
+        }
         #[cfg(not(any(test, target_arch = "riscv32", target_arch = "riscv64")))]
         unknown => Command::Unknown(unknown),
     }
@@ -94,8 +99,13 @@ mod tests {
 
     #[test]
     fn parser_recognizes_rv32_storage_commands() {
-        assert_eq!(parse_command("ls"), Command::Ls);
+        assert_eq!(parse_command("ls"), Command::Ls(""));
+        assert_eq!(parse_command("ls DOCS"), Command::Ls("DOCS"));
         assert_eq!(parse_command("cat HELLO.TXT"), Command::Cat("HELLO.TXT"));
+        assert_eq!(
+            parse_command("cat DOCS/NOTE.TXT"),
+            Command::Cat("DOCS/NOTE.TXT")
+        );
     }
 
     #[test]

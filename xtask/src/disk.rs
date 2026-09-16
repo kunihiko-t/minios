@@ -14,12 +14,18 @@ use std::path::{Path, PathBuf};
 /// QEMU検査で`run_virtio_test`が照合する`HELLO.TXT`の内容。
 pub const HELLO_TXT: &[u8] = b"hello from virtio\n";
 
+/// `DOCS`subdirectory内の`NOTE.TXT`の内容。shellの`cat DOCS/NOTE.TXT`が
+/// path解決とsubdirectory読み出しをend-to-endで検査する。
+pub const NOTE_TXT: &[u8] = b"note inside docs\n";
+
 const SECTOR: usize = 512;
 const SECTORS_PER_CLUSTER: u8 = 1;
 const RESERVED_SECTORS: u16 = 32;
 const FAT_COUNT: u8 = 2;
 const ROOT_CLUSTER: u32 = 2;
 const FILE_CLUSTER: u32 = 3;
+const DOCS_CLUSTER: u32 = 4;
+const NOTE_CLUSTER: u32 = 5;
 
 /// `data_cluster_count >= 65_525` (FAT32の最小cluster数) を余裕を持って
 /// 満たすvolume sector数。fat_sectorsは下記で固定点反復して求める。
@@ -113,23 +119,58 @@ fn image_bytes() -> Vec<u8> {
     set(&mut fat, 1, 0x0fff_ffff);
     set(&mut fat, ROOT_CLUSTER, 0x0fff_ffff);
     set(&mut fat, FILE_CLUSTER, 0x0fff_ffff);
+    set(&mut fat, DOCS_CLUSTER, 0x0fff_ffff);
+    set(&mut fat, NOTE_CLUSTER, 0x0fff_ffff);
     for copy in 0..FAT_COUNT {
         let start = (u32::from(RESERVED_SECTORS) + u32::from(copy) * fat_sectors) as usize * SECTOR;
         image[start..start + fat.len()].copy_from_slice(&fat);
     }
 
-    // --- root directory (cluster 2): HELLO.TXT + 終端0x00 record ---
+    // --- root directory (cluster 2): HELLO.TXT + DOCS + 終端0x00 record ---
     let root_start = data_start as usize * SECTOR;
-    let record = &mut image[root_start..root_start + 32];
-    record[..11].copy_from_slice(b"HELLO   TXT");
-    record[11] = 0x20; // archive
-    record[20..22].copy_from_slice(&((FILE_CLUSTER >> 16) as u16).to_le_bytes());
-    record[26..28].copy_from_slice(&((FILE_CLUSTER & 0xffff) as u16).to_le_bytes());
-    record[28..32].copy_from_slice(&(HELLO_TXT.len() as u32).to_le_bytes());
+    let dir_entry =
+        |image: &mut [u8], index: usize, name: &[u8; 11], attr: u8, cluster: u32, size: u32| {
+            let record = &mut image[index * 32..index * 32 + 32];
+            record[..11].copy_from_slice(name);
+            record[11] = attr;
+            record[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+            record[26..28].copy_from_slice(&((cluster & 0xffff) as u16).to_le_bytes());
+            record[28..32].copy_from_slice(&size.to_le_bytes());
+        };
+    {
+        let root = &mut image[root_start..root_start + SECTOR];
+        dir_entry(
+            root,
+            0,
+            b"HELLO   TXT",
+            0x20,
+            FILE_CLUSTER,
+            HELLO_TXT.len() as u32,
+        );
+        dir_entry(root, 1, b"DOCS       ", 0x10, DOCS_CLUSTER, 0);
+    }
 
-    // --- file data (cluster 3) ---
+    // --- DOCS directory (cluster 4): `.`/`..` + NOTE.TXT ---
+    {
+        let docs_start = (data_start + (DOCS_CLUSTER - 2)) as usize * SECTOR;
+        let docs = &mut image[docs_start..docs_start + SECTOR];
+        dir_entry(docs, 0, b".          ", 0x10, DOCS_CLUSTER, 0);
+        dir_entry(docs, 1, b"..         ", 0x10, ROOT_CLUSTER, 0);
+        dir_entry(
+            docs,
+            2,
+            b"NOTE    TXT",
+            0x20,
+            NOTE_CLUSTER,
+            NOTE_TXT.len() as u32,
+        );
+    }
+
+    // --- file data (cluster 3 = HELLO.TXT, cluster 5 = NOTE.TXT) ---
     let file_start = (data_start + (FILE_CLUSTER - 2)) as usize * SECTOR;
     image[file_start..file_start + HELLO_TXT.len()].copy_from_slice(HELLO_TXT);
+    let note_start = (data_start + (NOTE_CLUSTER - 2)) as usize * SECTOR;
+    image[note_start..note_start + NOTE_TXT.len()].copy_from_slice(NOTE_TXT);
 
     image
 }
@@ -189,7 +230,7 @@ impl Drop for DiskImage {
 
 #[cfg(test)]
 mod tests {
-    use super::{HELLO_TXT, SliceReader, fat_sectors, image_bytes};
+    use super::{HELLO_TXT, NOTE_TXT, SliceReader, fat_sectors, image_bytes};
     use minios_kernel::storage::fat32::Fat32;
     use std::vec::Vec;
 
@@ -204,12 +245,22 @@ mod tests {
         let mut names = Vec::new();
         fs.for_each_root_entry(|entry| names.push(entry.name().to_owned()))
             .expect("root listing must succeed");
-        assert_eq!(names, ["HELLO.TXT"]);
+        assert_eq!(names, ["HELLO.TXT", "DOCS"]);
 
         let mut content = Vec::new();
         fs.read_root_file("HELLO.TXT", |chunk| content.extend_from_slice(chunk))
             .expect("HELLO.TXT must be readable");
         assert_eq!(content, HELLO_TXT);
+
+        // subdirectoryは`.`/`..`を列挙せず、path経由でNOTE.TXTを読める。
+        let mut docs = Vec::new();
+        fs.for_each_entry("DOCS", |entry| docs.push(entry.name().to_owned()))
+            .expect("DOCS listing must succeed");
+        assert_eq!(docs, ["NOTE.TXT"]);
+        let mut note = Vec::new();
+        fs.read_file("DOCS/NOTE.TXT", |chunk| note.extend_from_slice(chunk))
+            .expect("DOCS/NOTE.TXT must be readable");
+        assert_eq!(note, NOTE_TXT);
     }
 
     // Catches a fat_sectors estimate that leaves data_cluster_count under the
