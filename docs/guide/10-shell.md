@@ -41,8 +41,8 @@ help      Show available commands
 info      Show system information
 uptime    Show elapsed time
 memory    Show physical memory statistics
-ls        List root directory
-cat       Read a root file
+ls        List a directory
+cat       Read a file
 clear     Clear the terminal
 shutdown  Shut down MiniOS
 minios> info
@@ -55,8 +55,11 @@ minios> memory
 memory: total=32231 allocated=0 free=32231 pages
 minios> ls
         18 HELLO.TXT
-minios> cat HELLO.TXT
-hello from virtio
+<DIR> DOCS
+minios> ls DOCS
+        17 NOTE.TXT
+minios> cat DOCS/NOTE.TXT
+note inside docs
 minios> unknown
 unknown command: unknown; try 'help'
 ```
@@ -65,8 +68,10 @@ unknown command: unknown; try 'help'
 APIの規約は数値形式と行の順序であり、上の数値そのものではありません。
 `info`のハートIDは、現在の`-smp 1`を使う受け入れテストでは0です。
 `ls`と`cat`は、`cargo xtask run`が接続するvirtio-blkのFAT32 volumeを読みます。
+`ls`は引数なしでroot、引数ありでそのsubdirectoryを列挙し、`cat`は`/`区切りのpathを受け付けます。
 初回の実行時にFDTが報告したvirtio-mmio slotをprobeしてmountし、同じsessionを使い回します。
 diskが無い環境では`virtio: no block device found`と表示します。
+RV32側は32 KiB IMEMの制約からflatな8.3名前空間に限定し、`/`を含む名前は`sd: invalid 8.3 name`と報告します。
 
 NEORV32では次の対話を確認できます。
 
@@ -79,8 +84,8 @@ info      Show system information
 uptime    Show elapsed time
 memory    Show memory usage
 echo      Echo text
-ls        List root directory
-cat       Read a root file
+ls        List a directory
+cat       Read a file
 clear     Clear the terminal
 shutdown  Halt the CPU
 minios> echo hello

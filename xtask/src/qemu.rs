@@ -55,7 +55,7 @@ const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] =
-    b"help\ninfo\nuptime\nmemory\nls\ncat HELLO.TXT\nnot-a-command\nshutdown\n";
+    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
@@ -1675,8 +1675,8 @@ fn verify_shell_result(
                 "memory    Show physical memory statistics",
             )
         })
-        .and_then(|()| expect_shell_line(transcript, &mut cursor, "ls        List root directory"))
-        .and_then(|()| expect_shell_line(transcript, &mut cursor, "cat       Read a root file"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "ls        List a directory"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "cat       Read a file"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "clear     Clear the terminal"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "shutdown  Shut down MiniOS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> info"))
@@ -1705,8 +1705,11 @@ fn verify_shell_result(
         })
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
-        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat HELLO.TXT"))
-        .and_then(|()| expect_shell_line(transcript, &mut cursor, "hello from virtio"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        17 NOTE.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat DOCS/NOTE.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "note inside docs"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
         .and_then(|()| {
             expect_shell_line(
@@ -2053,8 +2056,8 @@ mod tests {
             "info      Show system information",
             "uptime    Show elapsed time",
             "memory    Show physical memory statistics",
-            "ls        List root directory",
-            "cat       Read a root file",
+            "ls        List a directory",
+            "cat       Read a file",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "MiniOS 0.1.0 on RISC-V 64",
@@ -2281,8 +2284,8 @@ mod tests {
             "info      Show system information",
             "uptime    Show elapsed time",
             "memory    Show physical memory statistics",
-            "ls        List root directory",
-            "cat       Read a root file",
+            "ls        List a directory",
+            "cat       Read a file",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "minios> info",
@@ -2295,8 +2298,11 @@ mod tests {
             "memory: total=32231 allocated=0 free=32231 pages",
             "minios> ls",
             "        18 HELLO.TXT",
-            "minios> cat HELLO.TXT",
-            "hello from virtio",
+            "<DIR> DOCS",
+            "minios> ls DOCS",
+            "        17 NOTE.TXT",
+            "minios> cat DOCS/NOTE.TXT",
+            "note inside docs",
             "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
             "minios> shutdown",

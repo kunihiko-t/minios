@@ -127,8 +127,8 @@ fn execute(
             crate::println!("info      Show system information");
             crate::println!("uptime    Show elapsed time");
             crate::println!("memory    Show physical memory statistics");
-            crate::println!("ls        List root directory");
-            crate::println!("cat       Read a root file");
+            crate::println!("ls        List a directory");
+            crate::println!("cat       Read a file");
             crate::println!("clear     Clear the terminal");
             crate::println!("shutdown  Shut down MiniOS");
         }
@@ -151,7 +151,7 @@ fn execute(
                 stats.free
             );
         }
-        Command::Ls => list_root(storage, frames),
+        Command::Ls(path) => list_dir(storage, frames, path),
         Command::Cat("") => {
             crate::println!("virtio: usage: cat NAME.EXT");
         }
@@ -238,8 +238,8 @@ fn execute32(input: &str, hart_id: usize, storage: &mut Option<Rv32Storage>) {
             crate::println!("uptime    Show elapsed time");
             crate::println!("memory    Show memory usage");
             crate::println!("echo      Echo text");
-            crate::println!("ls        List root directory");
-            crate::println!("cat       Read a root file");
+            crate::println!("ls        List a directory");
+            crate::println!("cat       Read a file");
             crate::println!("clear     Clear the terminal");
             crate::println!("shutdown  Halt the CPU");
         }
@@ -260,7 +260,7 @@ fn execute32(input: &str, hart_id: usize, storage: &mut Option<Rv32Storage>) {
         Command::Echo(payload) => {
             crate::println!("{payload}");
         }
-        Command::Ls => list_root(storage),
+        Command::Ls(path) => list_dir(storage, path),
         Command::Cat("") => {
             crate::println!("sd: usage: cat NAME.EXT");
         }
@@ -343,20 +343,22 @@ fn probe_and_mount(frames: &mut dyn FrameSource) -> Result<Rv64Storage, Rv64Stor
 }
 
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-fn print_root_entries<R: crate::storage::SectorReader>(
-    session: &mut crate::storage::fat32::Fat32<R>,
-) -> Result<(), crate::storage::fat32::FatError<R::Error>> {
-    session.for_each_root_entry(|entry| {
-        if entry.is_directory() {
-            crate::println!("<DIR> {}", entry.name());
-        } else {
-            crate::println!("{:>10} {}", entry.size(), entry.name());
-        }
-    })
+fn print_dir_entry(entry: &crate::storage::fat32::DirEntry) {
+    if entry.is_directory() {
+        crate::println!("<DIR> {}", entry.name());
+    } else {
+        crate::println!("{:>10} {}", entry.size(), entry.name());
+    }
 }
 
+/// RV32のSD経路はflatな8.3名前空間だけを扱う。`/`を含む引数は
+/// IMEMを使うpath機構を持たず、`InvalidName`として報告する。
 #[cfg(target_arch = "riscv32")]
-fn list_root(storage: &mut Option<Rv32Storage>) {
+fn list_dir(storage: &mut Option<Rv32Storage>, path: &str) {
+    if !path.is_empty() {
+        crate::println!("sd: invalid 8.3 name");
+        return;
+    }
     let session = match mount_storage(storage) {
         Ok(session) => session,
         Err(error) => {
@@ -364,13 +366,13 @@ fn list_root(storage: &mut Option<Rv32Storage>) {
             return;
         }
     };
-    if let Err(error) = print_root_entries(session) {
+    if let Err(error) = session.for_each_root_entry(print_dir_entry) {
         print_fat_error("sd", error);
     }
 }
 
 #[cfg(target_arch = "riscv64")]
-fn list_root(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource) {
+fn list_dir(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource, path: &str) {
     let session = match mount_storage(storage, frames) {
         Ok(session) => session,
         Err(error) => {
@@ -378,18 +380,33 @@ fn list_root(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource) {
             return;
         }
     };
-    if let Err(error) = print_root_entries(session) {
+    if let Err(error) = session.for_each_entry(path, print_dir_entry) {
         print_fat_error("virtio", error);
     }
 }
 
-#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[cfg(target_arch = "riscv32")]
 fn print_root_file<R: crate::storage::SectorReader>(
     session: &mut crate::storage::fat32::Fat32<R>,
     name: &str,
 ) -> Result<(), crate::storage::fat32::FatError<R::Error>> {
+    print_cat_stream(|write| session.read_root_file(name, write))
+}
+
+#[cfg(target_arch = "riscv64")]
+fn print_root_file<R: crate::storage::SectorReader>(
+    session: &mut crate::storage::fat32::Fat32<R>,
+    path: &str,
+) -> Result<(), crate::storage::fat32::FatError<R::Error>> {
+    print_cat_stream(|write| session.read_file(path, write))
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+fn print_cat_stream<E>(
+    read: impl FnOnce(&mut dyn FnMut(&[u8])) -> Result<(), crate::storage::fat32::FatError<E>>,
+) -> Result<(), crate::storage::fat32::FatError<E>> {
     let mut last_byte = None;
-    let result = session.read_root_file(name, |bytes| {
+    let result = read(&mut |bytes: &[u8]| {
         for &byte in bytes {
             crate::console::write_byte(byte);
             last_byte = Some(byte);
@@ -455,6 +472,9 @@ fn print_fat_error<E>(prefix: &str, error: crate::storage::fat32::FatError<E>) {
         }
         crate::storage::fat32::FatError::IsDirectory => {
             crate::println!("{prefix}: is a directory");
+        }
+        crate::storage::fat32::FatError::NotDirectory => {
+            crate::println!("{prefix}: not a directory");
         }
         crate::storage::fat32::FatError::InvalidName => {
             crate::println!("{prefix}: invalid 8.3 name");

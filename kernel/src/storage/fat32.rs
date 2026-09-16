@@ -9,6 +9,7 @@ pub enum FatError<E> {
     InvalidFilesystem,
     NotFound,
     IsDirectory,
+    NotDirectory,
     InvalidName,
     CorruptChain,
 }
@@ -137,30 +138,87 @@ impl<R: SectorReader> Fat32<R> {
         }
     }
 
+    /// root directoryのentryを順に報告する。RV32のshellはこのroot専用
+    /// 経路だけを使い、path解決の機構をIMEMへ載せない。
     pub fn for_each_root_entry(
         &mut self,
         mut visit: impl FnMut(&DirEntry),
     ) -> Result<(), FatError<R::Error>> {
         let mut scratch = [0; 512];
-        self.walk_root(&mut scratch, |entry| {
+        self.walk_dir(self.root_cluster, &mut scratch, |entry| {
             visit(entry);
             false
         })
     }
 
+    /// rootの`name`を先頭からstreamする。`/`を含む名前は8.3として
+    /// 不正なため`InvalidName`を返す。
     pub fn read_root_file(
         &mut self,
         name: &str,
-        mut write: impl FnMut(&[u8]),
+        write: impl FnMut(&[u8]),
     ) -> Result<(), FatError<R::Error>> {
         let wanted = normalize_input_name(name).ok_or(FatError::InvalidName)?;
         let mut scratch = [0; 512];
         let entry = self
-            .find_root_entry(&wanted, &mut scratch)?
+            .find_entry_in(self.root_cluster, &wanted, &mut scratch)?
             .ok_or(FatError::NotFound)?;
         if entry.directory {
             return Err(FatError::IsDirectory);
         }
+        self.stream_file(&entry, &mut scratch, write)
+    }
+
+    /// `path`が参照するdirectoryのentryを順に報告する。`""`はrootを意味し、
+    /// それ以外は`/`区切りの要素をrootから順に解決する。
+    /// path解決はRV32のIMEM予算に乗らないため、このAPIはRV32以外で
+    /// だけ提供する。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn for_each_entry(
+        &mut self,
+        path: &str,
+        mut visit: impl FnMut(&DirEntry),
+    ) -> Result<(), FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        let dir_cluster = if path.is_empty() {
+            self.root_cluster
+        } else {
+            let entry = self.resolve_path(path, &mut scratch)?;
+            if !entry.directory {
+                return Err(FatError::NotDirectory);
+            }
+            entry.first_cluster
+        };
+        self.walk_dir(dir_cluster, &mut scratch, |entry| {
+            visit(entry);
+            false
+        })
+    }
+
+    /// `path`が参照するfileを先頭からstreamする。directoryを指すpathは
+    /// `IsDirectory`、fileの途中に潜るpathは`NotDirectory`を返す。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn read_file(
+        &mut self,
+        path: &str,
+        write: impl FnMut(&[u8]),
+    ) -> Result<(), FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        let entry = self.resolve_path(path, &mut scratch)?;
+        if entry.directory {
+            return Err(FatError::IsDirectory);
+        }
+        self.stream_file(&entry, &mut scratch, write)
+    }
+
+    /// 解決済みのfile entryを先頭からstreamする。`size`が0のfileは
+    /// data clusterを持たないため、ここで早期に完了させる。
+    fn stream_file(
+        &mut self,
+        entry: &DirEntry,
+        scratch: &mut [u8; 512],
+        mut write: impl FnMut(&[u8]),
+    ) -> Result<(), FatError<R::Error>> {
         if entry.size == 0 {
             return Ok(());
         }
@@ -180,7 +238,7 @@ impl<R: SectorReader> Fat32<R> {
             while sector_in_cluster < self.sectors_per_cluster && remaining != 0 {
                 let lba = self.data_sector_lba(cluster, sector_in_cluster as u32)?;
                 self.reader
-                    .read_sector(lba, &mut scratch)
+                    .read_sector(lba, scratch)
                     .map_err(FatError::Read)?;
                 let bytes = if remaining < 512 {
                     remaining as usize
@@ -196,7 +254,7 @@ impl<R: SectorReader> Fat32<R> {
             }
 
             clusters_read += 1;
-            cluster = match self.next_cluster(cluster, &mut scratch)? {
+            cluster = match self.next_cluster(cluster, scratch)? {
                 Some(next) => next,
                 None => return Err(FatError::CorruptChain),
             };
@@ -204,13 +262,49 @@ impl<R: SectorReader> Fat32<R> {
         Ok(())
     }
 
-    fn find_root_entry(
+    /// `path`をrootから順に解決し、最終要素のentryを返す。途中の要素は
+    /// directory必須、空要素と`.`/`..`は`InvalidName`として拒否する。
+    #[cfg(not(target_arch = "riscv32"))]
+    fn resolve_path(
         &mut self,
+        path: &str,
+        scratch: &mut [u8; 512],
+    ) -> Result<DirEntry, FatError<R::Error>> {
+        // diskへ触れる前に全要素を検査し、不正なpathは存在の有無に
+        // 関係なく`InvalidName`で拒否する。
+        for part in path.split('/') {
+            if part.is_empty() || part == "." || part == ".." {
+                return Err(FatError::InvalidName);
+            }
+            normalize_input_name(part).ok_or(FatError::InvalidName)?;
+        }
+        let mut dir_cluster = self.root_cluster;
+        let mut parts = path.split('/').peekable();
+        while let Some(part) = parts.next() {
+            let wanted = normalize_input_name(part).expect("validated above");
+            let entry = self
+                .find_entry_in(dir_cluster, &wanted, scratch)?
+                .ok_or(FatError::NotFound)?;
+            if parts.peek().is_none() {
+                return Ok(entry);
+            }
+            if !entry.directory {
+                return Err(FatError::NotDirectory);
+            }
+            dir_cluster = entry.first_cluster;
+        }
+        // `split`は空文字列でも1要素を返すため、ここへは到達しない。
+        Err(FatError::InvalidName)
+    }
+
+    fn find_entry_in(
+        &mut self,
+        dir_cluster: u32,
         wanted: &[u8; 11],
         scratch: &mut [u8; 512],
     ) -> Result<Option<DirEntry>, FatError<R::Error>> {
         let mut found = None;
-        self.walk_root(scratch, |entry| {
+        self.walk_dir(dir_cluster, scratch, |entry| {
             if entry_short_name(entry) == *wanted {
                 found = Some(*entry);
                 true
@@ -221,15 +315,16 @@ impl<R: SectorReader> Fat32<R> {
         Ok(found)
     }
 
-    fn walk_root<F>(
+    fn walk_dir<F>(
         &mut self,
+        dir_cluster: u32,
         scratch: &mut [u8; 512],
         mut visit: F,
     ) -> Result<(), FatError<R::Error>>
     where
         F: FnMut(&DirEntry) -> bool,
     {
-        let mut cluster = self.root_cluster;
+        let mut cluster = dir_cluster;
         let mut clusters_read = 0;
         loop {
             if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
@@ -781,6 +876,36 @@ mod tests {
         .unwrap()
     }
 
+    /// rootに`SUBDIR`（cluster 5）を持ち、その中に`NOTE.TXT`（cluster 6）を
+    /// 持つfixture。`.`と`..`は列挙から除外されることを確認するために入れる。
+    fn mounted_nested_fixture() -> Fat32<MemoryReader<5>> {
+        let mut fat = [0; 512];
+        write_fat_entry(&mut fat, 2, 0x0fff_ffff);
+        write_fat_entry(&mut fat, 5, 0x0fff_ffff);
+        write_fat_entry(&mut fat, 6, 0x0fff_ffff);
+
+        let mut root_cluster = [0; 512];
+        write_directory_entry(&mut root_cluster, 0, b"SUBDIR     ", 0x10, 5, 0);
+        write_directory_entry(&mut root_cluster, 1, b"HELLO   TXT", 0x20, 4, 0);
+
+        let mut subdir = [0; 512];
+        write_directory_entry(&mut subdir, 0, b".          ", 0x10, 5, 0);
+        write_directory_entry(&mut subdir, 1, b"..         ", 0x10, 2, 0);
+        write_directory_entry(&mut subdir, 2, b"NOTE    TXT", 0x20, 6, 11);
+
+        let mut data = [0; 512];
+        data[..11].copy_from_slice(b"nested note");
+
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, valid_boot_sector()),
+            (32, fat),
+            (288, root_cluster),
+            (291, subdir),
+            (292, data),
+        ]))
+        .unwrap()
+    }
+
     fn mounted_multicluster_file_fixture(content: &[u8]) -> Fat32<MemoryReader<5>> {
         let mut fat = [0; 512];
         write_fat_entry(&mut fat, 2, 0x0fff_ffff);
@@ -861,7 +986,7 @@ mod tests {
         let mut volume = mounted_directory_fixture();
         let mut names = Vec::new();
         volume
-            .for_each_root_entry(|entry| names.push(String::from(entry.name())))
+            .for_each_entry("", |entry| names.push(String::from(entry.name())))
             .unwrap();
         assert_eq!(names, ["HELLO.TXT", "SUBDIR"]);
     }
@@ -871,7 +996,7 @@ mod tests {
         let mut volume = mounted_multicluster_file_fixture(b"hello from sd\n");
         let mut output = Vec::new();
         volume
-            .read_root_file("hello.txt", |bytes| output.extend_from_slice(bytes))
+            .read_file("hello.txt", |bytes| output.extend_from_slice(bytes))
             .unwrap();
         assert_eq!(output, b"hello from sd\n");
     }
@@ -880,9 +1005,7 @@ mod tests {
     fn empty_file_reads_no_data_cluster() {
         let mut volume = mounted_empty_file_fixture();
         let mut called = false;
-        volume
-            .read_root_file("EMPTY.TXT", |_| called = true)
-            .unwrap();
+        volume.read_file("EMPTY.TXT", |_| called = true).unwrap();
         assert!(!called);
     }
 
@@ -890,7 +1013,7 @@ mod tests {
     fn cyclic_chain_is_rejected_before_the_traversal_bound_is_exceeded() {
         let mut volume = mounted_cyclic_file_fixture();
         assert_eq!(
-            volume.read_root_file("LOOP.BIN", |_| {}),
+            volume.read_file("LOOP.BIN", |_| {}),
             Err(FatError::CorruptChain)
         );
     }
@@ -900,7 +1023,7 @@ mod tests {
         let mut volume = mounted_multicluster_file_fixture(b"contents");
         let mut entries = Vec::<DirEntry>::new();
         volume
-            .for_each_root_entry(|entry| entries.push(*entry))
+            .for_each_entry("", |entry| entries.push(*entry))
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name(), "HELLO.TXT");
@@ -911,7 +1034,7 @@ mod tests {
         let mut volume = mounted_malformed_name_fixture();
         let mut names = Vec::new();
         volume
-            .for_each_root_entry(|entry| names.push(String::from(entry.name())))
+            .for_each_entry("", |entry| names.push(String::from(entry.name())))
             .unwrap();
         assert_eq!(names, ["GOOD.TXT"]);
     }
@@ -920,23 +1043,29 @@ mod tests {
     fn file_lookup_rejects_missing_directory_and_invalid_names() {
         let mut volume = mounted_directory_fixture();
         assert_eq!(
-            volume.read_root_file("MISSING.TXT", |_| {}),
+            volume.read_file("MISSING.TXT", |_| {}),
             Err(FatError::NotFound)
         );
         assert_eq!(
-            volume.read_root_file("SUBDIR", |_| {}),
+            volume.read_file("SUBDIR", |_| {}),
             Err(FatError::IsDirectory)
         );
+        // `A`がrootに存在しないため、path解決は`NotFound`で止まる。
+        assert_eq!(volume.read_file("A/B.TXT", |_| {}), Err(FatError::NotFound));
         for name in [
             "",
             ".TXT",
             "TOO-LONG9.TXT",
-            "A/B.TXT",
             "A\\\\B.TXT",
             "A..TXT",
+            "A//B.TXT",
+            "/HELLO.TXT",
+            "HELLO.TXT/",
+            "./HELLO.TXT",
+            "../HELLO.TXT",
         ] {
             assert_eq!(
-                volume.read_root_file(name, |_| {}),
+                volume.read_file(name, |_| {}),
                 Err(FatError::InvalidName),
                 "{name} unexpectedly accepted"
             );
@@ -944,11 +1073,55 @@ mod tests {
     }
 
     #[test]
+    fn subdirectory_listing_filters_dot_entries() {
+        let mut volume = mounted_nested_fixture();
+        let mut names = Vec::new();
+        volume
+            .for_each_entry("SUBDIR", |entry| names.push(String::from(entry.name())))
+            .unwrap();
+        assert_eq!(names, ["NOTE.TXT"]);
+    }
+
+    #[test]
+    fn nested_file_reads_and_matches_ascii_case_insensitively() {
+        let mut volume = mounted_nested_fixture();
+        let mut output = Vec::new();
+        volume
+            .read_file("subdir/note.txt", |bytes| output.extend_from_slice(bytes))
+            .unwrap();
+        assert_eq!(output, b"nested note");
+    }
+
+    #[test]
+    fn nested_lookup_reports_missing_files_and_non_directories() {
+        let mut volume = mounted_nested_fixture();
+        assert_eq!(
+            volume.read_file("SUBDIR/MISSING.TXT", |_| {}),
+            Err(FatError::NotFound)
+        );
+        assert_eq!(
+            volume.read_file("SUBDIR", |_| {}),
+            Err(FatError::IsDirectory)
+        );
+        // fileをdirectoryとして潜るpathと、file自体を列挙するpath。
+        assert_eq!(
+            volume.read_file("HELLO.TXT/NOTE.TXT", |_| {}),
+            Err(FatError::NotDirectory)
+        );
+        let mut visited = false;
+        assert_eq!(
+            volume.for_each_entry("HELLO.TXT", |_| visited = true),
+            Err(FatError::NotDirectory)
+        );
+        assert!(!visited);
+    }
+
+    #[test]
     fn file_streaming_emits_only_the_declared_final_partial_sector() {
         let mut volume = mounted_multicluster_file_fixture(&[0x11; 513]);
         let mut output = Vec::new();
         volume
-            .read_root_file("HELLO.TXT", |bytes| output.extend_from_slice(bytes))
+            .read_file("HELLO.TXT", |bytes| output.extend_from_slice(bytes))
             .unwrap();
         assert_eq!(output.len(), 513);
         assert_eq!(output[512], 0x11);
@@ -970,7 +1143,7 @@ mod tests {
             ]))
             .unwrap();
             assert_eq!(
-                volume.read_root_file("BAD.BIN", |_| {}),
+                volume.read_file("BAD.BIN", |_| {}),
                 Err(FatError::CorruptChain),
                 "FAT value {value:#x} unexpectedly accepted"
             );
