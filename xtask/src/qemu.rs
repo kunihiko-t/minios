@@ -55,7 +55,7 @@ const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] =
-    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\nnot-a-command\nshutdown\n";
+    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
@@ -1706,10 +1706,13 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        19 Long File Name.txt"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls DOCS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "        17 NOTE.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat DOCS/NOTE.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "note inside docs"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat Long File Name.txt"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "long file contents"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
         .and_then(|()| {
             expect_shell_line(
@@ -2299,10 +2302,13 @@ mod tests {
             "minios> ls",
             "        18 HELLO.TXT",
             "<DIR> DOCS",
+            "        19 Long File Name.txt",
             "minios> ls DOCS",
             "        17 NOTE.TXT",
             "minios> cat DOCS/NOTE.TXT",
             "note inside docs",
+            "minios> cat Long File Name.txt",
+            "long file contents",
             "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
             "minios> shutdown",
