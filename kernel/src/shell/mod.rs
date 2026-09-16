@@ -129,6 +129,7 @@ fn execute(
             crate::println!("memory    Show physical memory statistics");
             crate::println!("ls        List a directory");
             crate::println!("cat       Read a file");
+            crate::println!("rm        Remove a file");
             crate::println!("clear     Clear the terminal");
             crate::println!("shutdown  Shut down MiniOS");
         }
@@ -156,6 +157,10 @@ fn execute(
             crate::println!("virtio: usage: cat NAME.EXT");
         }
         Command::Cat(name) => read_root_file(storage, name, frames),
+        Command::Rm("") => {
+            crate::println!("virtio: usage: rm NAME");
+        }
+        Command::Rm(path) => remove_file(storage, frames, path),
         Command::Clear => {
             crate::print!("\x1b[2J\x1b[H");
         }
@@ -441,6 +446,22 @@ fn read_root_file(storage: &mut Option<Rv64Storage>, name: &str, frames: &mut dy
         }
     };
     if let Err(error) = print_root_file(session, name) {
+        print_fat_error("virtio", error);
+    }
+}
+
+/// `rm <path>`を遅延mount済みのsessionへ委譲する。成功時は出力を出さず、
+/// 失敗だけを診断messageへ写像する。
+#[cfg(target_arch = "riscv64")]
+fn remove_file(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource, path: &str) {
+    let session = match mount_storage(storage, frames) {
+        Ok(session) => session,
+        Err(error) => {
+            print_virtio_error(error);
+            return;
+        }
+    };
+    if let Err(error) = session.unlink_file(path) {
         print_fat_error("virtio", error);
     }
 }

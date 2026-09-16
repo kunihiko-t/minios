@@ -161,6 +161,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 5 | `open` | `a0=path pointer`、`a1=path length` | `path`はUTF-8のFAT32パスで256 byte以下。戻り値は3以上のread-only file descriptorか負のerrno。processごとに最大4個まで開ける |
 | 6 | `close` | `a0=fd` | 戻り値は0か負のerrno |
 | 7 | `create` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、fileが無ければ作成し、writableなfile descriptorを返す。最終要素は8.3名へ正規化できる名前のみ受理する |
+| 8 | `unlink` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、fileを削除する。戻り値は0か負のerrno |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -173,18 +174,20 @@ file fdへの`read`と`write`は現在のoffsetから行い、処理した分だ
 fdはread専用（`open`由来）またはwrite専用（`create`由来）のどちらかであり、writable fdへの`read`とread-only fdへの`write`は`EBADF`を返します。
 `write`のoffsetがfile sizeを越える場合は穴あき書き込みになるため`EINVAL`を返します。size以内なら上書きと末尾への追記ができます。
 `close`はfdを解放します。標準stream（0、1、2）は閉じられず、processは終了時に残ったfdを自動的に閉じます。
+`unlink`はdir entryとそれに続く長い名前のrecord列を削除し、fileのcluster chainを解放します。directoryには使えず、`EISDIR`を返します。
+POSIXと異なり、削除したentryを指すfdはどのprocessのものも即座に失効し、以後の`read`/`write`/`close`は`EBADF`を返します。これはclusterを即座に解放するために必要な規約です。
 負のABI error値は次のとおりです。
 
 | 値 | 名前 | 条件 |
 | ---: | --- | --- |
 | `-2` | `ENOENT` | fileが存在しない |
 | `-5` | `EIO` | storageの読み取りまたはfilesystem構造の失敗 |
-| `-9` | `EBADF` | 未知のfile descriptor、標準streamへの`close`、未割り当てfdへの`read`/`write`/`close`、writable fdへの`read`、read-only fdへの`write` |
+| `-9` | `EBADF` | 未知のfile descriptor、標準streamへの`close`、未割り当てfdへの`read`/`write`/`close`、writable fdへの`read`、read-only fdへの`write`、`unlink`で失効したfdへの操作 |
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
 | `-19` | `ENODEV` | block deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである |
-| `-21` | `EISDIR` | `read_file`や`create`の対象がdirectoryである |
+| `-21` | `EISDIR` | `read_file`や`create`、`unlink`の対象がdirectoryである |
 | `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset |
 | `-24` | `EMFILE` | processの同時open数（4個）を超えた |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |

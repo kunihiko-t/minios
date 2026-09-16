@@ -1684,6 +1684,29 @@ unsafe fn close_all_file_fds(pid: usize) {
     slots[pid] = [const { None }; minios_abi::syscall::MAX_OPEN_FILES];
 }
 
+/// `(dir_cluster, dir_index)`のdir entryを指すfdを全processのtableから
+/// 閉じる。`unlink`したfileのclusterは即座に解放されるため、開いたままの
+/// fdを残すと再利用されたslotやclusterを壊し得る。呼び出しprocess自身の
+/// fdも失効する。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn revoke_file_fds(dir_cluster: u32, dir_index: u32) {
+    let slots = unsafe { &mut *&raw mut FILE_FDS };
+    for proc_slots in slots.iter_mut() {
+        for slot in proc_slots.iter_mut() {
+            if let Some(fd) = slot
+                && fd.desc.dir_location() == (dir_cluster, dir_index)
+            {
+                *slot = None;
+            }
+        }
+    }
+}
+
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
 #[cfg(target_arch = "riscv64")]
 fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {

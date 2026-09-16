@@ -13,6 +13,8 @@ pub enum Command<'a> {
     Ls(&'a str),
     #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
     Cat(&'a str),
+    #[cfg(any(test, target_arch = "riscv64"))]
+    Rm(&'a str),
     Unknown(&'a str),
 }
 
@@ -34,6 +36,10 @@ pub fn parse_command(input: &str) -> Command<'_> {
         "ls" => Command::Ls(""),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         "cat" => Command::Cat(""),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        "rm" => Command::Rm(""),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        input if input.starts_with("rm ") => Command::Rm(input[3..].trim_start_matches(' ')),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         input => {
             if let Some(argument) = input.strip_prefix("ls ") {
@@ -118,5 +124,16 @@ mod tests {
     fn parser_does_not_match_storage_command_prefixes() {
         assert_eq!(parse_command("listing"), Command::Unknown("listing"));
         assert_eq!(parse_command("catalog"), Command::Unknown("catalog"));
+    }
+
+    #[test]
+    fn parser_recognizes_rm_with_and_without_an_argument() {
+        assert_eq!(parse_command("rm"), Command::Rm(""));
+        assert_eq!(parse_command("rm OLD.TXT"), Command::Rm("OLD.TXT"));
+        assert_eq!(
+            parse_command("rm DOCS/NOTE.TXT"),
+            Command::Rm("DOCS/NOTE.TXT")
+        );
+        assert_eq!(parse_command("rmdir"), Command::Unknown("rmdir"));
     }
 }

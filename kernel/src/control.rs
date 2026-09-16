@@ -132,6 +132,19 @@ impl ControlSource for UartControlSource<'_> {
         }
     }
 
+    /// guestの`unlink`をstorage sessionへ委譲し、削除したentryを指す
+    /// 全processのfdを失効させる。clusterは即座に解放されるため、
+    /// fdを残すと他fileのentryや内容を壊し得る。
+    #[cfg(target_arch = "riscv64")]
+    fn unlink(&mut self, path: &str) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let (dir_cluster, dir_index) = session.unlink_file(path).map_err(fat_errno)?;
+        // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
+        unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
+        Ok(())
+    }
+
     /// guestの`write`をwritableなfdの現在offsetから書き、offsetを進める。
     /// read-onlyのfdへのwriteは`EBADF`で拒否する。
     #[cfg(target_arch = "riscv64")]

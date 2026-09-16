@@ -8,6 +8,7 @@ pub enum SyscallNumber {
     Open = 5,
     Close = 6,
     Create = 7,
+    Unlink = 8,
 }
 
 pub const STDIN: usize = 0;
@@ -45,6 +46,7 @@ mod tests {
         assert_eq!(SyscallNumber::Open as usize, 5);
         assert_eq!(SyscallNumber::Close as usize, 6);
         assert_eq!(SyscallNumber::Create as usize, 7);
+        assert_eq!(SyscallNumber::Unlink as usize, 8);
         assert_eq!(STDIN, 0);
         assert_eq!(STDOUT, 1);
         assert_eq!(STDERR, 2);

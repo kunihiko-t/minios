@@ -43,6 +43,7 @@ uptime    Show elapsed time
 memory    Show physical memory statistics
 ls        List a directory
 cat       Read a file
+rm        Remove a file
 clear     Clear the terminal
 shutdown  Shut down MiniOS
 minios> info
@@ -63,6 +64,12 @@ minios> cat DOCS/NOTE.TXT
 note inside docs
 minios> cat Long File Name.txt
 long file contents
+minios> rm Long File Name.txt
+minios> ls
+        18 HELLO.TXT
+<DIR> DOCS
+minios> cat Long File Name.txt
+virtio: file not found
 minios> unknown
 unknown command: unknown; try 'help'
 ```
@@ -72,6 +79,7 @@ APIの規約は数値形式と行の順序であり、上の数値そのもの�
 `info`のハートIDは、現在の`-smp 1`を使う受け入れテストでは0です。
 `ls`と`cat`は、`cargo xtask run`が接続するvirtio-blkのFAT32 volumeを読みます。
 `ls`は引数なしでroot、引数ありでそのsubdirectoryを列挙し、`cat`は`/`区切りのpathを受け付けます。
+`rm`はfileを削除し、entryと長い名前のrecord列、cluster chainを回収します。directoryには使えず、`virtio: is a directory`と報告します。
 VFATのlong file name entryがあれば表示名と解決名の両方に使い、無効な列（checksum不一致など）は8.3 aliasへfallbackします。
 初回の実行時にFDTが報告したvirtio-mmio slotをprobeしてmountし、同じsessionを使い回します。
 diskが無い環境では`virtio: no block device found`と表示します。

@@ -12,6 +12,9 @@ pub const GUEST_FILE_READ: &str = "minios-guest-file-read";
 pub const GUEST_FILE_FD: &str = "minios-guest-file-fd";
 /// create/write sampleのbin名。
 pub const GUEST_FILE_WRITE: &str = "minios-guest-file-write";
+
+/// `unlink` syscallを検証するguest bin名。
+pub const GUEST_FILE_UNLINK: &str = "minios-guest-file-unlink";
 /// scheduler検証のCPU-bound側bin名。
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 /// scheduler検証の短命側bin名。
