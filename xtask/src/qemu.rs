@@ -53,8 +53,11 @@ const FILE_FD_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x29\0\0\0MiniOS sched: spawned pid=0 name=file-fd\n";
 const FILE_WRITE_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=file-write\n";
+const FILE_UNLINK_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2d\0\0\0MiniOS sched: spawned pid=0 name=file-unlink\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
+const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -63,7 +66,7 @@ const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] =
-    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nnot-a-command\nshutdown\n";
+    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nrm Long File Name.txt\nls\ncat Long File Name.txt\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
@@ -87,6 +90,7 @@ pub enum TestKind {
     File,
     FileFd,
     FileWrite,
+    FileUnlink,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -115,6 +119,9 @@ impl TestKind {
             Self::File => unreachable!("the file test boots the normal kernel"),
             Self::FileFd => unreachable!("the file-fd test boots the normal kernel"),
             Self::FileWrite => unreachable!("the file-write test boots the normal kernel"),
+            Self::FileUnlink => {
+                unreachable!("the file-unlink test boots the normal kernel")
+            }
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
@@ -146,6 +153,9 @@ impl TestKind {
             Self::FileFd => unreachable!("the file-fd test verifies raw control frames"),
             Self::FileWrite => {
                 unreachable!("the file-write test verifies raw control frames")
+            }
+            Self::FileUnlink => {
+                unreachable!("the file-unlink test verifies raw control frames")
             }
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -411,6 +421,25 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         bundle.remove();
         disk.remove();
         return verify_file_write_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::FileUnlink {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_unlink()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_unlink_result(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+        );
     }
 
     if kind == TestKind::Sched {
@@ -1080,6 +1109,17 @@ const FILE_WRITE_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file-unlink検査で期待されるcontrol frame列。guestがcreate/write/
+/// unlink/fd失効/再作成の経路を通してから、読み戻した内容をstdoutへ
+/// 出力する。
+const FILE_UNLINK_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    FILE_UNLINK_SPAWNED_FRAME,
+    FILE_UNLINK_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1156,6 +1196,27 @@ fn verify_file_write_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_WRITE_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+fn verify_file_unlink_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_UNLINK_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -1452,6 +1513,11 @@ impl PayloadBundle {
         Self::create_with(payload_file_write_bundle_bytes(&elf)?)
     }
 
+    fn create_file_unlink() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_UNLINK)?;
+        Self::create_with(payload_file_unlink_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -1626,6 +1692,14 @@ fn payload_file_fd_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// stdoutへ書きexit(42)する。
 fn payload_file_write_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-write\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-unlink検査用bundle: file_unlink guestのELFと引数なしmanifestを
+/// 組み立てる。guestはcreate/write/unlink/fd失効/再作成の経路を確かめて
+/// 内容をstdoutへ書きexit(42)する。
+fn payload_file_unlink_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-unlink\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 
@@ -1897,6 +1971,7 @@ fn verify_shell_result(
         })
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "ls        List a directory"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "cat       Read a file"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "rm        Remove a file"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "clear     Clear the terminal"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "shutdown  Shut down MiniOS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> info"))
@@ -1933,6 +2008,14 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "note inside docs"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat Long File Name.txt"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "long file contents"))
+        // `rm`後のlsはLFN fileを列挙しないこと（逐行照合がその行を飛ばさない）
+        // と、catがnot foundを返すことを確認する。
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> rm Long File Name.txt"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat Long File Name.txt"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "virtio: file not found"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
         .and_then(|()| {
             expect_shell_line(
@@ -2281,6 +2364,7 @@ mod tests {
             "memory    Show physical memory statistics",
             "ls        List a directory",
             "cat       Read a file",
+            "rm        Remove a file",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "MiniOS 0.1.0 on RISC-V 64",
@@ -2509,6 +2593,7 @@ mod tests {
             "memory    Show physical memory statistics",
             "ls        List a directory",
             "cat       Read a file",
+            "rm        Remove a file",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "minios> info",
@@ -2529,6 +2614,12 @@ mod tests {
             "note inside docs",
             "minios> cat Long File Name.txt",
             "long file contents",
+            "minios> rm Long File Name.txt",
+            "minios> ls",
+            "        18 HELLO.TXT",
+            "<DIR> DOCS",
+            "minios> cat Long File Name.txt",
+            "virtio: file not found",
             "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
             "minios> shutdown",

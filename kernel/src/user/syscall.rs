@@ -74,6 +74,13 @@ pub trait ControlSource {
         let _ = (fd, data);
         Err(ENOSYS)
     }
+
+    /// `path`のfileを削除し、そのentryを指す全processのfdを失効させる。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn unlink(&mut self, path: &str) -> Result<(), isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -127,6 +134,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_open(context, space, memory, source, false)
     } else if number == SyscallNumber::Create as usize {
         dispatch_open(context, space, memory, source, true)
+    } else if number == SyscallNumber::Unlink as usize {
+        dispatch_unlink(context, space, memory, source)
     } else if number == SyscallNumber::Close as usize {
         dispatch_close(context, source)
     } else if number == SyscallNumber::Exit as usize {
@@ -189,6 +198,35 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
     }
 }
 
+/// `a0/a1`が指すuser memoryのpathを`path_buf`へ検証付きcopyし、長さを
+/// 返す。長さの範囲違反は`EINVAL`、user range外は`EFAULT`を`a0`へ書いて
+/// `None`を返す。fd割り当てやdir entry変更のside effectより先に
+/// EFAULT/EINVALを確定する規約をopen/create/unlinkで共有する。
+fn copy_user_path<M: FrameStore>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    path_buf: &mut [u8; MAX_PATH_LEN],
+) -> Option<usize> {
+    let path_len = context.register(11);
+    if path_len == 0 || path_len > MAX_PATH_LEN {
+        context.set_register(10, EINVAL as usize);
+        return None;
+    }
+    if copy_from_user(
+        space,
+        memory,
+        context.register(10) as u64,
+        &mut path_buf[..path_len],
+    )
+    .is_err()
+    {
+        context.set_register(10, EFAULT as usize);
+        return None;
+    }
+    Some(path_len)
+}
+
 /// `open`と`create` (`a0=path_ptr, a1=path_len`)。検証規約は`read_file`と
 /// 同じで、fd割り当てやdir entry作成のside effectより先にpathの
 /// EFAULT/EINVALを確定する。`create`はfileをwritableに開く。
@@ -200,23 +238,10 @@ fn dispatch_open<M: FrameStore, E, R: ControlSource>(
     source: &mut R,
     create: bool,
 ) -> SyscallFlow<E, R::Error> {
-    let path_len = context.register(11);
-    if path_len == 0 || path_len > MAX_PATH_LEN {
-        context.set_register(10, EINVAL as usize);
-        return SyscallFlow::Resume;
-    }
     let mut path_buf = [0u8; MAX_PATH_LEN];
-    if copy_from_user(
-        space,
-        memory,
-        context.register(10) as u64,
-        &mut path_buf[..path_len],
-    )
-    .is_err()
-    {
-        context.set_register(10, EFAULT as usize);
+    let Some(path_len) = copy_user_path(context, space, memory, &mut path_buf) else {
         return SyscallFlow::Resume;
-    }
+    };
     let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
         context.set_register(10, EINVAL as usize);
         return SyscallFlow::Resume;
@@ -228,6 +253,29 @@ fn dispatch_open<M: FrameStore, E, R: ControlSource>(
     };
     match result {
         Ok(fd) => context.set_register(10, fd),
+        Err(errno) => context.set_register(10, errno as usize),
+    }
+    SyscallFlow::Resume
+}
+
+/// `unlink` (`a0=path_ptr, a1=path_len`)。検証規約は`open`と同じ。
+/// 成功時は`a0`へ0を返す。
+fn dispatch_unlink<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    let Some(path_len) = copy_user_path(context, space, memory, &mut path_buf) else {
+        return SyscallFlow::Resume;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    };
+    match source.unlink(path) {
+        Ok(()) => context.set_register(10, 0),
         Err(errno) => context.set_register(10, errno as usize),
     }
     SyscallFlow::Resume
@@ -418,6 +466,7 @@ mod tests {
     const OPEN_NUMBER: usize = SyscallNumber::Open as usize;
     const CLOSE_NUMBER: usize = SyscallNumber::Close as usize;
     const CREATE_NUMBER: usize = SyscallNumber::Create as usize;
+    const UNLINK_NUMBER: usize = SyscallNumber::Unlink as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -667,6 +716,7 @@ mod tests {
         creates: usize,
         writes: usize,
         written: Vec<u8>,
+        unlinks: usize,
     }
 
     impl FileSource {
@@ -682,6 +732,7 @@ mod tests {
                 creates: 0,
                 writes: 0,
                 written: Vec::new(),
+                unlinks: 0,
             }
         }
 
@@ -743,6 +794,12 @@ mod tests {
             self.result?;
             self.written.extend_from_slice(data);
             Ok(data.len())
+        }
+
+        fn unlink(&mut self, path: &str) -> Result<(), isize> {
+            self.unlinks += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.result
         }
     }
 
@@ -1673,6 +1730,96 @@ mod tests {
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), EFAULT as usize);
         assert_eq!(source.creates, 0);
+    }
+
+    // Catches unlink not forwarding the path, not returning 0 on success,
+    // or swallowing the source's errno, and path validation being skipped.
+    #[test]
+    fn unlink_deletes_via_the_source_and_validates_the_path() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            UNLINK_NUMBER,
+            MESSAGE_PAGE,
+            b"OLD.TXT".len(),
+            0,
+            0,
+            b"OLD.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.unlinks, 1);
+        assert_eq!(source.seen_path.as_deref(), Some(b"OLD.TXT".as_slice()));
+
+        for (a0, a1, content, expected) in [
+            (MESSAGE_PAGE, 0, b"OLD.TXT".as_slice(), EINVAL),
+            (
+                MESSAGE_PAGE,
+                MAX_PATH_LEN + 1,
+                b"OLD.TXT".as_slice(),
+                EINVAL,
+            ),
+            (0x40_000, 7, b"OLD.TXT".as_slice(), EFAULT),
+            (MESSAGE_PAGE, 3, b"A\xffB".as_slice(), EINVAL),
+        ] {
+            let mut source = FileSource::serving(b"");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                UNLINK_NUMBER,
+                a0,
+                a1,
+                0,
+                0,
+                content,
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), expected as usize);
+            assert_eq!(source.unlinks, 0);
+        }
+
+        let mut source = FileSource::failing(ENOENT);
+        let (context, flow) = dispatch_numbered_file_fixture(
+            UNLINK_NUMBER,
+            MESSAGE_PAGE,
+            7,
+            0,
+            0,
+            b"OLD.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOENT as usize);
+        assert_eq!(source.unlinks, 1);
+    }
+
+    // Catches the default ControlSource::unlink implementation leaking a
+    // successful result: without storage the guest must see ENOSYS.
+    #[test]
+    fn unlink_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            UNLINK_NUMBER,
+            MESSAGE_PAGE,
+            7,
+            0,
+            0,
+            b"OLD.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
     }
 
     // Catches write on a file fd reaching neither write_fd nor the errno

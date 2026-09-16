@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|sched|sched-io|sched-io-partial|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|sched|sched-io|sched-io-partial|shell]
 cargo xtask check
 ```
 
@@ -65,12 +65,14 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 18. QEMU payload-stdinテスト
 19. QEMU fileテスト
 20. QEMU file-fdテスト
-21. QEMU schedテスト
-22. QEMU sched-ioテスト
-23. QEMU sched-io-partialテスト
-24. QEMUシェルテスト
+21. QEMU file-writeテスト
+22. QEMU file-unlinkテスト
+23. QEMU schedテスト
+24. QEMU sched-ioテスト
+25. QEMU sched-io-partialテスト
+26. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順にゲストの22経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順にゲストの23経路を確認します。
 
 ### QEMUの三つの検証モード
 
@@ -95,7 +97,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`sched`、`sched-io`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -109,11 +111,14 @@ MiniContainer control protocolのframeを解析し、Ready、標準出力、標�
 `file-fd`ではfile_fd guestが同じfileを`open`して分割`read`でoffsetを進め、EOF、二重`close`と未割り当てfdの`EBADF`、存在しないfileの`ENOENT`を確かめてから終了コード42を返すことを要求します。
 `file-write`ではfile_write guestが`GUEST.TXT`を`create`して内容を`write`し、閉じてから`open`で読み直して内容を往復させます。
 writable fdへの`read`とread-only fdへの`write`の`EBADF`、directoryへの`create`の`EISDIR`も確かめてから、書いた内容を標準出力へ出し終了コード42を返すことを要求します。
+`file-unlink`ではfile_unlink guestが`UNLINK.TXT`を作成して`unlink`し、削除したentryを指すfdが`EBADF`で失効すること、再`open`と再`unlink`が`ENOENT`、directoryへの`unlink`が`EISDIR`を返すことを確かめます。
+その後、同名で作り直して新しい内容を読み戻し、標準出力へ出して終了コード42を返すことを要求します。
 
 シェルテストは**対話モード**です。
-通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`not-a-command`、`shutdown`を標準入力へ送ります。
+通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`rm Long File Name.txt`、`ls`、`cat Long File Name.txt`、`not-a-command`、`shutdown`を標準入力へ送ります。
 検証部は、各コマンドのエコー、毎回の新しいプロンプト、安定した応答、`hart id: 0`、稼働時間とティックとメモリー統計の数値形式、最後の終了ステータス0を要求します。
-最初のプロンプト以降を順序付きの記録として読み、`help`が返す六行を含めて各行の位置を検査します。
+`rm`後の`ls`が削除したfileを列挙しないこと、再`cat`が`virtio: file not found`を返すことも、逐行照合で確認します。
+最初のプロンプト以降を順序付きの記録として読み、`help`が返す七行を含めて各行の位置を検査します。
 応答の並べ替え、プロンプトの重複、`minios> helper`のような前方一致、途中の予期しない行は失敗です。
 末尾の空行だけは許可します。
 この記録から、UARTの送受信、パーサー、タイマー、アロケーター、SBIリセットを同じQEMUセッション内で検査できます。
@@ -172,14 +177,15 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 32. QEMU file test
 33. QEMU file-fd test
 34. QEMU file-write test
-35. QEMU sched test
-36. QEMU sched-io test
-37. QEMU sched-io-partial test
-38. QEMU shell test
+35. QEMU file-unlink test
+36. QEMU sched test
+37. QEMU sched-io test
+38. QEMU sched-io-partial test
+39. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 38 phases`を表示します。
+全段階に成功すると`summary: PASSED all 39 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -214,12 +220,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/38] cargo fmt --all -- --check
-phase 1/38 passed (elapsed: ...s)
+[1/39] cargo fmt --all -- --check
+phase 1/39 passed (elapsed: ...s)
 ...
-[38/38] QEMU shell test
-phase 38/38 passed (elapsed: ...s)
-summary: PASSED all 38 phases (elapsed: ...s)
+[39/39] QEMU shell test
+phase 39/39 passed (elapsed: ...s)
+summary: PASSED all 39 phases (elapsed: ...s)
 ```
 
 この実行例の段階数は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

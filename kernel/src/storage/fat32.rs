@@ -73,12 +73,23 @@ pub struct FileDesc {
     dir_index: u32,
 }
 
-/// directory走査中のentryの物理位置。`cluster`はrecordを含むcluster、
+#[cfg(not(target_arch = "riscv32"))]
+impl FileDesc {
+    /// このfileのdir entryがある物理位置 `(dir_cluster, dir_index)`。
+    /// `unlink`したentryを指すfdを失効させる照合へ使う。
+    pub const fn dir_location(&self) -> (u32, u32) {
+        (self.dir_cluster, self.dir_index)
+    }
+}
+
+/// directory走査中のentryの物理位置。`dir_head`はそのentryを含む
+/// directory chainの先頭cluster、`cluster`はrecordを含むcluster、
 /// `index`はそのcluster内のrecord番号（`sector * 16 + record`）。
 /// RV32はlocをwrite-backへ使わないため、fieldの未読は許容する。
 #[cfg_attr(target_arch = "riscv32", allow(dead_code))]
 #[derive(Clone, Copy)]
 struct DirLoc {
+    dir_head: u32,
     cluster: u32,
     index: u32,
 }
@@ -474,6 +485,7 @@ impl<R: SectorReader> Fat32<R> {
                     if let Some(mut entry) = parse_dir_entry(record) {
                         lfn.apply(&mut entry, record);
                         let loc = DirLoc {
+                            dir_head: dir_cluster,
                             cluster,
                             index: sector_in_cluster as u32 * 16 + offset as u32 / 32,
                         };
@@ -948,6 +960,165 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         self.reader
             .write_sector(lba, scratch)
             .map_err(FatError::Read)
+    }
+
+    /// `path`が示すfileを削除する。dir entryとその直前の連続LFN record列を
+    /// `0xe5`へ書き換え、fileのcluster chainを解放する。directoryは
+    /// `IsDirectory`として拒否し、cluster chainが破損していれば何も
+    /// 書かずに`CorruptChain`で失敗する。
+    /// 戻り値は削除したentryの物理位置 `(dir_cluster, dir_index)` で、
+    /// callerはこのentryを指すfdの失効照合へ使う。
+    pub fn unlink_file(&mut self, path: &str) -> Result<(u32, u32), FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        let (entry, loc) = self.resolve_path(path, &mut scratch)?;
+        if entry.directory {
+            return Err(FatError::IsDirectory);
+        }
+        // chainが破損しているなら、entryもFATも触らずに失敗する。
+        if entry.first_cluster != 0 {
+            if !self.is_data_cluster(entry.first_cluster) {
+                return Err(FatError::CorruptChain);
+            }
+            self.chain_tail(entry.first_cluster, &mut scratch)?;
+        }
+        // entryの直前にある連続LFN record列から消し始める。`0xe5`は
+        // `find_free_dir_slot`が再利用するため、slotはすぐ回収される。
+        let start = self.lfn_run_start(&loc, &mut scratch)?;
+        self.mark_deleted_range(loc.dir_head, start, (loc.cluster, loc.index), &mut scratch)?;
+        self.free_chain(entry.first_cluster, &mut scratch)?;
+        Ok((loc.cluster, loc.index))
+    }
+
+    /// `loc`のentry直前に並ぶ連続LFN record列の先頭位置を返す。
+    /// LFN recordが無ければentry自身の位置を返す。LFN runはclusterを
+    /// またぎ得るため、entryを含むdir chainの先頭からrecordを辿る。
+    fn lfn_run_start(
+        &mut self,
+        loc: &DirLoc,
+        scratch: &mut [u8; 512],
+    ) -> Result<(u32, u32), FatError<R::Error>> {
+        let mut cluster = loc.dir_head;
+        let mut run: Option<(u32, u32)> = None;
+        let mut clusters_read = 0;
+        loop {
+            if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
+                return Err(FatError::CorruptChain);
+            }
+            for sector in 0..self.sectors_per_cluster as u32 {
+                let lba = self.data_sector_lba(cluster, sector)?;
+                self.reader
+                    .read_sector(lba, scratch)
+                    .map_err(FatError::Read)?;
+                for record in 0..16u32 {
+                    let index = sector * 16 + record;
+                    if cluster == loc.cluster && index == loc.index {
+                        return Ok(run.unwrap_or((cluster, index)));
+                    }
+                    let offset = record as usize * 32;
+                    match scratch[offset] {
+                        // resolve_pathが見つけたentryの手前に終端があるのは破損。
+                        0x00 => return Err(FatError::CorruptChain),
+                        // deleted recordは`walk_dir`と同じくLFN対応を切る。
+                        0xe5 => run = None,
+                        _ => {
+                            if scratch[offset + 11] == 0x0f {
+                                if run.is_none() {
+                                    run = Some((cluster, index));
+                                }
+                            } else {
+                                run = None;
+                            }
+                        }
+                    }
+                }
+            }
+            clusters_read += 1;
+            cluster = match self.next_cluster(cluster, scratch)? {
+                Some(next) => next,
+                None => return Err(FatError::CorruptChain),
+            };
+        }
+    }
+
+    /// dir chain順で`start`から`end`（両端含む）までの全recordの先頭
+    /// byteを`0xe5`へ書き換える。`start`/`end`は`(cluster, index)`で、
+    /// indexはcluster内のrecord番号である。
+    fn mark_deleted_range(
+        &mut self,
+        dir_head: u32,
+        start: (u32, u32),
+        end: (u32, u32),
+        scratch: &mut [u8; 512],
+    ) -> Result<(), FatError<R::Error>> {
+        let mut cluster = dir_head;
+        let mut marking = false;
+        let mut clusters_read = 0;
+        loop {
+            if !self.is_data_cluster(cluster) || clusters_read >= self.data_cluster_count {
+                return Err(FatError::CorruptChain);
+            }
+            for sector in 0..self.sectors_per_cluster as u32 {
+                let lba = self.data_sector_lba(cluster, sector)?;
+                self.reader
+                    .read_sector(lba, scratch)
+                    .map_err(FatError::Read)?;
+                let mut dirty = false;
+                for record in 0..16u32 {
+                    let index = sector * 16 + record;
+                    if cluster == start.0 && index == start.1 {
+                        marking = true;
+                    }
+                    if marking {
+                        scratch[record as usize * 32] = 0xe5;
+                        dirty = true;
+                        if cluster == end.0 && index == end.1 {
+                            self.reader
+                                .write_sector(lba, scratch)
+                                .map_err(FatError::Read)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                if dirty {
+                    self.reader
+                        .write_sector(lba, scratch)
+                        .map_err(FatError::Read)?;
+                }
+            }
+            clusters_read += 1;
+            cluster = match self.next_cluster(cluster, scratch)? {
+                Some(next) => next,
+                None => return Err(FatError::CorruptChain),
+            };
+        }
+    }
+
+    /// `first`から続くchainの全FAT entryを0（free）へ戻す。
+    /// `first == 0`（空file）は何もしない。callerは`chain_tail`等で
+    /// chain健全性を先に検証しておくこと。
+    fn free_chain(
+        &mut self,
+        first: u32,
+        scratch: &mut [u8; 512],
+    ) -> Result<(), FatError<R::Error>> {
+        if first == 0 {
+            return Ok(());
+        }
+        let mut cluster = first;
+        let mut freed = 0u64;
+        loop {
+            // 次を読んでから0を書く。0はfree印なので書いた後では辿れない。
+            let next = self.next_cluster(cluster, scratch)?;
+            self.set_fat_entry(cluster, 0, scratch)?;
+            freed += 1;
+            if freed > self.data_cluster_count as u64 {
+                return Err(FatError::CorruptChain);
+            }
+            match next {
+                Some(next) => cluster = next,
+                None => return Ok(()),
+            }
+        }
     }
 }
 
@@ -2444,5 +2615,189 @@ mod tests {
             fs.write_range(&mut desc, 0, b"x"),
             Err(FatError::NoSpace)
         ));
+    }
+
+    /// rootに`Long File Name.txt`（chain 4→5）を持つwritable fixture。
+    /// LFN record 2個とshort entryがindex 0..=2に並び、index 3は終端。
+    /// cluster 6以降はfree。
+    fn mounted_unlink_lfn_fixture() -> Fat32<MemoryReader<7>> {
+        let mut fat = writable_fat();
+        write_fat_entry(&mut fat, 4, 5);
+
+        let mut root = [0; 512];
+        write_lfn_records(&mut root, 0, "Long File Name.txt", b"LONGFI~1TXT");
+        write_directory_entry(&mut root, 2, b"LONGFI~1TXT", 0x20, 4, 13);
+
+        let mut data_a = [0; 512];
+        data_a[..7].copy_from_slice(b"long da");
+        let mut data_b = [0; 512];
+        data_b[..6].copy_from_slice(b"ta end");
+
+        Fat32::mount(MemoryReader::with_sectors([
+            (0, writable_boot_sector()),
+            (32, fat),
+            (33, root),
+            (34, [0; 512]),
+            (35, data_a),
+            (36, data_b),
+            (37, [0; 512]),
+        ]))
+        .unwrap()
+    }
+
+    // Catches unlink failing to delete the LFN records, leaking the
+    // cluster chain, or leaving the deleted name resolvable.
+    #[test]
+    fn unlink_marks_the_entry_and_lfn_records_deleted_and_frees_the_chain() {
+        let mut fs = mounted_unlink_lfn_fixture();
+        assert_eq!(fs.unlink_file("Long File Name.txt").unwrap(), (2, 2));
+
+        // LFN record 2個とshort entryが全て`0xe5`、終端はそのまま残る。
+        let root = sector_of(&fs, 33);
+        assert_eq!(root[0], 0xe5);
+        assert_eq!(root[32], 0xe5);
+        assert_eq!(root[64], 0xe5);
+        assert_eq!(root[96], 0x00);
+
+        // chain 4→5は解放され、rootのcluster 2は使われたまま。
+        let fat = sector_of(&fs, 32);
+        assert_eq!(read_u32(fat, 4 * 4) & 0x0fff_ffff, 0);
+        assert_eq!(read_u32(fat, 5 * 4) & 0x0fff_ffff, 0);
+        assert_eq!(read_u32(fat, 2 * 4) & 0x0fff_ffff, 0x0fff_ffff);
+
+        // listingから消え、LFN名と8.3 aliasの両方が解決不能になる。
+        let mut names = Vec::new();
+        fs.for_each_root_entry(|entry| names.push(String::from(entry.name())))
+            .unwrap();
+        assert!(names.is_empty());
+        assert!(matches!(
+            fs.open_file("LONGFI~1.TXT"),
+            Err(FatError::NotFound)
+        ));
+        assert!(matches!(
+            fs.unlink_file("Long File Name.txt"),
+            Err(FatError::NotFound)
+        ));
+    }
+
+    // Catches unlink leaving the freed slot or clusters unavailable to a
+    // later create.
+    #[test]
+    fn unlink_frees_the_chain_and_the_slot_is_reused() {
+        let mut fs = mounted_writable_fixture();
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, &[0xab; 700]).unwrap(), 700);
+        // write_rangeの検証と同じく、chainは3→6へ割り当てられた。
+        assert_eq!(fs.unlink_file("new.txt").unwrap(), (2, 2));
+        let fat = sector_of(&fs, 32);
+        assert_eq!(read_u32(fat, 3 * 4) & 0x0fff_ffff, 0);
+        assert_eq!(read_u32(fat, 6 * 4) & 0x0fff_ffff, 0);
+
+        // 同じ名で作り直すと削除跡slotを再利用し、解放されたclusterが
+        // 再び割り当てられる。
+        let mut recreated = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(recreated.dir_location(), (2, 2));
+        assert_eq!(fs.write_range(&mut recreated, 0, b"ok").unwrap(), 2);
+        assert_eq!(recreated.first_cluster, 3);
+        let mut buf = [0; 4];
+        let read_back = fs.open_file("NEW.TXT").unwrap();
+        assert_eq!(fs.read_range(&read_back, 0, &mut buf).unwrap(), 2);
+        assert_eq!(&buf[..2], b"ok");
+    }
+
+    // Catches unlink deleting a directory, reporting success on a
+    // missing path, or marking the entry before validating the chain.
+    #[test]
+    fn unlink_rejects_directories_and_corrupt_chains_before_writing() {
+        let mut fs = mounted_writable_fixture();
+        assert!(matches!(
+            fs.unlink_file("SUBDIR"),
+            Err(FatError::IsDirectory)
+        ));
+        assert!(matches!(
+            fs.unlink_file("MISSING.TXT"),
+            Err(FatError::NotFound)
+        ));
+        // 拒否はdiskを変えない。
+        assert_eq!(sector_of(&fs, 33)[0], b'H');
+
+        // chainが自身へloopするfileは、entryを残したままCorruptChainで
+        // 失敗する。
+        let mut fat = writable_fat();
+        write_fat_entry(&mut fat, 4, 4);
+        let mut root = [0; 512];
+        write_directory_entry(&mut root, 0, b"LOOP    TXT", 0x20, 4, 5);
+        let mut fs = Fat32::mount(MemoryReader::with_sectors([
+            (0, writable_boot_sector()),
+            (32, fat),
+            (33, root),
+        ]))
+        .unwrap();
+        assert!(matches!(
+            fs.unlink_file("LOOP.TXT"),
+            Err(FatError::CorruptChain)
+        ));
+        assert_eq!(sector_of(&fs, 33)[0], b'L');
+    }
+
+    // Catches unlink treating an empty file's cluster 0 as a chain start.
+    #[test]
+    fn unlink_removes_an_empty_file_without_touching_the_fat() {
+        let mut fs = mounted_writable_fixture();
+        fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(fs.unlink_file("NEW.TXT").unwrap(), (2, 2));
+        assert!(matches!(fs.open_file("NEW.TXT"), Err(FatError::NotFound)));
+        // 空fileはclusterを持たないのでFATは無変更のまま。
+        let fat = sector_of(&fs, 32);
+        assert_eq!(read_u32(fat, 3 * 4) & 0x0fff_ffff, 0);
+    }
+
+    // Catches unlink stopping at the cluster boundary and leaving an LFN
+    // record reachable again through the short name.
+    #[test]
+    fn unlink_deletes_an_lfn_run_spanning_a_cluster_boundary() {
+        let mut fat = writable_fat();
+        write_fat_entry(&mut fat, 2, 3);
+        write_fat_entry(&mut fat, 3, 0x0fff_ffff);
+
+        // "Long File Name.txt"のLFN recordはdisk上[seq2|0x40, seq1]の順。
+        let mut lfn_scratch = [0; 512];
+        write_lfn_records(&mut lfn_scratch, 0, "Long File Name.txt", b"LONGFI~1TXT");
+
+        // cluster 2はfiller 15個とseq2 record、cluster 3はseq1 recordと
+        // short entryと終端。LFN runはclusterをまたぐ。
+        let mut first = [0; 512];
+        for index in 0..15u32 {
+            let mut name = [b' '; 11];
+            name[..6].copy_from_slice(b"FILE00");
+            name[4] = b'0' + (index / 10) as u8;
+            name[5] = b'0' + (index % 10) as u8;
+            write_directory_entry(&mut first, index as usize, &name, 0x20, 10 + index, 0);
+        }
+        first[15 * 32..16 * 32].copy_from_slice(&lfn_scratch[..32]);
+
+        let mut second = [0; 512];
+        second[..32].copy_from_slice(&lfn_scratch[32..64]);
+        write_directory_entry(&mut second, 1, b"LONGFI~1TXT", 0x20, 4, 13);
+
+        let mut fs = Fat32::mount(MemoryReader::with_sectors([
+            (0, writable_boot_sector()),
+            (32, fat),
+            (33, first),
+            (34, second),
+            (35, [0; 512]),
+        ]))
+        .unwrap();
+
+        assert_eq!(fs.unlink_file("LONGFI~1.TXT").unwrap(), (3, 1));
+        // seq2 recordはcluster 2側で消え、filler entryは残る。
+        assert_eq!(sector_of(&fs, 33)[15 * 32], 0xe5);
+        assert_eq!(sector_of(&fs, 33)[0], b'F');
+        // seq1 recordとshort entryはcluster 3側で消える。
+        let second = sector_of(&fs, 34);
+        assert_eq!(second[0], 0xe5);
+        assert_eq!(second[32], 0xe5);
+        assert_eq!(second[64], 0x00);
+        assert_eq!(read_u32(sector_of(&fs, 32), 4 * 4) & 0x0fff_ffff, 0);
     }
 }
