@@ -100,14 +100,15 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 ### 複数processとスケジューリング
 
-- `process.rs`：再入可能な実行単位`Process`と、最大4 slotのround-robin`ProcessTable`を定義します。
-  各`Process`は`LoadedImage`（user address spaceとその所有frame）、4ページの専用kernel trap stack、前回中断時の`UserContext`、file descriptor tableを所有します。
+- `process.rs`：再入可能な実行単位`Process`と、heap-backed `Vec`上のround-robin`ProcessTable`を定義します。
+  各`Process`は`LoadedImage`（user address spaceとその所有frame）、4ページの専用kernel trap stack、前回中断時の`UserContext`、file descriptor table、採番されたpidを所有します。
   allocatorやframe memoryへの参照は保持しないため、生存中のprocess同士がborrowを共有しません。
-  fd tableはprocess内に閉じるため他processのfdを構造的に参照できず、slotから`take`されたprocessとともに死ぬので、終了時の明示的なclose処理は要りません。
-- manifest v2のbundleは`image=`sectionごとに`elf=<offset>,<len>`で共有ELF領域内のrangeを宣言し、slot indexがmanifest順のpidになります。
+  fd tableはprocess内に閉じるため他processのfdを構造的に参照できず、`take`されたprocessとともに死ぬので、終了時の明示的なclose処理は要りません。
+  pidは`insert`のたびに`next_pid`から単調採番され再利用されないため、終了frameが参照するpidと後続processのpidは衝突しません。tableは`Vec`なのでメモリーはlive process数に比例し、admission capはmanifest上限の`MAX_PROCS`です。
+- manifest v2のbundleは`image=`sectionごとに`elf=<offset>,<len>`で共有ELF領域内のrangeを宣言し、初回spawn列はmanifest順にpid 0から採番されます。
 - U-mode実行中のsupervisor timer割り込みは`user/trap.rs`が`TrapAction::Timer`へ分類し、trap handlerはtickを再アームしてから`Preempted`のoutcomeでkernelへ戻ります。
   切り替えはtrap内ではなく`run_boot_payload`のdispatch loopが行うため、kernel trap stackは常に「実行中process専用」の不変条件を保ちます。
-- processの`exit`またはfatal trapでslotを取り除き、fd tableごと全所有frameを回収してから次を選びます。
+- processの`exit`またはfatal trapでtableから取り除き、fd tableごと全所有frameを回収してから次を選びます。
   manifest v2では終了を`PROC_EXIT` frame（pidと終了code）で個別に通知し、v1の単一imageでは従来の`EXIT` frameを維持します。
 - `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
   processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
