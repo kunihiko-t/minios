@@ -53,6 +53,8 @@ const DESC_NEXT: u16 = 1;
 const DESC_WRITE: u16 = 2;
 
 const BLK_REQUEST_IN: u32 = 0;
+#[cfg(not(target_arch = "riscv32"))]
+const BLK_REQUEST_OUT: u32 = 1;
 const BLK_STATUS_OK: u8 = 0;
 
 /// device応答を待つpollの上限。QEMU上では即応答するので、これは
@@ -259,13 +261,22 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
         self.capacity
     }
 
-    fn read_sector_into(&mut self, lba: u32) -> Result<(), VirtioError> {
+    /// request header + data + statusの3-desc chainをqueueへ流し、
+    /// used ringの完了をboundedに待つ。`request_type`はIN(読み)または
+    /// OUT(書き)で、OUTの場合はdata descをdevice-readableにするため
+    /// `DESC_WRITE`を外す。
+    fn submit_sector_request(&mut self, lba: u32, request_type: u32) -> Result<(), VirtioError> {
         let base = self.region.base();
+        let data_flags = if request_type == BLK_REQUEST_IN {
+            DESC_NEXT | DESC_WRITE
+        } else {
+            DESC_NEXT
+        };
         unsafe {
             core::ptr::write_volatile(
                 &raw mut self.region.request,
                 RequestHeader {
-                    request_type: BLK_REQUEST_IN,
+                    request_type,
                     reserved: 0,
                     sector: u64::from(lba),
                 },
@@ -284,7 +295,7 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
                 Desc {
                     addr: (base + offset_of!(VirtioRegion, data)) as u64,
                     len: 512,
-                    flags: DESC_NEXT | DESC_WRITE,
+                    flags: data_flags,
                     next: 2,
                 },
             );
@@ -358,9 +369,20 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> SectorReader for VirtioBlk<M, 
         if u64::from(lba) >= self.capacity {
             return Err(VirtioError::BadLba);
         }
-        self.read_sector_into(lba)?;
+        self.submit_sector_request(lba, BLK_REQUEST_IN)?;
         destination.copy_from_slice(&self.region.data);
         Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> crate::storage::SectorWriter for VirtioBlk<M, R> {
+    fn write_sector(&mut self, lba: u32, source: &[u8; 512]) -> Result<(), VirtioError> {
+        if u64::from(lba) >= self.capacity {
+            return Err(VirtioError::BadLba);
+        }
+        self.region.data.copy_from_slice(source);
+        self.submit_sector_request(lba, BLK_REQUEST_OUT)
     }
 }
 

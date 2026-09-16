@@ -219,6 +219,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::PayloadStdin) => "QEMU payload-stdin test".to_owned(),
             Self::Qemu(qemu::TestKind::File) => "QEMU file test".to_owned(),
             Self::Qemu(qemu::TestKind::FileFd) => "QEMU file-fd test".to_owned(),
+            Self::Qemu(qemu::TestKind::FileWrite) => "QEMU file-write test".to_owned(),
             Self::Qemu(qemu::TestKind::Sched) => "QEMU sched test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIo) => "QEMU sched-io test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIoPartial) => "QEMU sched-io-partial test".to_owned(),
@@ -250,6 +251,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::PayloadStdin),
         Phase::Qemu(qemu::TestKind::File),
         Phase::Qemu(qemu::TestKind::FileFd),
+        Phase::Qemu(qemu::TestKind::FileWrite),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -292,6 +294,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::PayloadStdin),
         Phase::Qemu(qemu::TestKind::File),
         Phase::Qemu(qemu::TestKind::FileFd),
+        Phase::Qemu(qemu::TestKind::FileWrite),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -413,6 +416,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         }
         Command::Test(TestFilter::File) => Some(vec![Phase::Qemu(qemu::TestKind::File)]),
         Command::Test(TestFilter::FileFd) => Some(vec![Phase::Qemu(qemu::TestKind::FileFd)]),
+        Command::Test(TestFilter::FileWrite) => Some(vec![Phase::Qemu(qemu::TestKind::FileWrite)]),
         Command::Test(TestFilter::Sched) => Some(vec![Phase::Qemu(qemu::TestKind::Sched)]),
         Command::Test(TestFilter::SchedIo) => Some(vec![Phase::Qemu(qemu::TestKind::SchedIo)]),
         Command::Test(TestFilter::SchedIoPartial) => {
@@ -495,6 +499,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::PayloadStdin),
                 Phase::Qemu(qemu::TestKind::File),
                 Phase::Qemu(qemu::TestKind::FileFd),
+                Phase::Qemu(qemu::TestKind::FileWrite),
                 Phase::Qemu(qemu::TestKind::Sched),
                 Phase::Qemu(qemu::TestKind::SchedIo),
                 Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -559,6 +564,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::PayloadStdin),
             Phase::Qemu(qemu::TestKind::File),
             Phase::Qemu(qemu::TestKind::FileFd),
+            Phase::Qemu(qemu::TestKind::FileWrite),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -616,13 +622,14 @@ mod tests {
             Phase::Qemu(qemu::TestKind::PayloadStdin),
             Phase::Qemu(qemu::TestKind::File),
             Phase::Qemu(qemu::TestKind::FileFd),
+            Phase::Qemu(qemu::TestKind::FileWrite),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 22], expected);
-        assert_eq!(plan.len(), 37);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 23], expected);
+        assert_eq!(plan.len(), 38);
     }
 
     #[test]

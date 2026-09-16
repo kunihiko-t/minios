@@ -85,16 +85,31 @@ impl ControlSource for UartControlSource<'_> {
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         let desc = session.open_file(path).map_err(fat_errno)?;
         // Safety: 同上。借用はこの呼び出し内で完結する。
-        unsafe { crate::alloc_file_fd(desc) }
+        unsafe { crate::alloc_file_fd(desc, false) }
+    }
+
+    /// guestの`create`を遅延mount済みのstorage sessionへ委譲し、
+    /// writableなfdを割り当てる。
+    #[cfg(target_arch = "riscv64")]
+    fn create_file(&mut self, path: &str) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let desc = session.create_file(path).map_err(fat_errno)?;
+        // Safety: 同上。借用はこの呼び出し内で完結する。
+        unsafe { crate::alloc_file_fd(desc, true) }
     }
 
     /// guestの`read`を開いたfdの現在offsetから読み、offsetを進める。
+    /// writableなfdへのreadは`EBADF`で拒否する。
     #[cfg(target_arch = "riscv64")]
     fn read_fd(&mut self, fd: usize, output: &mut [u8]) -> Result<usize, isize> {
         use minios_abi::syscall::EBADF;
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        if entry.writable {
+            return Err(EBADF);
+        }
         // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         let count = session
@@ -115,6 +130,26 @@ impl ControlSource for UartControlSource<'_> {
         } else {
             Err(EBADF)
         }
+    }
+
+    /// guestの`write`をwritableなfdの現在offsetから書き、offsetを進める。
+    /// read-onlyのfdへのwriteは`EBADF`で拒否する。
+    #[cfg(target_arch = "riscv64")]
+    fn write_fd(&mut self, fd: usize, data: &[u8]) -> Result<usize, isize> {
+        use minios_abi::syscall::EBADF;
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        if !entry.writable {
+            return Err(EBADF);
+        }
+        // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let count = session
+            .write_range(&mut entry.desc, entry.offset, data)
+            .map_err(fat_errno)?;
+        entry.offset += count as u64;
+        Ok(count)
     }
 }
 
@@ -143,7 +178,8 @@ fn fat_errno(
         FatError::NotFound => ENOENT,
         FatError::IsDirectory => EISDIR,
         FatError::NotDirectory => ENOTDIR,
-        FatError::InvalidName => EINVAL,
+        FatError::InvalidName | FatError::InvalidOffset => EINVAL,
+        FatError::NoSpace => minios_abi::syscall::ENOSPC,
         FatError::Read(_)
         | FatError::Unsupported
         | FatError::InvalidFilesystem

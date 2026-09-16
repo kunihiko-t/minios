@@ -484,6 +484,12 @@ fn print_fat_error<E>(prefix: &str, error: crate::storage::fat32::FatError<E>) {
         crate::storage::fat32::FatError::CorruptChain => {
             crate::println!("{prefix}: corrupt cluster chain");
         }
+        crate::storage::fat32::FatError::NoSpace => {
+            crate::println!("{prefix}: no space left");
+        }
+        crate::storage::fat32::FatError::InvalidOffset => {
+            crate::println!("{prefix}: invalid offset");
+        }
     }
 }
 
