@@ -107,15 +107,15 @@ impl ControlSource for UartControlSource<'_> {
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
-        if entry.writable {
+        if entry.writable() {
             return Err(EBADF);
         }
         // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         let count = session
-            .read_range(&entry.desc, entry.offset, output)
+            .read_range(entry.desc(), entry.offset(), output)
             .map_err(fat_errno)?;
-        entry.offset += count as u64;
+        entry.advance(count as u64);
         Ok(count)
     }
 
@@ -156,16 +156,16 @@ impl ControlSource for UartControlSource<'_> {
         let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
         let base: u64 = match whence {
             SEEK_SET => 0,
-            SEEK_CUR => entry.offset,
-            SEEK_END => entry.desc.size() as u64,
+            SEEK_CUR => entry.offset(),
+            SEEK_END => entry.desc().size() as u64,
             _ => return Err(EINVAL),
         };
         let next = base as i128 + offset as i128;
         if next < 0 || next > u64::MAX as i128 {
             return Err(EINVAL);
         }
-        entry.offset = next as u64;
-        Ok(entry.offset)
+        entry.set_offset(next as u64);
+        Ok(entry.offset())
     }
 
     /// guestの`pread`をfdのfileの明示offsetから読む。fd保持のoffsetと
@@ -176,13 +176,13 @@ impl ControlSource for UartControlSource<'_> {
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
-        if entry.writable {
+        if entry.writable() {
             return Err(EBADF);
         }
         // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         session
-            .read_range(&entry.desc, offset, output)
+            .read_range(entry.desc(), offset, output)
             .map_err(fat_errno)
     }
 
@@ -195,13 +195,13 @@ impl ControlSource for UartControlSource<'_> {
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
-        if !entry.writable {
+        if !entry.writable() {
             return Err(EBADF);
         }
         // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         session
-            .write_range(&mut entry.desc, offset, data)
+            .write_range(entry.desc_mut(), offset, data)
             .map_err(fat_errno)
     }
 
@@ -213,15 +213,16 @@ impl ControlSource for UartControlSource<'_> {
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
-        if !entry.writable {
+        if !entry.writable() {
             return Err(EBADF);
         }
         // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let offset = entry.offset();
         let count = session
-            .write_range(&mut entry.desc, entry.offset, data)
+            .write_range(entry.desc_mut(), offset, data)
             .map_err(fat_errno)?;
-        entry.offset += count as u64;
+        entry.advance(count as u64);
         Ok(count)
     }
 }

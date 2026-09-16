@@ -1567,44 +1567,46 @@ unsafe fn borrow_file_storage() -> Result<&'static mut shell::Rv64Storage, shell
     Ok(storage.as_mut().expect("mounted above"))
 }
 
-/// 開いたfileのfd slot。`desc`はFAT32の位置記述子、`offset`は次に読み
-/// 書きするbyte位置、`writable`は`create`で開かれたfdを示す。fdは
-/// read専用またはwrite専用であり、両方は許さない。
+/// 現在trap中のprocess。fd tableは`Process`が所有するため、handlerは
+/// このpointer経由でだけ現在processのfdへ触れる。run loopが
+/// `__run_user`の直前に設定し、復帰後にnullへ戻す。
 #[cfg(target_arch = "riscv64")]
-#[derive(Clone, Copy)]
-struct FileFd {
-    desc: minios_kernel::storage::fat32::FileDesc,
-    offset: u64,
-    writable: bool,
-}
+static mut CURRENT_PROC: *mut Process = core::ptr::null_mut();
 
-/// processごとのfd table。slot indexはpid、fd番号は`FIRST_FILE_FD`からの
-/// 連番であり、他processのfdを構造的に参照できない。
+/// 実行中のprocess table。`unlink`のfd失効は全processのfd tableを走査
+/// する必要があるため、handlerはこのpointer経由でだけtableへ触れる。
+/// run loopがdispatch開始前に設定し、終了後にnullへ戻す。
 #[cfg(target_arch = "riscv64")]
-static mut FILE_FDS: [[Option<FileFd>; minios_abi::syscall::MAX_OPEN_FILES]; MAX_PROCS] =
-    [[const { None }; minios_abi::syscall::MAX_OPEN_FILES]; MAX_PROCS];
-
-/// 現在trap中のprocess pid。run loopが`__run_user`の直前に設定し、
-/// handlerはfdをpidへ結び付けるためにだけ読む。
-#[cfg(target_arch = "riscv64")]
-static mut CURRENT_PID: usize = usize::MAX;
+static mut PROC_TABLE_PTR: *mut ProcessTable = core::ptr::null_mut();
 
 /// run loopが`__run_user`の直前と復帰後に呼び、fd opの対象processを指す。
-/// `usize::MAX`は「trap中のprocessなし」を意味する。
+/// `null`は「trap中のprocessなし」を意味する。
 ///
 /// # Safety
 ///
 /// `USER_SYSCALL_PROBE_*`と同じ契約: 実行窓のhandlerだけが読む値であり、
-/// kernelへ戻るたびに`usize::MAX`へ戻すこと。
+/// kernelへ戻るたびにnullへ戻すこと。
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
-unsafe fn set_current_pid(pid: usize) {
-    unsafe { *&raw mut CURRENT_PID = pid };
+unsafe fn set_current_process(process: *mut Process) {
+    unsafe { *&raw mut CURRENT_PROC = process };
+}
+
+/// run loopがdispatch loopの開始前と終了後に呼び、fd失効の走査対象を指す。
+///
+/// # Safety
+///
+/// `set_current_process`と同じ契約: 実行窓のhandlerだけが読む値であり、
+/// loop終了時にnullへ戻すこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn set_process_table(table: *mut ProcessTable) {
+    unsafe { *&raw mut PROC_TABLE_PTR = table };
 }
 
 /// 現在processへfile記述子を割り当て、fd番号を返す。`writable`のfdは
 /// `write`だけを受理し、それ以外のfdは`read`だけを受理する。
-/// pid未設定なら`ENOSYS`、空きslotがなければ`EMFILE`を返す。
+/// process未設定なら`ENOSYS`、空きslotがなければ`EMFILE`を返す。
 ///
 /// # Safety
 ///
@@ -1615,38 +1617,23 @@ unsafe fn alloc_file_fd(
     desc: minios_kernel::storage::fat32::FileDesc,
     writable: bool,
 ) -> Result<usize, isize> {
-    let pid = unsafe { *&raw const CURRENT_PID };
-    if pid >= MAX_PROCS {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let Some(process) = (unsafe { process.as_mut() }) else {
         return Err(minios_abi::syscall::ENOSYS);
-    }
-    let slots = unsafe { &mut *&raw mut FILE_FDS };
-    let slot = slots[pid]
-        .iter()
-        .position(Option::is_none)
-        .ok_or(minios_abi::syscall::EMFILE)?;
-    slots[pid][slot] = Some(FileFd {
-        desc,
-        offset: 0,
-        writable,
-    });
-    Ok(minios_abi::syscall::FIRST_FILE_FD + slot)
+    };
+    process.alloc_fd(desc, writable)
 }
 
-/// 現在processの`fd`に対応するslotを借りる。未割り当てやpid未設定なら`None`。
+/// 現在processの`fd`に対応するslotを借りる。未割り当てやprocess未設定なら`None`。
 ///
 /// # Safety
 ///
 /// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
-unsafe fn file_fd_mut(fd: usize) -> Option<&'static mut FileFd> {
-    let pid = unsafe { *&raw const CURRENT_PID };
-    let slot = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD)?;
-    if pid >= MAX_PROCS || slot >= minios_abi::syscall::MAX_OPEN_FILES {
-        return None;
-    }
-    let slots = unsafe { &mut *&raw mut FILE_FDS };
-    slots[pid][slot].as_mut()
+unsafe fn file_fd_mut(fd: usize) -> Option<&'static mut minios_kernel::process::FileFd> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    unsafe { process.as_mut() }?.fd_mut(fd)
 }
 
 /// 現在processの`fd`を閉じる。未割り当てなら`false`を返す。
@@ -1657,31 +1644,11 @@ unsafe fn file_fd_mut(fd: usize) -> Option<&'static mut FileFd> {
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
 unsafe fn close_file_fd(fd: usize) -> bool {
-    let pid = unsafe { *&raw const CURRENT_PID };
-    let Some(slot) = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD) else {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let Some(process) = (unsafe { process.as_mut() }) else {
         return false;
     };
-    if pid >= MAX_PROCS || slot >= minios_abi::syscall::MAX_OPEN_FILES {
-        return false;
-    }
-    let slots = unsafe { &mut *&raw mut FILE_FDS };
-    slots[pid][slot].take().is_some()
-}
-
-/// `pid`が開いたままのfdをすべて閉じる。process回収のfunnelから呼び、
-/// 正常終了とfatal終了の両方でfdを解放する。
-///
-/// # Safety
-///
-/// `pid`のprocessが今後trapへ入らないことが確定した後にだけ呼ぶこと。
-#[cfg(target_arch = "riscv64")]
-#[allow(clippy::deref_addrof)]
-unsafe fn close_all_file_fds(pid: usize) {
-    if pid >= MAX_PROCS {
-        return;
-    }
-    let slots = unsafe { &mut *&raw mut FILE_FDS };
-    slots[pid] = [const { None }; minios_abi::syscall::MAX_OPEN_FILES];
+    process.close_fd(fd)
 }
 
 /// `(dir_cluster, dir_index)`のdir entryを指すfdを全processのtableから
@@ -1695,15 +1662,9 @@ unsafe fn close_all_file_fds(pid: usize) {
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
 unsafe fn revoke_file_fds(dir_cluster: u32, dir_index: u32) {
-    let slots = unsafe { &mut *&raw mut FILE_FDS };
-    for proc_slots in slots.iter_mut() {
-        for slot in proc_slots.iter_mut() {
-            if let Some(fd) = slot
-                && fd.desc.dir_location() == (dir_cluster, dir_index)
-            {
-                *slot = None;
-            }
-        }
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    if let Some(table) = unsafe { table.as_mut() } {
+        table.revoke_file_fds(dir_cluster, dir_index);
     }
 }
 
@@ -2343,13 +2304,10 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
 }
 
 /// 終了したprocessをtableから取り出して全所有frameを回収する。
-/// 回収に失敗した場合は一回だけ再試行し、それでも駄目ならpayload全体を中止する。
+/// fd tableはprocess内に閉じるため`take`とともに死ぬ。回収に失敗した
+/// 場合は一回だけ再試行し、それでも駄目ならpayload全体を中止する。
 #[cfg(target_arch = "riscv64")]
 fn reclaim_process_slot(table: &mut ProcessTable, pid: usize, frames: &mut dyn FrameSource) {
-    // Safety: `pid`はtableから取り出され、今後trapへ入らない。
-    unsafe {
-        close_all_file_fds(pid);
-    }
     let Some(mut process) = table.take(pid) else {
         return;
     };
@@ -2469,6 +2427,11 @@ fn run_boot_payload(
         }
     }
 
+    // Safety: fd失効の走査はdispatchのtrap窓からのみ行われ、loop終了時に
+    // nullへ戻す。
+    unsafe {
+        set_process_table(&mut table);
+    }
     let mut sink = control::UartControlSink;
     let mut switches = 0usize;
     let mut failed = 0usize;
@@ -2496,7 +2459,7 @@ fn run_boot_payload(
             USER_SYSCALL_PROBE_MEMORY = memory as *const IdentityFrameStore as usize;
             USER_EXIT_CODE.store(usize::MAX, Ordering::Relaxed);
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_NONE, Ordering::Relaxed);
-            set_current_pid(pid);
+            set_current_process(process);
         }
         // Safety: processがuser address space・連続した専用kernel stack・保存済み
         // contextを所有する。assemblyはkernel satpとboot stackを復元して戻る。
@@ -2514,7 +2477,7 @@ fn run_boot_payload(
             process.reload_context();
             USER_SYSCALL_PROBE_SPACE = 0;
             USER_SYSCALL_PROBE_MEMORY = 0;
-            set_current_pid(usize::MAX);
+            set_current_process(core::ptr::null_mut());
         }
         if last_pid != usize::MAX && last_pid != pid {
             switches += 1;
@@ -2563,6 +2526,7 @@ fn run_boot_payload(
     // guestが開いたstorage sessionを閉じ、queue frameをpoolへ返す。
     // 全processが終了済みでhandlerからの借用は残っていない。
     unsafe {
+        set_process_table(core::ptr::null_mut());
         close_file_storage();
     }
 

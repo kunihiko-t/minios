@@ -101,12 +101,13 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ### 複数processとスケジューリング
 
 - `process.rs`：再入可能な実行単位`Process`と、最大4 slotのround-robin`ProcessTable`を定義します。
-  各`Process`は`LoadedImage`（user address spaceとその所有frame）、4ページの専用kernel trap stack、前回中断時の`UserContext`を所有します。
+  各`Process`は`LoadedImage`（user address spaceとその所有frame）、4ページの専用kernel trap stack、前回中断時の`UserContext`、file descriptor tableを所有します。
   allocatorやframe memoryへの参照は保持しないため、生存中のprocess同士がborrowを共有しません。
+  fd tableはprocess内に閉じるため他processのfdを構造的に参照できず、slotから`take`されたprocessとともに死ぬので、終了時の明示的なclose処理は要りません。
 - manifest v2のbundleは`image=`sectionごとに`elf=<offset>,<len>`で共有ELF領域内のrangeを宣言し、slot indexがmanifest順のpidになります。
 - U-mode実行中のsupervisor timer割り込みは`user/trap.rs`が`TrapAction::Timer`へ分類し、trap handlerはtickを再アームしてから`Preempted`のoutcomeでkernelへ戻ります。
   切り替えはtrap内ではなく`run_boot_payload`のdispatch loopが行うため、kernel trap stackは常に「実行中process専用」の不変条件を保ちます。
-- processの`exit`またはfatal trapでslotを取り除き、全所有frameを回収してから次を選びます。
+- processの`exit`またはfatal trapでslotを取り除き、fd tableごと全所有frameを回収してから次を選びます。
   manifest v2では終了を`PROC_EXIT` frame（pidと終了code）で個別に通知し、v1の単一imageでは従来の`EXIT` frameを維持します。
 - `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
   processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
@@ -199,6 +200,6 @@ IMEM契約は実効32 KiBであり、RV32 buildは`opt-level=z`で収めます�
 queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`として所有し、恒等写像済みのため物理アドレスをそのままdeviceへ渡します。
 `storage::fat32`は`SectorReader`境界で`VirtioBlk`へ差し替わるため、parser本体はRV32経路と共有です。
 書き込み経路（`create_file`、`write_range`、`unlink_file`）は`SectorWriter`境界を追加で要求するため、read-only想定のRV32 SD経路では構成されません。
-`unlink_file`はdir entryと先行する長い名前のrecord列を`0xe5`へ書き換えてcluster chainを解放し、削除したentryを指すfdはkernelが全processから失効させます。
+`unlink_file`はdir entryと先行する長い名前のrecord列を`0xe5`へ書き換えてcluster chainを解放し、削除したentryを指すfdはkernelが`ProcessTable`内の全processから失効させます。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。
