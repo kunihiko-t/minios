@@ -77,6 +77,45 @@ impl ControlSource for UartControlSource<'_> {
             .map_err(fat_errno)?;
         Ok(written)
     }
+
+    /// guestの`open`を遅延mount済みのstorage sessionとpid別fd tableへ委譲する。
+    #[cfg(target_arch = "riscv64")]
+    fn open_file(&mut self, path: &str) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let desc = session.open_file(path).map_err(fat_errno)?;
+        // Safety: 同上。借用はこの呼び出し内で完結する。
+        unsafe { crate::alloc_file_fd(desc) }
+    }
+
+    /// guestの`read`を開いたfdの現在offsetから読み、offsetを進める。
+    #[cfg(target_arch = "riscv64")]
+    fn read_fd(&mut self, fd: usize, output: &mut [u8]) -> Result<usize, isize> {
+        use minios_abi::syscall::EBADF;
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let count = session
+            .read_range(&entry.desc, entry.offset, output)
+            .map_err(fat_errno)?;
+        entry.offset += count as u64;
+        Ok(count)
+    }
+
+    /// guestの`close`をpid別fd tableへ委譲する。
+    #[cfg(target_arch = "riscv64")]
+    fn close_fd(&mut self, fd: usize) -> Result<(), isize> {
+        use minios_abi::syscall::EBADF;
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        if unsafe { crate::close_file_fd(fd) } {
+            Ok(())
+        } else {
+            Err(EBADF)
+        }
+    }
 }
 
 /// probe/mountの失敗をguest向けerrnoへ写像する。

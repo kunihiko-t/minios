@@ -49,6 +49,8 @@ const PAYLOAD_SPAWNED_STDIN_CAT_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=stdin-cat\n";
 const FILE_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-read\n";
+const FILE_FD_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x29\0\0\0MiniOS sched: spawned pid=0 name=file-fd\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
@@ -80,6 +82,7 @@ pub enum TestKind {
     Virtio,
     Payload,
     File,
+    FileFd,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -106,6 +109,7 @@ impl TestKind {
             Self::Virtio => "qemu-test-virtio",
             Self::Payload => unreachable!("the payload test boots the normal kernel"),
             Self::File => unreachable!("the file test boots the normal kernel"),
+            Self::FileFd => unreachable!("the file-fd test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
@@ -134,6 +138,7 @@ impl TestKind {
             Self::Virtio => VIRTIO_MARKER,
             Self::Payload => unreachable!("the payload test verifies raw control frames"),
             Self::File => unreachable!("the file test verifies raw control frames"),
+            Self::FileFd => unreachable!("the file-fd test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
                 unreachable!("the payload-stdin test verifies raw control frames")
@@ -368,6 +373,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         bundle.remove();
         disk.remove();
         return verify_file_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::FileFd {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_fd()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_fd_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Sched {
@@ -1017,6 +1037,16 @@ const FILE_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file-fd検査で期待されるcontrol frame列。guestがopen/分割read/closeと
+/// errno経路を通してから同じ内容を出力する。
+const FILE_FD_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    FILE_FD_SPAWNED_FRAME,
+    FILE_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1051,6 +1081,27 @@ fn verify_file_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+fn verify_file_fd_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_FD_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -1337,6 +1388,11 @@ impl PayloadBundle {
         Self::create_with(payload_file_bundle_bytes(&elf)?)
     }
 
+    fn create_file_fd() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_FD)?;
+        Self::create_with(payload_file_fd_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -1496,6 +1552,13 @@ fn payload_stdin_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// stdoutへ書きexit(42)する。
 fn payload_file_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-read\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-fd検査用bundle: file_fd guestのELFと引数なしmanifestを組み立てる。
+/// guestはopen/分割read/closeを確かめて内容をstdoutへ書きexit(42)する。
+fn payload_file_fd_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-fd\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 

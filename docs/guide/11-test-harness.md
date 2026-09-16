@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|sched|sched-io|sched-io-partial|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|sched|sched-io|sched-io-partial|shell]
 cargo xtask check
 ```
 
@@ -64,12 +64,13 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 17. QEMU payload-argsテスト
 18. QEMU payload-stdinテスト
 19. QEMU fileテスト
-20. QEMU schedテスト
-21. QEMU sched-ioテスト
-22. QEMU sched-io-partialテスト
-23. QEMUシェルテスト
+20. QEMU file-fdテスト
+21. QEMU schedテスト
+22. QEMU sched-ioテスト
+23. QEMU sched-io-partialテスト
+24. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順にゲストの21経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順にゲストの22経路を確認します。
 
 ### QEMUの三つの検証モード
 
@@ -94,7 +95,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`sched`、`sched-io`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -105,6 +106,7 @@ MiniContainer control protocolのframeを解析し、Ready、標準出力、標�
 `sched-io-partial`では同じimageへStdin frameを分割して送り、header途中で書き込みを止めてから残りを送ります。
 途中受信でもreaderが再びblockしてframeが正しく完結することを、`r2`到達と正常な`ProcExit`で検証します。
 `file`ではfile_read guestのimageをpayload loaderとvirtio-blk diskの両方とともに起動し、guestが`read_file` syscallで`DOCS/NOTE.TXT`を読んで内容を標準出力へ出し、終了コード42を返すことを要求します。
+`file-fd`ではfile_fd guestが同じfileを`open`して分割`read`でoffsetを進め、EOF、二重`close`と未割り当てfdの`EBADF`、存在しないfileの`ENOENT`を確かめてから終了コード42を返すことを要求します。
 
 シェルテストは**対話モード**です。
 通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`not-a-command`、`shutdown`を標準入力へ送ります。
@@ -166,14 +168,15 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 30. QEMU payload-args test
 31. QEMU payload-stdin test
 32. QEMU file test
-33. QEMU sched test
-34. QEMU sched-io test
-35. QEMU sched-io-partial test
-36. QEMU shell test
+33. QEMU file-fd test
+34. QEMU sched test
+35. QEMU sched-io test
+36. QEMU sched-io-partial test
+37. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
-全段階に成功すると`summary: PASSED all 36 phases`を表示します。
+全段階に成功すると`summary: PASSED all 37 phases`を表示します。
 失敗時には、停止した段階の番号、成功数、失敗数、全体の経過時間を表示します。
 
 ### 関係するソースファイル
@@ -208,12 +211,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/36] cargo fmt --all -- --check
-phase 1/36 passed (elapsed: ...s)
+[1/37] cargo fmt --all -- --check
+phase 1/37 passed (elapsed: ...s)
 ...
-[36/36] QEMU shell test
-phase 36/36 passed (elapsed: ...s)
-summary: PASSED all 36 phases (elapsed: ...s)
+[37/37] QEMU shell test
+phase 37/37 passed (elapsed: ...s)
+summary: PASSED all 37 phases (elapsed: ...s)
 ```
 
 この実行例の段階数は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。
