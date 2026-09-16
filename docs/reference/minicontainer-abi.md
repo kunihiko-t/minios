@@ -125,7 +125,7 @@ EOFはstickyであり、EOF以後の`STDIN` frameが届いても入力は戻り�
 ホストは`READY`のminorが1以上のときだけ`STDIN` frameを送ります。
 
 `PROC_EXIT` payloadの8バイトは、次の順序で符号なし整数を格納します。
-`pid`はmanifest内のimage index（0始まり）で、複数image bundleでは各processの終了ごとに1 frameを送ります。
+`pid`はkernelがprocessごとに採番する単調増加の識別子（0始まり・再利用なし）で、boot時のspawn列ではmanifest内のimage indexと一致します。複数image bundleでは各processの終了ごとに1 frameを送ります。
 
 | offset | size | field | encoding |
 | ---: | ---: | --- | --- |

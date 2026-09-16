@@ -2,9 +2,10 @@
 //!
 //! `UserRun` (一回限りの実行窓) とは別に、`Process`は再入可能な実行単位として
 //! image・kernel trap stack・中断contextを所有する。allocatorやframe memoryへの
-//! 参照は保持せず、各操作の呼び出し側が都度渡す。`ProcessTable`は最大
-//! [`MAX_PROCS`] slotのround-robin選択を担う状態機械であり、host test可能にする。
+//! 参照は保持せず、各操作の呼び出し側が都度渡す。`ProcessTable`はheap-backedな
+//! live process集合でround-robin選択を担う状態機械であり、host test可能にする。
 
+use alloc::vec::Vec;
 use core::fmt;
 
 #[cfg(not(target_arch = "riscv32"))]
@@ -196,8 +197,10 @@ impl FileFdTable {
 /// `dispatch`中だけkernelが当該stackを使い、戻った時点でcontextをslotから
 /// 回収する (`reload_context`)。fd tableはprocess dropとともに死ぬため、
 /// 終了時の明示的なcloseは要らない。
+/// `pid`は`ProcessTable::insert`が採番する。`usize::MAX`は未割当を示す。
 pub struct Process {
     name: &'static str,
+    pid: usize,
     image: Option<LoadedImage>,
     kernel_stack: [Option<PhysFrame>; KERNEL_STACK_PAGES],
     kernel_stack_bottom: usize,
@@ -302,6 +305,7 @@ impl Process {
 
         Ok(Self {
             name,
+            pid: usize::MAX,
             image: Some(image),
             kernel_stack,
             kernel_stack_bottom: stack_bottom.expect("kernel stack has at least one page"),
@@ -314,6 +318,11 @@ impl Process {
 
     pub const fn name(&self) -> &'static str {
         self.name
+    }
+
+    /// `ProcessTable::insert`が採番したpid。未insertなら`usize::MAX`。
+    pub const fn pid(&self) -> usize {
+        self.pid
     }
 
     /// stdin待ちへ移す。`dispatch`が`Blocked`を返した直後に呼ぶ。
@@ -455,11 +464,15 @@ const fn sv39_satp_bits(root: PhysPageNum) -> u64 {
     (8_u64 << 60) | root.as_u64()
 }
 
-/// 固定上限のprocess table。slot indexがprocess IDとなり、manifestの
-/// image順と一致する。空slotは`pick_next`が読み飛ばす。
+/// heap-backedのprocess table。`Vec`がlive processだけを保持し、
+/// pidは`insert`のたびに`next_pid`から単調採番される。終了したpidは
+/// 再利用されないため、PROC_EXIT frameや将来のspawn syscallが参照する
+/// pidと新processのpidは衝突しない。`last_picked`は直前にdispatchした
+/// pidを保持し、removeによる詰め直しに左右されない再開点となる。
 pub struct ProcessTable {
-    slots: [Option<Process>; MAX_PROCS],
-    next_hint: usize,
+    procs: Vec<Process>,
+    next_pid: usize,
+    last_picked: Option<usize>,
 }
 
 impl Default for ProcessTable {
@@ -471,67 +484,96 @@ impl Default for ProcessTable {
 impl ProcessTable {
     pub const fn new() -> Self {
         Self {
-            slots: [const { None }; MAX_PROCS],
-            next_hint: 0,
+            procs: Vec::new(),
+            next_pid: 0,
+            last_picked: None,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.is_some()).count()
+        self.procs.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.procs.is_empty()
     }
 
-    /// 最初の空slotへprocessを置き、pid (=slot index) を返す。
-    /// 満杯ならprocessをそのまま返す。
+    /// processへpidを採番してtableへ登録し、そのpidを返す。
+    /// live数が`MAX_PROCS` (manifest上限) に達しているかpid採番が
+    /// overflowした場合はprocessをそのまま返す。
     ///
     /// Errがprocess全体を返すのは、callerが拒否されたprocessの所有frameを
     /// 回収するためであり、`deallocate_recoverable`が失敗時にframeを返すのと
     /// 同じ規約である。
     #[allow(clippy::result_large_err)]
-    pub fn insert(&mut self, process: Process) -> Result<usize, Process> {
-        let Some(index) = self.slots.iter().position(|slot| slot.is_none()) else {
+    pub fn insert(&mut self, mut process: Process) -> Result<usize, Process> {
+        if self.procs.len() == MAX_PROCS {
+            return Err(process);
+        }
+        let Some(next) = self.next_pid.checked_add(1) else {
             return Err(process);
         };
-        self.slots[index] = Some(process);
-        Ok(index)
+        let pid = self.next_pid;
+        self.next_pid = next;
+        process.pid = pid;
+        self.procs.push(process);
+        Ok(pid)
     }
 
     pub fn get(&self, pid: usize) -> Option<&Process> {
-        self.slots.get(pid).and_then(|slot| slot.as_ref())
+        self.procs.iter().find(|process| process.pid == pid)
     }
 
     pub fn get_mut(&mut self, pid: usize) -> Option<&mut Process> {
-        self.slots.get_mut(pid).and_then(|slot| slot.as_mut())
+        self.procs.iter_mut().find(|process| process.pid == pid)
     }
 
-    /// slotからprocessを取り出す。呼び出し側が`reclaim`で所有frameを回収する。
+    /// tableからprocessを取り出す。呼び出し側が`reclaim`で所有frameを
+    /// 回収する。`swap_remove`ではなく`remove`を使い、残るprocessの
+    /// 並び (round-robin順) を変えない。
     pub fn take(&mut self, pid: usize) -> Option<Process> {
-        self.slots.get_mut(pid).and_then(|slot| slot.take())
+        let index = self.procs.iter().position(|process| process.pid == pid)?;
+        Some(self.procs.remove(index))
     }
 
-    /// 前回dispatchしたpidの次から時計回りに走査し、最初のrunnable slotの
-    /// pidを返す。全slotが空か、占有slotがすべてblockedなら`None`を返す。
-    /// 退出したprocessは`take`で取り除く。
+    /// 先頭のprocessを取り出す。table全回収のdrain経路で使う。
+    pub fn take_oldest(&mut self) -> Option<Process> {
+        if self.procs.is_empty() {
+            return None;
+        }
+        Some(self.procs.remove(0))
+    }
+
+    /// live processをmanifest順に走査する。spawn一覧の表示に使う。
+    pub fn iter(&self) -> impl Iterator<Item = &Process> {
+        self.procs.iter()
+    }
+
+    /// 前回dispatchしたpidの次から時計回りに走査し、最初のrunnable
+    /// processのpidを返す。processが空か、すべてblockedなら`None`を返す。
+    /// `last_picked`が既にtableを出ていれば先頭から走査する。
     pub fn pick_next(&mut self) -> Option<usize> {
-        for offset in 0..MAX_PROCS {
-            let pid = (self.next_hint + offset) % MAX_PROCS;
-            if self.slots[pid].as_ref().is_some_and(Process::is_runnable) {
-                self.next_hint = (pid + 1) % MAX_PROCS;
-                return Some(pid);
+        let start = self
+            .last_picked
+            .and_then(|last| self.procs.iter().position(|process| process.pid == last))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        for offset in 0..self.procs.len() {
+            let index = (start + offset) % self.procs.len();
+            if self.procs[index].is_runnable() {
+                self.last_picked = Some(self.procs[index].pid);
+                return Some(self.procs[index].pid);
             }
         }
         None
     }
 
-    /// 占有slotがありながら`pick_next`が`None`＝全processがstdin待ち。
+    /// processがありながら`pick_next`が`None`＝全processがstdin待ち。
     /// stdinへbyteが届いたら呼び、blocked processをすべてrunnableへ戻す。
     pub fn wake_all_blocked(&mut self) {
-        for slot in self.slots.iter_mut().flatten() {
-            if !slot.is_runnable() {
-                slot.wake();
+        for process in self.procs.iter_mut() {
+            if !process.is_runnable() {
+                process.wake();
             }
         }
     }
@@ -542,7 +584,7 @@ impl ProcessTable {
     /// fdも失効する。trap窓からのみ呼ばれる。
     #[cfg(not(target_arch = "riscv32"))]
     pub fn revoke_file_fds(&mut self, dir_cluster: u32, dir_index: u32) {
-        for process in self.slots.iter_mut().flatten() {
+        for process in self.procs.iter_mut() {
             process.revoke_fd_at(dir_cluster, dir_index);
         }
     }
@@ -1014,11 +1056,11 @@ mod tests {
         assert!(p1.fd_mut(keep1).is_some());
     }
 
-    // Catches the fd table outliving its process: a process spawned into a
-    // previously occupied slot must start with an empty table instead of
+    // Catches the fd table outliving its process: a process spawned after a
+    // predecessor exited must start with an empty table instead of
     // inheriting the predecessor's descriptors.
     #[test]
-    fn reused_slot_starts_with_empty_fd_table() {
+    fn fresh_process_starts_with_empty_fd_table() {
         use minios_abi::syscall::{FIRST_FILE_FD, MAX_OPEN_FILES};
 
         let mut fixture = SpawnFixture::new();
@@ -1030,17 +1072,65 @@ mod tests {
             .expect("slot must be free");
         table.insert(p0).expect("insert p0");
 
-        let mut exited = table.take(0).expect("slot 0 is live");
+        let mut exited = table.take(0).expect("pid 0 is live");
         exited
             .reclaim(&mut fixture.frames)
             .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
 
         let p1 = fixture.spawn("fd-new");
         let pid = table.insert(p1).expect("insert p1");
-        assert_eq!(pid, 0);
         let fresh = table.get_mut(pid).expect("p1 is live");
         for fd in FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES {
             assert!(fresh.fd_mut(fd).is_none());
         }
+    }
+
+    // Catches pid reuse sneaking back in: a process inserted after another
+    // exited must get a fresh monotonic pid, so an exit frame's pid can
+    // never name a different live process.
+    #[test]
+    fn insert_assigns_fresh_monotonic_pids() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        let p0 = fixture.spawn("mono-a");
+        let p1 = fixture.spawn("mono-b");
+        assert_eq!(table.insert(p0).expect("insert p0"), 0);
+        assert_eq!(table.insert(p1).expect("insert p1"), 1);
+        assert_eq!(table.get(0).expect("p0 is live").pid(), 0);
+
+        let mut exited = table.take(0).expect("pid 0 is live");
+        exited
+            .reclaim(&mut fixture.frames)
+            .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
+
+        let p2 = fixture.spawn("mono-c");
+        let pid = table.insert(p2).expect("insert p2");
+        assert_eq!(pid, 2);
+        assert_eq!(table.get(2).expect("p2 is live").pid(), 2);
+        assert!(table.get(0).is_none());
+    }
+
+    // Catches the drain path skipping live processes: take_oldest must pop
+    // the earliest-spawned process each time until the table is empty.
+    #[test]
+    fn take_oldest_drains_in_spawn_order() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        for name in ["d0", "d1", "d2"] {
+            let process = fixture.spawn(name);
+            table.insert(process).expect("insert process");
+        }
+
+        for expected_pid in 0..3usize {
+            let mut process = table.take_oldest().expect("process must be live");
+            assert_eq!(process.pid(), expected_pid);
+            process
+                .reclaim(&mut fixture.frames)
+                .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
+        }
+        assert!(table.take_oldest().is_none());
+        assert!(table.is_empty());
     }
 }

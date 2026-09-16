@@ -191,7 +191,7 @@ use minios_kernel::memory::{
     frame::{FrameAllocator, FrameError, FrameSource, FrameStats, PAGE_SIZE, PhysFrame},
 };
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::process::{MAX_PROCS, Process, ProcessTable};
+use minios_kernel::process::{Process, ProcessTable};
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 use minios_kernel::user::run::{RunCompletion, RunOutcome, UserRun};
 #[cfg(target_arch = "riscv64")]
@@ -2319,8 +2319,8 @@ fn reclaim_process_slot(table: &mut ProcessTable, pid: usize, frames: &mut dyn F
 /// tableに残る全processを回収する。spawn途中の失敗経路で使う。
 #[cfg(target_arch = "riscv64")]
 fn reclaim_process_table(table: &mut ProcessTable, frames: &mut dyn FrameSource) {
-    for pid in 0..MAX_PROCS {
-        let _ = table.take(pid).map(|mut process| process.reclaim(frames));
+    while let Some(mut process) = table.take_oldest() {
+        let _ = process.reclaim(frames);
     }
 }
 
@@ -2421,10 +2421,12 @@ fn run_boot_payload(
     // Ready frameを最後のplain text出力の後に送り、以降のUARTをcontrol frame
     // へ限定する。
     control::send_ready();
-    for pid in 0..MAX_PROCS {
-        if let Some(process) = table.get(pid) {
-            crate::println!("MiniOS sched: spawned pid={pid} name={}", process.name());
-        }
+    for process in table.iter() {
+        crate::println!(
+            "MiniOS sched: spawned pid={} name={}",
+            process.pid(),
+            process.name()
+        );
     }
 
     // Safety: fd失効の走査はdispatchのtrap窓からのみ行われ、loop終了時に
