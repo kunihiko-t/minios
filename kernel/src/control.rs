@@ -160,6 +160,25 @@ impl ControlSource for UartControlSource<'_> {
         Ok(())
     }
 
+    /// guestの`mkdir`をstorage sessionへ委譲する。dir作成はfdを返さず、
+    /// 失効させるfdもない。
+    #[cfg(target_arch = "riscv64")]
+    fn make_dir(&mut self, path: &str) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        session.create_dir(path).map_err(fat_errno)
+    }
+
+    /// guestの`rmdir`をstorage sessionへ委譲する。dirはfdを持てないため
+    /// 戻り値の削除位置に失効させる対象はない。
+    #[cfg(target_arch = "riscv64")]
+    fn remove_dir(&mut self, path: &str) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        session.remove_dir(path).map_err(fat_errno)?;
+        Ok(())
+    }
+
     /// guestの`lseek`をfdのoffset更新として処理する。`SEEK_END`は
     /// FileDescの現在sizeを基準にする。負になる指定と未知のwhenceは
     /// `EINVAL`で拒否する。
@@ -269,6 +288,8 @@ fn fat_errno(
         FatError::NotDirectory => ENOTDIR,
         FatError::InvalidName | FatError::InvalidOffset => EINVAL,
         FatError::CrossDirectory => minios_abi::syscall::EXDEV,
+        FatError::Exists => minios_abi::syscall::EEXIST,
+        FatError::NotEmpty => minios_abi::syscall::ENOTEMPTY,
         FatError::NoSpace => minios_abi::syscall::ENOSPC,
         FatError::Read(_)
         | FatError::Unsupported

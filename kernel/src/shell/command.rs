@@ -15,6 +15,10 @@ pub enum Command<'a> {
     Cat(&'a str),
     #[cfg(any(test, target_arch = "riscv64"))]
     Rm(&'a str),
+    #[cfg(any(test, target_arch = "riscv64"))]
+    Mkdir(&'a str),
+    #[cfg(any(test, target_arch = "riscv64"))]
+    Rmdir(&'a str),
     Unknown(&'a str),
 }
 
@@ -40,6 +44,14 @@ pub fn parse_command(input: &str) -> Command<'_> {
         "rm" => Command::Rm(""),
         #[cfg(any(test, target_arch = "riscv64"))]
         input if input.starts_with("rm ") => Command::Rm(input[3..].trim_start_matches(' ')),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        "mkdir" => Command::Mkdir(""),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        input if input.starts_with("mkdir ") => Command::Mkdir(input[6..].trim_start_matches(' ')),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        "rmdir" => Command::Rmdir(""),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        input if input.starts_with("rmdir ") => Command::Rmdir(input[6..].trim_start_matches(' ')),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         input => {
             if let Some(argument) = input.strip_prefix("ls ") {
@@ -134,6 +146,16 @@ mod tests {
             parse_command("rm DOCS/NOTE.TXT"),
             Command::Rm("DOCS/NOTE.TXT")
         );
-        assert_eq!(parse_command("rmdir"), Command::Unknown("rmdir"));
+    }
+
+    #[test]
+    fn parser_recognizes_mkdir_and_rmdir_with_and_without_arguments() {
+        assert_eq!(parse_command("mkdir"), Command::Mkdir(""));
+        assert_eq!(parse_command("mkdir NEWDIR"), Command::Mkdir("NEWDIR"));
+        assert_eq!(parse_command("rmdir"), Command::Rmdir(""));
+        assert_eq!(parse_command("rmdir OLD"), Command::Rmdir("OLD"));
+        // `rm`/`rmdir`のprefix共有を取り違えない。
+        assert_eq!(parse_command("rm X"), Command::Rm("X"));
+        assert_eq!(parse_command("mkdirt"), Command::Unknown("mkdirt"));
     }
 }

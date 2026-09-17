@@ -59,11 +59,14 @@ const FILE_SEEK_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-seek\n";
 const FILE_RENAME_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2d\0\0\0MiniOS sched: spawned pid=0 name=file-rename\n";
+const FILE_MKDIR_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=file-mkdir\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
 const FILE_SEEK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0seek verified\n";
 const FILE_RENAME_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x10\0\0\0rename verified\n";
+const FILE_MKDIR_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0f\0\0\0mkdir verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -72,7 +75,7 @@ const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] =
-    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nrm Long File Name.txt\nls\ncat Long File Name.txt\nnot-a-command\nshutdown\n";
+    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nrm Long File Name.txt\nls\ncat Long File Name.txt\nmkdir NEWDIR\nls\nrmdir DOCS\nrmdir NEWDIR\nls\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
@@ -99,6 +102,7 @@ pub enum TestKind {
     FileUnlink,
     FileSeek,
     FileRename,
+    FileMkdir,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -135,6 +139,9 @@ impl TestKind {
             }
             Self::FileRename => {
                 unreachable!("the file-rename test boots the normal kernel")
+            }
+            Self::FileMkdir => {
+                unreachable!("the file-mkdir test boots the normal kernel")
             }
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -176,6 +183,9 @@ impl TestKind {
             }
             Self::FileRename => {
                 unreachable!("the file-rename test verifies raw control frames")
+            }
+            Self::FileMkdir => {
+                unreachable!("the file-mkdir test verifies raw control frames")
             }
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -479,6 +489,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
         );
+    }
+
+    if kind == TestKind::FileMkdir {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_mkdir()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_mkdir_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::FileSeek {
@@ -1194,6 +1219,16 @@ const FILE_RENAME_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file-mkdir検査で期待されるcontrol frame列。guestがmkdir/中身file/
+/// ENOTEMPTY/nested/削除の経路を通してから、検証済みの旨をstdoutへ出力する。
+const FILE_MKDIR_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    FILE_MKDIR_SPAWNED_FRAME,
+    FILE_MKDIR_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1333,6 +1368,27 @@ fn verify_file_rename_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_RENAME_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+fn verify_file_mkdir_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_MKDIR_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -1644,6 +1700,11 @@ impl PayloadBundle {
         Self::create_with(payload_file_rename_bundle_bytes(&elf)?)
     }
 
+    fn create_file_mkdir() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_MKDIR)?;
+        Self::create_with(payload_file_mkdir_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -1842,6 +1903,14 @@ fn payload_file_seek_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// `rename verified`をstdoutへ書きexit(42)する。
 fn payload_file_rename_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-rename\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-mkdir検査用bundle: file_mkdir guestのELFと引数なしmanifestを
+/// 組み立てる。guestはmkdir/中身file/ENOTEMPTY/nested/削除の経路を確かめて
+/// `mkdir verified`をstdoutへ書きexit(42)する。
+fn payload_file_mkdir_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-mkdir\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 
@@ -2114,6 +2183,14 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "ls        List a directory"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "cat       Read a file"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "rm        Remove a file"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "mkdir     Create a directory"))
+        .and_then(|()| {
+            expect_shell_line(
+                transcript,
+                &mut cursor,
+                "rmdir     Remove an empty directory",
+            )
+        })
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "clear     Clear the terminal"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "shutdown  Shut down MiniOS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> info"))
@@ -2158,6 +2235,19 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat Long File Name.txt"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "virtio: file not found"))
+        // `mkdir`後のlsは新しいdirectoryを列挙し、非空dirへの`rmdir`は
+        // エラー、`rmdir`後のlsはそのdirectoryを列挙しないことを確認する。
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> mkdir NEWDIR"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> NEWDIR"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> rmdir DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "virtio: directory not empty"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> rmdir NEWDIR"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
         .and_then(|()| {
             expect_shell_line(
@@ -2507,6 +2597,8 @@ mod tests {
             "ls        List a directory",
             "cat       Read a file",
             "rm        Remove a file",
+            "mkdir     Create a directory",
+            "rmdir     Remove an empty directory",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "MiniOS 0.1.0 on RISC-V 64",
@@ -2736,6 +2828,8 @@ mod tests {
             "ls        List a directory",
             "cat       Read a file",
             "rm        Remove a file",
+            "mkdir     Create a directory",
+            "rmdir     Remove an empty directory",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "minios> info",
@@ -2762,6 +2856,17 @@ mod tests {
             "<DIR> DOCS",
             "minios> cat Long File Name.txt",
             "virtio: file not found",
+            "minios> mkdir NEWDIR",
+            "minios> ls",
+            "        18 HELLO.TXT",
+            "<DIR> DOCS",
+            "<DIR> NEWDIR",
+            "minios> rmdir DOCS",
+            "virtio: directory not empty",
+            "minios> rmdir NEWDIR",
+            "minios> ls",
+            "        18 HELLO.TXT",
+            "<DIR> DOCS",
             "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
             "minios> shutdown",
