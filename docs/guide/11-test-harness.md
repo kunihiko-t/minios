@@ -119,16 +119,18 @@ writable fdへの`read`とread-only fdへの`write`の`EBADF`、directoryへの`
 `file-seek`ではfile_seek guestが`pread`/`pwrite`がfdのoffsetを動かさないこと、`lseek`のSET/CUR/ENDとEOF越えseek、負になる結果や未知のwhenceの`EINVAL`、方向性fdへの`pread`/`pwrite`と標準streamへの`lseek`の`EBADF`を確かめます。
 最後に`lseek`で先頭へ戻して上書きしたfileを読み戻して照合し、標準出力へ出して終了コード42を返すことを要求します。
 `file-rename`ではfile_rename guestが`rename`後も開いているfdが有効なまま内容を読めること、旧名の`open`が`ENOENT`、同名へのrenameが成功、既存fileへのrenameが置き換えとなり置き換えられたfileを指すfdが`EBADF`で失効することを確かめます。
-不在のsourceが`ENOENT`、directoryのsourceやtargetが`EISDIR`、別directoryへの移動が`EXDEV`、8.3へ正規化できない名前が`EINVAL`であることも確かめてから、標準出力へ出して終了コード42を返すことを要求します。
+不在のsourceが`ENOENT`、dir→fileが`ENOTDIR`、file→dirが`EISDIR`、別directoryへの移動が`EXDEV`、8.3へ正規化できない名前が`EINVAL`であることも確かめます。
+directoryのrenameについては、`mkdir`したdirを改名して中のfileが新dir名で読めること、dir→非空dirが`ENOTEMPTY`、dir→空dirが置き換えになること、片付けに`rmdir`が使えることを確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 `file-mkdir`ではfile_mkdir guestが`mkdir`でdirectoryを作ってその中へfileを`create`/`write`し、再作成が`EEXIST`、非空directoryへの`rmdir`が`ENOTEMPTY`、fileへの`rmdir`が`ENOTDIR`、既存directory内へのnested作成が成功することを確かめます。
 fileを`unlink`してから`rmdir`が成功し、中のfileもdirectoryも`ENOENT`になること、削除跡へ同名で作り直したdirectory内のfileを読み戻して照合することを確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 
 シェルテストは**対話モード**です。
-通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`rm Long File Name.txt`、`ls`、`cat Long File Name.txt`、`mkdir NEWDIR`、`ls`、`rmdir DOCS`、`rmdir NEWDIR`、`ls`、`not-a-command`、`shutdown`を標準入力へ送ります。
+通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`rm Long File Name.txt`、`ls`、`cat Long File Name.txt`、`mkdir NEWDIR`、`ls`、`rmdir DOCS`、`rmdir NEWDIR`、`ls`、`mv HELLO.TXT WORLD.TXT`、`ls`、`mv WORLD.TXT HELLO.TXT`、`mv DOCS NOTESD`、`ls`、`cat NOTESD/NOTE.TXT`、`mv NOTESD DOCS`、`not-a-command`、`shutdown`を標準入力へ送ります。
 検証部は、各コマンドのエコー、毎回の新しいプロンプト、安定した応答、`hart id: 0`、稼働時間とティックとメモリー統計の数値形式、最後の終了ステータス0を要求します。
 `rm`後の`ls`が削除したfileを列挙しないこと、再`cat`が`virtio: file not found`を返すことも、逐行照合で確認します。
 `mkdir`後の`ls`が新しいdirectoryを列挙し、中身のある`DOCS`への`rmdir`が`virtio: directory not empty`を返し、`rmdir`後の`ls`がそのdirectoryを列挙しないことも同じく確認します。
-最初のプロンプト以降を順序付きの記録として読み、`help`が返す十一行を含めて各行の位置を検査します。
+`mv`はfileとdirectoryの両方を改名し、file改名後の`ls`が新名を列挙し、dir改名後は新しいdir名のまま`cat`で中身へ到達できることを確認します。
+最初のプロンプト以降を順序付きの記録として読み、`help`が返す十二行を含めて各行の位置を検査します。
 応答の並べ替え、プロンプトの重複、`minios> helper`のような前方一致、途中の予期しない行は失敗です。
 末尾の空行だけは許可します。
 この記録から、UARTの送受信、パーサー、タイマー、アロケーター、SBIリセットを同じQEMUセッション内で検査できます。

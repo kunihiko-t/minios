@@ -75,7 +75,7 @@ const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] =
-    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nrm Long File Name.txt\nls\ncat Long File Name.txt\nmkdir NEWDIR\nls\nrmdir DOCS\nrmdir NEWDIR\nls\nnot-a-command\nshutdown\n";
+    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nrm Long File Name.txt\nls\ncat Long File Name.txt\nmkdir NEWDIR\nls\nrmdir DOCS\nrmdir NEWDIR\nls\nmv HELLO.TXT WORLD.TXT\nls\nmv WORLD.TXT HELLO.TXT\nmv DOCS NOTESD\nls\ncat NOTESD/NOTE.TXT\nmv NOTESD DOCS\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
@@ -2191,6 +2191,13 @@ fn verify_shell_result(
                 "rmdir     Remove an empty directory",
             )
         })
+        .and_then(|()| {
+            expect_shell_line(
+                transcript,
+                &mut cursor,
+                "mv        Rename a file or directory",
+            )
+        })
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "clear     Clear the terminal"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "shutdown  Shut down MiniOS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> info"))
@@ -2248,6 +2255,21 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
+        // `mv`はfileとdirの両方を改名する。file改名後のlsは新名を列挙し、
+        // dir改名後は新名のまま中身へ到達できる（`..`は親clusterを指す
+        // ため更新不要）。
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> mv HELLO.TXT WORLD.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 WORLD.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> mv WORLD.TXT HELLO.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> mv DOCS NOTESD"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "        18 HELLO.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> NOTESD"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat NOTESD/NOTE.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "note inside docs"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> mv NOTESD DOCS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
         .and_then(|()| {
             expect_shell_line(
@@ -2599,6 +2621,7 @@ mod tests {
             "rm        Remove a file",
             "mkdir     Create a directory",
             "rmdir     Remove an empty directory",
+            "mv        Rename a file or directory",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "MiniOS 0.1.0 on RISC-V 64",
@@ -2830,6 +2853,7 @@ mod tests {
             "rm        Remove a file",
             "mkdir     Create a directory",
             "rmdir     Remove an empty directory",
+            "mv        Rename a file or directory",
             "clear     Clear the terminal",
             "shutdown  Shut down MiniOS",
             "minios> info",
@@ -2867,6 +2891,18 @@ mod tests {
             "minios> ls",
             "        18 HELLO.TXT",
             "<DIR> DOCS",
+            "minios> mv HELLO.TXT WORLD.TXT",
+            "minios> ls",
+            "        18 WORLD.TXT",
+            "<DIR> DOCS",
+            "minios> mv WORLD.TXT HELLO.TXT",
+            "minios> mv DOCS NOTESD",
+            "minios> ls",
+            "        18 HELLO.TXT",
+            "<DIR> NOTESD",
+            "minios> cat NOTESD/NOTE.TXT",
+            "note inside docs",
+            "minios> mv NOTESD DOCS",
             "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
             "minios> shutdown",

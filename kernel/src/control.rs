@@ -152,7 +152,7 @@ impl ControlSource for UartControlSource<'_> {
     fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let replaced = session.rename_file(old_path, new_path).map_err(fat_errno)?;
+        let replaced = session.rename(old_path, new_path).map_err(fat_errno)?;
         if let Some((dir_cluster, dir_index)) = replaced {
             // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
             unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
