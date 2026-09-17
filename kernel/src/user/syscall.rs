@@ -116,6 +116,22 @@ pub trait ControlSource {
         let _ = (old_path, new_path);
         Err(ENOSYS)
     }
+
+    /// `path`のdirectoryを作成する。同名entryがあれば`EEXIST`、
+    /// 8.3へ正規化できない名前は`EINVAL`である。`Err`はそのまま
+    /// `a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn make_dir(&mut self, path: &str) -> Result<(), isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
+
+    /// `path`の空のdirectoryを削除する。`.`/`..`以外のentryを残すdirは
+    /// `ENOTEMPTY`、fileは`ENOTDIR`である。`Err`はそのまま`a0`へ返す
+    /// errnoである。default実装は`ENOSYS`。
+    fn remove_dir(&mut self, path: &str) -> Result<(), isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -170,7 +186,17 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
     } else if number == SyscallNumber::Create as usize {
         dispatch_open(context, space, memory, source, true)
     } else if number == SyscallNumber::Unlink as usize {
-        dispatch_unlink(context, space, memory, source)
+        dispatch_path_op(context, space, memory, source, |source, path| {
+            source.unlink(path)
+        })
+    } else if number == SyscallNumber::Mkdir as usize {
+        dispatch_path_op(context, space, memory, source, |source, path| {
+            source.make_dir(path)
+        })
+    } else if number == SyscallNumber::Rmdir as usize {
+        dispatch_path_op(context, space, memory, source, |source, path| {
+            source.remove_dir(path)
+        })
     } else if number == SyscallNumber::Lseek as usize {
         dispatch_lseek(context, source)
     } else if number == SyscallNumber::Pread as usize {
@@ -315,13 +341,15 @@ fn dispatch_open<M: FrameStore, E, R: ControlSource>(
     SyscallFlow::Resume
 }
 
-/// `unlink` (`a0=path_ptr, a1=path_len`)。検証規約は`open`と同じ。
-/// 成功時は`a0`へ0を返す。
-fn dispatch_unlink<M: FrameStore, E, R: ControlSource>(
+/// `unlink`/`mkdir`/`rmdir` (`a0=path_ptr, a1=path_len`)。検証規約は
+/// `open`と同じ。成功時は`a0`へ0を返す。pathを取り結果が`()`の操作は
+/// この1経路へ集約する。
+fn dispatch_path_op<M: FrameStore, E, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace,
     memory: &M,
     source: &mut R,
+    op: impl FnOnce(&mut R, &str) -> Result<(), isize>,
 ) -> SyscallFlow<E, R::Error> {
     let mut path_buf = [0u8; MAX_PATH_LEN];
     let Some(path_len) = copy_user_path(context, space, memory, &mut path_buf) else {
@@ -331,7 +359,7 @@ fn dispatch_unlink<M: FrameStore, E, R: ControlSource>(
         context.set_register(10, EINVAL as usize);
         return SyscallFlow::Resume;
     };
-    match source.unlink(path) {
+    match op(source, path) {
         Ok(()) => context.set_register(10, 0),
         Err(errno) => context.set_register(10, errno as usize),
     }
@@ -642,9 +670,9 @@ mod tests {
     use minios_abi::{
         control::FrameKind,
         syscall::{
-            EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, FIRST_FILE_FD,
-            MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR, STDIN, STDOUT,
-            SyscallNumber,
+            EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, ENOTEMPTY,
+            FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR,
+            STDIN, STDOUT, SyscallNumber,
         },
     };
 
@@ -658,6 +686,8 @@ mod tests {
     const CREATE_NUMBER: usize = SyscallNumber::Create as usize;
     const UNLINK_NUMBER: usize = SyscallNumber::Unlink as usize;
     const RENAME_NUMBER: usize = SyscallNumber::Rename as usize;
+    const MKDIR_NUMBER: usize = SyscallNumber::Mkdir as usize;
+    const RMDIR_NUMBER: usize = SyscallNumber::Rmdir as usize;
     const LSEEK_NUMBER: usize = SyscallNumber::Lseek as usize;
     const PREAD_NUMBER: usize = SyscallNumber::Pread as usize;
     const PWRITE_NUMBER: usize = SyscallNumber::Pwrite as usize;
@@ -912,6 +942,8 @@ mod tests {
         written: Vec<u8>,
         unlinks: usize,
         renames: usize,
+        mkdirs: usize,
+        rmdirs: usize,
         seen_new_path: Option<Vec<u8>>,
         seeks: usize,
         preads: usize,
@@ -936,6 +968,8 @@ mod tests {
                 written: Vec::new(),
                 unlinks: 0,
                 renames: 0,
+                mkdirs: 0,
+                rmdirs: 0,
                 seen_new_path: None,
                 seeks: 0,
                 preads: 0,
@@ -1016,6 +1050,18 @@ mod tests {
             self.renames += 1;
             self.seen_path = Some(Vec::from(old_path.as_bytes()));
             self.seen_new_path = Some(Vec::from(new_path.as_bytes()));
+            self.result
+        }
+
+        fn make_dir(&mut self, path: &str) -> Result<(), isize> {
+            self.mkdirs += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.result
+        }
+
+        fn remove_dir(&mut self, path: &str) -> Result<(), isize> {
+            self.rmdirs += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
             self.result
         }
 
@@ -2173,6 +2219,88 @@ mod tests {
 
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches mkdir/rmdir not reaching the source, or the path being
+    // copied wrong: both share the single-path dispatch contract.
+    #[test]
+    fn mkdir_and_rmdir_reach_the_source_with_the_path() {
+        let mut sink = FakeSink::default();
+        for (number, counter) in [(MKDIR_NUMBER, "mkdirs"), (RMDIR_NUMBER, "rmdirs")] {
+            let mut source = FileSource::serving(b"");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                number,
+                MESSAGE_PAGE,
+                6,
+                0,
+                0,
+                b"NEWDIR",
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), 0);
+            assert_eq!(source.seen_path.as_deref(), Some(b"NEWDIR".as_slice()));
+            match counter {
+                "mkdirs" => assert_eq!((source.mkdirs, source.rmdirs), (1, 0)),
+                _ => assert_eq!((source.mkdirs, source.rmdirs), (0, 1)),
+            }
+        }
+
+        // path検証で落ちる場合と、sourceのerrnoもそのまま`a0`へ返る。
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_numbered_file_fixture(
+            MKDIR_NUMBER,
+            0x40_000,
+            6,
+            0,
+            0,
+            b"NEWDIR",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.mkdirs, 0);
+
+        let mut source = FileSource::failing(ENOTEMPTY);
+        let (context, _) = dispatch_numbered_file_fixture(
+            RMDIR_NUMBER,
+            MESSAGE_PAGE,
+            6,
+            0,
+            0,
+            b"NEWDIR",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), ENOTEMPTY as usize);
+        assert_eq!(source.rmdirs, 1);
+    }
+
+    // Catches the default ControlSource::make_dir/remove_dir leaking a
+    // successful result: without storage the guest must see ENOSYS.
+    #[test]
+    fn mkdir_and_rmdir_without_storage_return_enosys() {
+        let mut sink = FakeSink::default();
+        for number in [MKDIR_NUMBER, RMDIR_NUMBER] {
+            let mut source = FakeSource::scripted(b"stdin only");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                number,
+                MESSAGE_PAGE,
+                6,
+                0,
+                0,
+                b"NEWDIR",
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            assert_eq!(context.register(10), ENOSYS as usize);
+        }
     }
 
     // Catches the default ControlSource::unlink implementation leaking a

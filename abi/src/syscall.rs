@@ -13,6 +13,8 @@ pub enum SyscallNumber {
     Pread = 10,
     Pwrite = 11,
     Rename = 12,
+    Mkdir = 13,
+    Rmdir = 14,
 }
 
 pub const STDIN: usize = 0;
@@ -36,6 +38,7 @@ pub const EIO: isize = -5;
 pub const EBADF: isize = -9;
 pub const ENOMEM: isize = -12;
 pub const EFAULT: isize = -14;
+pub const EEXIST: isize = -17;
 pub const EXDEV: isize = -18;
 pub const ENODEV: isize = -19;
 pub const ENOTDIR: isize = -20;
@@ -44,6 +47,7 @@ pub const EINVAL: isize = -22;
 pub const EMFILE: isize = -24;
 pub const ENOSPC: isize = -28;
 pub const ENOSYS: isize = -38;
+pub const ENOTEMPTY: isize = -39;
 
 #[cfg(test)]
 mod tests {
@@ -63,6 +67,8 @@ mod tests {
         assert_eq!(SyscallNumber::Pread as usize, 10);
         assert_eq!(SyscallNumber::Pwrite as usize, 11);
         assert_eq!(SyscallNumber::Rename as usize, 12);
+        assert_eq!(SyscallNumber::Mkdir as usize, 13);
+        assert_eq!(SyscallNumber::Rmdir as usize, 14);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
@@ -79,6 +85,7 @@ mod tests {
         assert_eq!(EBADF, -9);
         assert_eq!(ENOMEM, -12);
         assert_eq!(EFAULT, -14);
+        assert_eq!(EEXIST, -17);
         assert_eq!(EXDEV, -18);
         assert_eq!(ENODEV, -19);
         assert_eq!(ENOTDIR, -20);
@@ -87,5 +94,6 @@ mod tests {
         assert_eq!(EMFILE, -24);
         assert_eq!(ENOSPC, -28);
         assert_eq!(ENOSYS, -38);
+        assert_eq!(ENOTEMPTY, -39);
     }
 }

@@ -44,6 +44,8 @@ memory    Show physical memory statistics
 ls        List a directory
 cat       Read a file
 rm        Remove a file
+mkdir     Create a directory
+rmdir     Remove an empty directory
 clear     Clear the terminal
 shutdown  Shut down MiniOS
 minios> info
@@ -70,6 +72,17 @@ minios> ls
 <DIR> DOCS
 minios> cat Long File Name.txt
 virtio: file not found
+minios> mkdir NEWDIR
+minios> ls
+        18 HELLO.TXT
+<DIR> DOCS
+<DIR> NEWDIR
+minios> rmdir DOCS
+virtio: directory not empty
+minios> rmdir NEWDIR
+minios> ls
+        18 HELLO.TXT
+<DIR> DOCS
 minios> unknown
 unknown command: unknown; try 'help'
 ```

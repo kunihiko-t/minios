@@ -130,6 +130,8 @@ fn execute(
             crate::println!("ls        List a directory");
             crate::println!("cat       Read a file");
             crate::println!("rm        Remove a file");
+            crate::println!("mkdir     Create a directory");
+            crate::println!("rmdir     Remove an empty directory");
             crate::println!("clear     Clear the terminal");
             crate::println!("shutdown  Shut down MiniOS");
         }
@@ -161,6 +163,14 @@ fn execute(
             crate::println!("virtio: usage: rm NAME");
         }
         Command::Rm(path) => remove_file(storage, frames, path),
+        Command::Mkdir("") => {
+            crate::println!("virtio: usage: mkdir NAME");
+        }
+        Command::Mkdir(path) => make_directory(storage, frames, path),
+        Command::Rmdir("") => {
+            crate::println!("virtio: usage: rmdir NAME");
+        }
+        Command::Rmdir(path) => remove_directory(storage, frames, path),
         Command::Clear => {
             crate::print!("\x1b[2J\x1b[H");
         }
@@ -466,6 +476,38 @@ fn remove_file(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource, 
     }
 }
 
+/// `mkdir <path>`を遅延mount済みのsessionへ委譲する。成功時は出力を
+/// 出さず、失敗だけを診断messageへ写像する。
+#[cfg(target_arch = "riscv64")]
+fn make_directory(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource, path: &str) {
+    let session = match mount_storage(storage, frames) {
+        Ok(session) => session,
+        Err(error) => {
+            print_virtio_error(error);
+            return;
+        }
+    };
+    if let Err(error) = session.create_dir(path) {
+        print_fat_error("virtio", error);
+    }
+}
+
+/// `rmdir <path>`を遅延mount済みのsessionへ委譲する。成功時は出力を
+/// 出さず、失敗だけを診断messageへ写像する。
+#[cfg(target_arch = "riscv64")]
+fn remove_directory(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSource, path: &str) {
+    let session = match mount_storage(storage, frames) {
+        Ok(session) => session,
+        Err(error) => {
+            print_virtio_error(error);
+            return;
+        }
+    };
+    if let Err(error) = session.remove_dir(path) {
+        print_fat_error("virtio", error);
+    }
+}
+
 #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
 fn finish_cat_output<E>(
     result: Result<(), E>,
@@ -513,6 +555,12 @@ fn print_fat_error<E>(prefix: &str, error: crate::storage::fat32::FatError<E>) {
         }
         crate::storage::fat32::FatError::CrossDirectory => {
             crate::println!("{prefix}: cross-directory rename");
+        }
+        crate::storage::fat32::FatError::Exists => {
+            crate::println!("{prefix}: entry already exists");
+        }
+        crate::storage::fat32::FatError::NotEmpty => {
+            crate::println!("{prefix}: directory not empty");
         }
     }
 }
