@@ -132,6 +132,7 @@ fn execute(
             crate::println!("rm        Remove a file");
             crate::println!("mkdir     Create a directory");
             crate::println!("rmdir     Remove an empty directory");
+            crate::println!("mv        Rename a file or directory");
             crate::println!("clear     Clear the terminal");
             crate::println!("shutdown  Shut down MiniOS");
         }
@@ -171,6 +172,10 @@ fn execute(
             crate::println!("virtio: usage: rmdir NAME");
         }
         Command::Rmdir(path) => remove_directory(storage, frames, path),
+        Command::Mv(old_path, new_path) if old_path.is_empty() || new_path.is_empty() => {
+            crate::println!("virtio: usage: mv OLD NEW");
+        }
+        Command::Mv(old_path, new_path) => move_entry(storage, frames, old_path, new_path),
         Command::Clear => {
             crate::print!("\x1b[2J\x1b[H");
         }
@@ -504,6 +509,28 @@ fn remove_directory(storage: &mut Option<Rv64Storage>, frames: &mut dyn FrameSou
         }
     };
     if let Err(error) = session.remove_dir(path) {
+        print_fat_error("virtio", error);
+    }
+}
+
+/// `mv <old> <new>`を遅延mount済みのsessionへ委譲する。成功時は出力を
+/// 出さず、失敗だけを診断messageへ写像する。置換で消えたfileを指す
+/// fdはkernelが失効させるが、shell経路ではfdを持たないため影響しない。
+#[cfg(target_arch = "riscv64")]
+fn move_entry(
+    storage: &mut Option<Rv64Storage>,
+    frames: &mut dyn FrameSource,
+    old_path: &str,
+    new_path: &str,
+) {
+    let session = match mount_storage(storage, frames) {
+        Ok(session) => session,
+        Err(error) => {
+            print_virtio_error(error);
+            return;
+        }
+    };
+    if let Err(error) = session.rename(old_path, new_path) {
         print_fat_error("virtio", error);
     }
 }

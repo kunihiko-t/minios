@@ -19,6 +19,8 @@ pub enum Command<'a> {
     Mkdir(&'a str),
     #[cfg(any(test, target_arch = "riscv64"))]
     Rmdir(&'a str),
+    #[cfg(any(test, target_arch = "riscv64"))]
+    Mv(&'a str, &'a str),
     Unknown(&'a str),
 }
 
@@ -52,6 +54,18 @@ pub fn parse_command(input: &str) -> Command<'_> {
         "rmdir" => Command::Rmdir(""),
         #[cfg(any(test, target_arch = "riscv64"))]
         input if input.starts_with("rmdir ") => Command::Rmdir(input[6..].trim_start_matches(' ')),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        "mv" => Command::Mv("", ""),
+        #[cfg(any(test, target_arch = "riscv64"))]
+        input if input.starts_with("mv ") => {
+            // `mv OLD NEW`を最初の空白runで二分する。名に空白を含む
+            // 引数は対応しない（renameの新名は8.3に限るため実害はない）。
+            let args = input[3..].trim_start_matches(' ');
+            match args.find(|character: char| character.is_ascii_whitespace()) {
+                Some(index) => Command::Mv(&args[..index], args[index..].trim_start_matches(' ')),
+                None => Command::Mv(args, ""),
+            }
+        }
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         input => {
             if let Some(argument) = input.strip_prefix("ls ") {
@@ -157,5 +171,25 @@ mod tests {
         // `rm`/`rmdir`のprefix共有を取り違えない。
         assert_eq!(parse_command("rm X"), Command::Rm("X"));
         assert_eq!(parse_command("mkdirt"), Command::Unknown("mkdirt"));
+    }
+
+    #[test]
+    fn parser_recognizes_mv_and_splits_two_arguments() {
+        assert_eq!(parse_command("mv"), Command::Mv("", ""));
+        assert_eq!(parse_command("mv A.TXT"), Command::Mv("A.TXT", ""));
+        assert_eq!(
+            parse_command("mv A.TXT B.TXT"),
+            Command::Mv("A.TXT", "B.TXT")
+        );
+        assert_eq!(
+            parse_command("mv DOCS/A.TXT DOCS/B.TXT"),
+            Command::Mv("DOCS/A.TXT", "DOCS/B.TXT")
+        );
+        // 後半引数は空白を含めて残る（renameが8.3へ正規化するので
+        // 空白入りはInvalidNameとして処理される）。
+        assert_eq!(
+            parse_command("mv A.TXT  spaced name"),
+            Command::Mv("A.TXT", "spaced name")
+        );
     }
 }

@@ -2,7 +2,8 @@
 //!
 //! fileをrenameして開いているfdが有効なまま動くこと、旧名が`ENOENT`に
 //! なること、置き換えられたfileを指すfdが`EBADF`で失効すること、
-//! directoryや別dirへのrenameがerrnoを返すことを確認し、42で終了する。
+//! directoryのrenameとdir/file組合せのerrno、別dirへのrenameが
+//! `EXDEV`を返すことを確認し、42で終了する。
 //! 失敗時は70で終了する。E2Eのfile-rename検査が使う。
 
 #![no_std]
@@ -10,7 +11,7 @@
 
 use core::arch::{asm, naked_asm};
 use minios_abi::syscall::{
-    EBADF, EINVAL, EISDIR, ENOENT, EXDEV, FIRST_FILE_FD, STDOUT, SyscallNumber,
+    EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EXDEV, FIRST_FILE_FD, STDOUT, SyscallNumber,
 };
 
 /// exit異常の的内code。syscall失敗や契約違反、panicで使う。
@@ -25,6 +26,15 @@ const DIR_PATH: &[u8] = b"DOCS";
 const CROSS_PATH: &[u8] = b"DOCS/X.TXT";
 const LFN_PATH: &[u8] = b"long name.txt";
 const MISSING_PATH: &[u8] = b"MISSING.TXT";
+const OLDDIR_PATH: &[u8] = b"OLDDIR";
+const NEWDIR_PATH: &[u8] = b"NEWDIR";
+const OLDDIR_INNER: &[u8] = b"OLDDIR/F.TXT";
+const NEWDIR_INNER: &[u8] = b"NEWDIR/F.TXT";
+const OTHERD_PATH: &[u8] = b"OTHERD";
+const OTHERD_INNER: &[u8] = b"OTHERD/F.TXT";
+const EMPTYD_PATH: &[u8] = b"EMPTYD";
+const EMPTYD_INNER: &[u8] = b"EMPTYD/F.TXT";
+const FILE_PATH: &[u8] = b"HELLO.TXT";
 const PAYLOAD: &[u8] = b"renamed by guest\n";
 const MESSAGE: &[u8] = b"rename verified\n";
 const BUFFER_LEN: usize = 64;
@@ -134,6 +144,54 @@ fn sys_close(fd: usize) -> isize {
     returned
 }
 
+/// MiniOS ABIの`mkdir`を呼ぶ。戻り値は0か負のerrno。
+fn sys_mkdir(path: *const u8, path_len: usize) -> isize {
+    let returned: isize;
+    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a0") path as usize => returned,
+            in("a1") path_len,
+            in("a7") SyscallNumber::Mkdir as usize,
+            options(nostack),
+        );
+    }
+    returned
+}
+
+/// MiniOS ABIの`rmdir`を呼ぶ。戻り値は0か負のerrno。
+fn sys_rmdir(path: *const u8, path_len: usize) -> isize {
+    let returned: isize;
+    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a0") path as usize => returned,
+            in("a1") path_len,
+            in("a7") SyscallNumber::Rmdir as usize,
+            options(nostack),
+        );
+    }
+    returned
+}
+
+/// MiniOS ABIの`unlink`を呼ぶ。戻り値は0か負のerrno。
+fn sys_unlink(path: *const u8, path_len: usize) -> isize {
+    let returned: isize;
+    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a0") path as usize => returned,
+            in("a1") path_len,
+            in("a7") SyscallNumber::Unlink as usize,
+            options(nostack),
+        );
+    }
+    returned
+}
+
 /// MiniOS ABIの`exit`。kernelはこの呼び出しの後guestへ戻らない。
 fn sys_exit(code: u32) -> ! {
     // Safety: exitのecallはresumeしない契約のため、noreturnでよい。
@@ -204,7 +262,7 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
         sys_exit(FAILURE_EXIT);
     }
 
-    // errno契約：不在source、directoryのsource/target、別dir、非8.3名。
+    // errno契約：不在source、dir→file、file→dir、別dir、非8.3名。
     if sys_rename(
         MISSING_PATH.as_ptr(),
         MISSING_PATH.len(),
@@ -217,9 +275,9 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     if sys_rename(
         DIR_PATH.as_ptr(),
         DIR_PATH.len(),
-        OLD_PATH.as_ptr(),
-        OLD_PATH.len(),
-    ) != EISDIR
+        FILE_PATH.as_ptr(),
+        FILE_PATH.len(),
+    ) != ENOTDIR
     {
         sys_exit(FAILURE_EXIT);
     }
@@ -292,6 +350,129 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
         sys_exit(FAILURE_EXIT);
     }
     if sys_close(fd) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // directoryのrename：中のfileは新しいdir名で解決できる（`..`は
+    // 親clusterを指すため更新不要）。旧名はENOENTになる。
+    if sys_mkdir(OLDDIR_PATH.as_ptr(), OLDDIR_PATH.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_create(OLDDIR_INNER.as_ptr(), OLDDIR_INNER.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_write(fd as usize, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd as usize) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        OLDDIR_PATH.as_ptr(),
+        OLDDIR_PATH.len(),
+        NEWDIR_PATH.as_ptr(),
+        NEWDIR_PATH.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_open(OLDDIR_INNER.as_ptr(), OLDDIR_INNER.len()) != ENOENT {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_open(NEWDIR_INNER.as_ptr(), NEWDIR_INNER.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = fd as usize;
+    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if buffer[..PAYLOAD.len()] != *PAYLOAD {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // errno契約：dir→fileはENOTDIR、file→dirはEISDIR、dir→非空dirは
+    // ENOTEMPTY。
+    if sys_rename(
+        NEWDIR_PATH.as_ptr(),
+        NEWDIR_PATH.len(),
+        FILE_PATH.as_ptr(),
+        FILE_PATH.len(),
+    ) != ENOTDIR
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_mkdir(OTHERD_PATH.as_ptr(), OTHERD_PATH.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_create(OTHERD_INNER.as_ptr(), OTHERD_INNER.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd as usize) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        FILE_PATH.as_ptr(),
+        FILE_PATH.len(),
+        OTHERD_PATH.as_ptr(),
+        OTHERD_PATH.len(),
+    ) != EISDIR
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        NEWDIR_PATH.as_ptr(),
+        NEWDIR_PATH.len(),
+        OTHERD_PATH.as_ptr(),
+        OTHERD_PATH.len(),
+    ) != ENOTEMPTY
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // dir→空dirは置換。targetのentryとchainが消え、sourceが名を継ぐ。
+    if sys_mkdir(EMPTYD_PATH.as_ptr(), EMPTYD_PATH.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        NEWDIR_PATH.as_ptr(),
+        NEWDIR_PATH.len(),
+        EMPTYD_PATH.as_ptr(),
+        EMPTYD_PATH.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_open(NEWDIR_INNER.as_ptr(), NEWDIR_INNER.len()) != ENOENT {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_open(EMPTYD_INNER.as_ptr(), EMPTYD_INNER.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd as usize) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // 片付け：中身のfileを消してから両dirをrmdirできる。
+    if sys_rmdir(EMPTYD_PATH.as_ptr(), EMPTYD_PATH.len()) != ENOTEMPTY {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_unlink(EMPTYD_INNER.as_ptr(), EMPTYD_INNER.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rmdir(EMPTYD_PATH.as_ptr(), EMPTYD_PATH.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_unlink(OTHERD_INNER.as_ptr(), OTHERD_INNER.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rmdir(OTHERD_PATH.as_ptr(), OTHERD_PATH.len()) != 0 {
         sys_exit(FAILURE_EXIT);
     }
 

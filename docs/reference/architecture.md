@@ -200,9 +200,9 @@ IMEM契約は実効32 KiBであり、RV32 buildは`opt-level=z`で収めます�
 
 queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`として所有し、恒等写像済みのため物理アドレスをそのままdeviceへ渡します。
 `storage::fat32`は`SectorReader`境界で`VirtioBlk`へ差し替わるため、parser本体はRV32経路と共有です。
-書き込み経路（`create_file`、`write_range`、`unlink_file`、`rename_file`、`create_dir`、`remove_dir`）は`SectorWriter`境界を追加で要求するため、read-only想定のRV32 SD経路では構成されません。
+書き込み経路（`create_file`、`write_range`、`unlink_file`、`rename`、`create_dir`、`remove_dir`）は`SectorWriter`境界を追加で要求するため、read-only想定のRV32 SD経路では構成されません。
 `unlink_file`はdir entryと先行する長い名前のrecord列を`0xe5`へ書き換えてcluster chainを解放し、削除したentryを指すfdはkernelが`ProcessTable`内の全processから失効させます。
-`rename_file`は同一directory内でentryの8.3名を書き換えます。fileのcluster chainと内容、entryの物理位置は変わらないため、開いているfdは有効なままです。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。別directoryへの移動は`CrossDirectory`として拒否します。
+`rename`は同一directory内でentryの8.3名を書き換えます。fileでもdirectoryでも使え、cluster chainと内容、entryの物理位置は変わらないため、開いているfdは有効なままです。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。directoryのtargetは空に限り置き換えられ、fileへのdir改名は`NotDirectory`、非空dirへの改名は`NotEmpty`です。別directoryへの移動は`CrossDirectory`として拒否します。
 `create_dir`は新しいclusterを`.`と`..`のentryで初期化してから親directoryへentryを公開し、途中の失敗では割り当てたclusterを解放してから失敗を返します。
 `remove_dir`は`.`と`..`以外のentryがないことを確かめてから、`unlink_file`と同じくentry削除とchain解放を行います。
 
