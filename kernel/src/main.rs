@@ -1579,6 +1579,12 @@ static mut CURRENT_PROC: *mut Process = core::ptr::null_mut();
 #[cfg(target_arch = "riscv64")]
 static mut PROC_TABLE_PTR: *mut ProcessTable = core::ptr::null_mut();
 
+/// `spawn`が新processへ複写するkernel mappingの計画。run loopが
+/// dispatch開始前に設定し、終了後にnullへ戻す。`KernelMapPlan`は
+/// kernel_mainのstack上でloopより長生きする。
+#[cfg(target_arch = "riscv64")]
+static mut KERNEL_MAP_PLAN_PTR: *const minios_kernel::vm::kernel::KernelMapPlan = core::ptr::null();
+
 /// run loopが`__run_user`の直前と復帰後に呼び、fd opの対象processを指す。
 /// `null`は「trap中のprocessなし」を意味する。
 ///
@@ -1678,6 +1684,81 @@ unsafe fn relocate_file_fds(old_cluster: u32, old_index: u32, new_cluster: u32, 
     let table = unsafe { *&raw const PROC_TABLE_PTR };
     if let Some(table) = unsafe { table.as_mut() } {
         table.relocate_file_fds(old_cluster, old_index, new_cluster, new_index);
+    }
+}
+
+/// run loopがdispatch loopの開始前と終了後に呼び、`spawn`が複写する
+/// kernel mapping計画を指す。
+///
+/// # Safety
+///
+/// `set_process_table`と同じ契約: 実行窓のhandlerだけが読む値であり、
+/// loop終了時にnullへ戻すこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn set_kernel_map_plan(plan: *const minios_kernel::vm::kernel::KernelMapPlan) {
+    unsafe { *&raw mut KERNEL_MAP_PLAN_PTR = plan };
+}
+
+/// 現在processのpidを返す。trap中のprocessがなければ`None`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn current_pid() -> Option<usize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    unsafe { process.as_ref() }.map(Process::pid)
+}
+
+/// ELFを新processとして読み込む。kernel mappingは`KERNEL_MAP_PLAN_PTR`、
+/// user memoryは`USER_SYSCALL_PROBE_MEMORY`、frameは`GlobalFrames`を使う。
+/// `USER_SYSCALL_PROBE_MEMORY`を指す`&`参照はこの呼び出し中に再使用
+/// されないため、実行窓の排他契約で`&mut`へ変換できる。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。返したprocessの所有権はcallerへ
+/// 移り、tableへのinsertかreclaimをcallerが行う。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn spawn_process(
+    name: &'static str,
+    elf: &[u8],
+    arguments: &[&str],
+) -> Result<
+    Process,
+    minios_kernel::process::SpawnFailure<minios_kernel::vm::storage::IdentityFrameStoreError>,
+> {
+    use minios_kernel::process::SpawnError;
+
+    let plan = unsafe { *&raw const KERNEL_MAP_PLAN_PTR };
+    let Some(plan) = (unsafe { plan.as_ref() }) else {
+        return Err(minios_kernel::process::SpawnFailure {
+            error: SpawnError::OutOfFrames,
+            image: None,
+        });
+    };
+    let memory = unsafe { &mut *(USER_SYSCALL_PROBE_MEMORY as *mut IdentityFrameStore) };
+    let mut frames = GlobalFrames;
+    Process::spawn(name, elf, arguments, &mut frames, memory, plan.mappings())
+}
+
+/// `spawn`で作ったprocessをtableへ登録し、採番したpidを返す。
+/// table満杯時はprocessをそのまま返すため、callerが所有frameを回収する。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+#[allow(clippy::result_large_err)]
+unsafe fn insert_spawned(process: Process) -> Result<usize, Process> {
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    match unsafe { table.as_mut() } {
+        Some(table) => table.insert(process),
+        None => Err(process),
     }
 }
 
@@ -2442,10 +2523,11 @@ fn run_boot_payload(
         );
     }
 
-    // Safety: fd失効の走査はdispatchのtrap窓からのみ行われ、loop終了時に
-    // nullへ戻す。
+    // Safety: fd失効の走査と`spawn`のplan参照はdispatchのtrap窓からのみ
+    // 行われ、loop終了時にnullへ戻す。
     unsafe {
         set_process_table(&mut table);
+        set_kernel_map_plan(plan);
     }
     let mut sink = control::UartControlSink;
     let mut switches = 0usize;
@@ -2542,6 +2624,7 @@ fn run_boot_payload(
     // 全processが終了済みでhandlerからの借用は残っていない。
     unsafe {
         set_process_table(core::ptr::null_mut());
+        set_kernel_map_plan(core::ptr::null());
         close_file_storage();
     }
 

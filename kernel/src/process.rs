@@ -514,9 +514,14 @@ impl Default for ProcessTable {
 }
 
 impl ProcessTable {
-    pub const fn new() -> Self {
+    /// `MAX_PROCS`分のcapacityを先に確保する。`insert`はlive数を
+    /// `MAX_PROCS`へ制限するため、以後のpushはreallocを起こさず、
+    /// `get_mut`が返す要素pointerがtableの生存期間中ずっと安定する。
+    /// これはtrap窓が`Process`へのraw pointerを保持し、その窓内で
+    /// `spawn`が`insert`し得る設計の不変条件である。
+    pub fn new() -> Self {
         Self {
-            procs: Vec::new(),
+            procs: Vec::with_capacity(MAX_PROCS),
             next_pid: 0,
             last_picked: None,
         }
@@ -1182,5 +1187,28 @@ mod tests {
         }
         assert!(table.take_oldest().is_none());
         assert!(table.is_empty());
+    }
+
+    // Catches the Vec ever re-allocating while it holds live processes: the
+    // scheduler keeps a raw pointer into `procs` across a syscall dispatch
+    // that may itself insert a spawned process, so filling the table must
+    // not move existing entries.
+    #[test]
+    fn table_fill_never_moves_live_processes() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let mut pointers = Vec::new();
+
+        for index in 0..MAX_PROCS {
+            let name = ["fill-", "0123456789abcdef".get(index..index + 1).unwrap()].concat();
+            let process = fixture.spawn(Box::leak(name.into_boxed_str()));
+            table.insert(process).expect("insert process");
+            pointers.push(table.get(index).expect("process is live") as *const Process);
+        }
+
+        for (pid, pointer) in pointers.iter().enumerate() {
+            let process = table.get(pid).expect("process is live");
+            assert_eq!(process as *const Process, *pointer);
+        }
     }
 }

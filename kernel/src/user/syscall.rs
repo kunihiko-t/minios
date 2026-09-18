@@ -106,12 +106,12 @@ pub trait ControlSource {
         Err(ENOSYS)
     }
 
-    /// `old_path`のfileを`new_path`へrenameする。fileの中身とclusterは
-    /// 変わらず、dir entryの8.3名だけが書き換わる。同名へのrenameは
-    /// no-opの成功、既存fileへのrenameはPOSIXと同じく置き換えで、
-    /// 置き換えられたfileを指すfdは失効する。sourceとtargetは同じdir
-    /// に限り、別dirへの移動は`EINVAL`で拒否する。`Err`はそのまま
-    /// `a0`へ返すerrnoである。default実装は`ENOSYS`。
+    /// `old_path`のentryを`new_path`へ移す。同一directory内では8.3名の
+    /// 書き換え、別directoryへの指定は移動になる。fileの中身とclusterは
+    /// 変わらず、開いているfdは有効のままである。同名へのrenameはno-op
+    /// の成功、既存fileへのrenameはPOSIXと同じく置き換えで、置き換え
+    /// られたfileを指すfdは失効する。`Err`はそのまま`a0`へ返すerrno
+    /// である。default実装は`ENOSYS`。
     fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
         let _ = (old_path, new_path);
         Err(ENOSYS)
@@ -129,6 +129,20 @@ pub trait ControlSource {
     /// `ENOTEMPTY`、fileは`ENOTDIR`である。`Err`はそのまま`a0`へ返す
     /// errnoである。default実装は`ENOSYS`。
     fn remove_dir(&mut self, path: &str) -> Result<(), isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
+
+    /// 呼び出しprocessのpidを返す。負の値はそのまま`a0`へ返すerrno
+    /// である。default実装は`ENOSYS`。
+    fn getpid(&mut self) -> isize {
+        ENOSYS
+    }
+
+    /// `path`のFAT32 fileをELFとして新processへ読み込み、採番したpidを
+    /// 返す。childは親と独立してscheduleされ、終了statusの受け渡しは
+    /// ない。`Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn spawn(&mut self, path: &str) -> Result<usize, isize> {
         let _ = path;
         Err(ENOSYS)
     }
@@ -207,6 +221,10 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_rename(context, space, memory, source)
     } else if number == SyscallNumber::Close as usize {
         dispatch_close(context, source)
+    } else if number == SyscallNumber::Getpid as usize {
+        dispatch_getpid(context, source)
+    } else if number == SyscallNumber::Spawn as usize {
+        dispatch_spawn(context, space, memory, source)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -393,6 +411,40 @@ fn dispatch_rename<M: FrameStore, E, R: ControlSource>(
     };
     match source.rename(old_path, new_path) {
         Ok(()) => context.set_register(10, 0),
+        Err(errno) => context.set_register(10, errno as usize),
+    }
+    SyscallFlow::Resume
+}
+
+/// `getpid`（引数なし）。呼び出しprocessのpidを`a0`へ返す。
+/// storageやuser memoryへ触れない。
+fn dispatch_getpid<E, R: ControlSource>(
+    context: &mut UserContext,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    context.set_register(10, source.getpid() as usize);
+    SyscallFlow::Resume
+}
+
+/// `spawn` (`a0=path_ptr, a1=path_len`)。検証規約は`open`と同じで、
+/// process生成のside effectより先にpathのEFAULT/EINVALを確定する。
+/// 成功時は`a0`へchildのpidを返す。
+fn dispatch_spawn<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    let Some(path_len) = copy_user_path(context, space, memory, &mut path_buf) else {
+        return SyscallFlow::Resume;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    };
+    match source.spawn(path) {
+        Ok(pid) => context.set_register(10, pid),
         Err(errno) => context.set_register(10, errno as usize),
     }
     SyscallFlow::Resume
@@ -691,6 +743,8 @@ mod tests {
     const LSEEK_NUMBER: usize = SyscallNumber::Lseek as usize;
     const PREAD_NUMBER: usize = SyscallNumber::Pread as usize;
     const PWRITE_NUMBER: usize = SyscallNumber::Pwrite as usize;
+    const GETPID_NUMBER: usize = SyscallNumber::Getpid as usize;
+    const SPAWN_NUMBER: usize = SyscallNumber::Spawn as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -951,6 +1005,9 @@ mod tests {
         seen_offset: Option<u64>,
         seen_seek: Option<(isize, usize)>,
         seek_result: Result<u64, isize>,
+        getpid_result: isize,
+        spawns: usize,
+        spawn_result: Result<usize, isize>,
     }
 
     impl FileSource {
@@ -977,6 +1034,9 @@ mod tests {
                 seen_offset: None,
                 seen_seek: None,
                 seek_result: Ok(8),
+                getpid_result: 7,
+                spawns: 0,
+                spawn_result: Ok(11),
             }
         }
 
@@ -1086,6 +1146,16 @@ mod tests {
             self.result?;
             self.written.extend_from_slice(data);
             Ok(data.len())
+        }
+
+        fn getpid(&mut self) -> isize {
+            self.getpid_result
+        }
+
+        fn spawn(&mut self, path: &str) -> Result<usize, isize> {
+            self.spawns += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.spawn_result
         }
     }
 
@@ -2301,6 +2371,123 @@ mod tests {
             assert_eq!(flow, SyscallFlow::Resume);
             assert_eq!(context.register(10), ENOSYS as usize);
         }
+    }
+
+    // Catches getpid writing anything other than the source's pid into a0.
+    #[test]
+    fn getpid_returns_the_source_pid() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_fixture(
+            GETPID_NUMBER,
+            0,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 7);
+    }
+
+    // Catches the default ControlSource::getpid leaking a successful result:
+    // outside a process context the guest must see ENOSYS.
+    #[test]
+    fn getpid_without_process_context_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_fixture(
+            GETPID_NUMBER,
+            0,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches spawn reaching the source with the copied path and the child pid
+    // landing in a0; also covers path validation before source side effects.
+    #[test]
+    fn spawn_reaches_the_source_with_the_path() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            SPAWN_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 11);
+        assert_eq!(source.spawns, 1);
+        assert_eq!(source.seen_path.as_deref(), Some(b"CHILD.ELF".as_slice()));
+
+        // path検証で落ちる場合はsourceへ届かない。
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_numbered_file_fixture(
+            SPAWN_NUMBER,
+            0x40_000,
+            9,
+            0,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.spawns, 0);
+
+        // sourceのerrnoはそのまま`a0`へ返る。
+        let mut source = FileSource::serving(b"");
+        source.spawn_result = Err(ENOENT);
+        let (context, _) = dispatch_numbered_file_fixture(
+            SPAWN_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), ENOENT as usize);
+        assert_eq!(source.spawns, 1);
+    }
+
+    // Catches the default ControlSource::spawn leaking a successful result:
+    // without storage the guest must see ENOSYS.
+    #[test]
+    fn spawn_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            SPAWN_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
     }
 
     // Catches the default ControlSource::unlink implementation leaking a

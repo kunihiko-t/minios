@@ -31,6 +31,61 @@ const FILE_CLUSTER: u32 = 3;
 const DOCS_CLUSTER: u32 = 4;
 const NOTE_CLUSTER: u32 = 5;
 const LFN_CLUSTER: u32 = 6;
+const CHILD_CLUSTER: u32 = 7;
+
+/// `DOCS/CHILD.ELF`のfile長。guestの`spawn`検査が起動する最小ELF64で、
+/// ELF header + program header + code + messageをfile offset 0から
+/// mapする単一segmentへ詰めている。
+const CHILD_ELF_LEN: usize = 0xcc;
+
+/// guestの`spawn`検査用の最小ELF64 executable。entry (0x0010_0080) から
+/// `write(1, "spawn-child\n", 12)` → `getpid` → `exit(pid + 41)` = 42を
+/// 行う。segmentはfile offset 0をそのままvaddr `0x0010_0000`へmapし、
+/// header自身もcode pageへ載るが実行はentry以降だけなので問題ない。
+fn child_elf() -> [u8; CHILD_ELF_LEN] {
+    const CODE: [u32; 11] = [
+        0x0010_0513, // addi a0, x0, 1     ; fd = STDOUT
+        0x0010_05b7, // lui  a1, 0x100     ; a1 = 0x0010_0000
+        0x0c05_8593, // addi a1, a1, 0xc0  ; a1 = message
+        0x00c0_0613, // addi a2, x0, 12    ; len
+        0x0010_0893, // addi a7, x0, 1     ; Write
+        0x0000_0073, // ecall
+        0x00f0_0893, // addi a7, x0, 15    ; Getpid
+        0x0000_0073, // ecall              ; a0 = pid (=1)
+        0x0295_0513, // addi a0, a0, 41    ; a0 = 42
+        0x0020_0893, // addi a7, x0, 2     ; Exit
+        0x0000_0073, // ecall
+    ];
+    let mut bytes = [0u8; CHILD_ELF_LEN];
+    bytes[0..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2; // ELFCLASS64
+    bytes[5] = 1; // little-endian
+    bytes[6] = 1; // ident version
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    bytes[18..20].copy_from_slice(&243u16.to_le_bytes()); // EM_RISCV
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
+    bytes[24..32].copy_from_slice(&0x0010_0080u64.to_le_bytes()); // entry
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+    bytes[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
+
+    // program header: PT_LOAD, R+X, file offset 0 → vaddr 0x0010_0000。
+    bytes[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    bytes[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R|PF_X
+    // offset=0, paddr=0はzeroのまま。
+    bytes[80..88].copy_from_slice(&0x0010_0000u64.to_le_bytes()); // vaddr
+    bytes[96..104].copy_from_slice(&(CHILD_ELF_LEN as u64).to_le_bytes()); // filesz
+    bytes[104..112].copy_from_slice(&(CHILD_ELF_LEN as u64).to_le_bytes()); // memsz
+    bytes[112..120].copy_from_slice(&0x1000u64.to_le_bytes()); // align
+
+    for (index, instruction) in CODE.iter().enumerate() {
+        let start = 0x80 + index * 4;
+        bytes[start..start + 4].copy_from_slice(&instruction.to_le_bytes());
+    }
+    bytes[0xc0..0xcc].copy_from_slice(b"spawn-child\n");
+    bytes
+}
 
 /// `data_cluster_count >= 65_525` (FAT32の最小cluster数) を余裕を持って
 /// 満たすvolume sector数。fat_sectorsは下記で固定点反復して求める。
@@ -163,6 +218,7 @@ fn image_bytes() -> Vec<u8> {
     set(&mut fat, DOCS_CLUSTER, 0x0fff_ffff);
     set(&mut fat, NOTE_CLUSTER, 0x0fff_ffff);
     set(&mut fat, LFN_CLUSTER, 0x0fff_ffff);
+    set(&mut fat, CHILD_CLUSTER, 0x0fff_ffff);
     for copy in 0..FAT_COUNT {
         let start = (u32::from(RESERVED_SECTORS) + u32::from(copy) * fat_sectors) as usize * SECTOR;
         image[start..start + fat.len()].copy_from_slice(&fat);
@@ -215,6 +271,14 @@ fn image_bytes() -> Vec<u8> {
             NOTE_CLUSTER,
             NOTE_TXT.len() as u32,
         );
+        dir_entry(
+            docs,
+            3,
+            b"CHILD   ELF",
+            0x20,
+            CHILD_CLUSTER,
+            CHILD_ELF_LEN as u32,
+        );
     }
 
     // --- file data (cluster 3 = HELLO.TXT, cluster 5 = NOTE.TXT) ---
@@ -224,6 +288,8 @@ fn image_bytes() -> Vec<u8> {
     image[note_start..note_start + NOTE_TXT.len()].copy_from_slice(NOTE_TXT);
     let lfn_start = (data_start + (LFN_CLUSTER - 2)) as usize * SECTOR;
     image[lfn_start..lfn_start + LFN_TXT.len()].copy_from_slice(LFN_TXT);
+    let child_start = (data_start + (CHILD_CLUSTER - 2)) as usize * SECTOR;
+    image[child_start..child_start + CHILD_ELF_LEN].copy_from_slice(&child_elf());
 
     image
 }
@@ -309,7 +375,7 @@ mod tests {
         let mut docs = Vec::new();
         fs.for_each_entry("DOCS", |entry| docs.push(entry.name().to_owned()))
             .expect("DOCS listing must succeed");
-        assert_eq!(docs, ["NOTE.TXT"]);
+        assert_eq!(docs, ["NOTE.TXT", "CHILD.ELF"]);
         let mut note = Vec::new();
         fs.read_file("DOCS/NOTE.TXT", |chunk| note.extend_from_slice(chunk))
             .expect("DOCS/NOTE.TXT must be readable");
