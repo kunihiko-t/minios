@@ -94,7 +94,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 - `user/context.rs`：entry、user stack、`sstatus.SPP=0`を持つ`UserContext`を定義します。
 - `user/memory.rs`：user pointerを参照として解釈せず、pageごとに`U=1`とread権限を確認してcopyします。
-- `user/syscall.rs`：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`をdispatchします。
+- `user/syscall.rs`：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`をdispatchします。
 - `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
 - `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 
@@ -110,8 +110,10 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   切り替えはtrap内ではなく`run_boot_payload`のdispatch loopが行うため、kernel trap stackは常に「実行中process専用」の不変条件を保ちます。
 - processの`exit`またはfatal trapでtableから取り除き、fd tableごと全所有frameを回収してから次を選びます。
   manifest v2では終了を`PROC_EXIT` frame（pidと終了code）で個別に通知し、v1の単一imageでは従来の`EXIT` frameを維持します。
+  正常終了したprocessの`(pid, code)`は`MAX_PROCS`件上限の終了台帳へ記録され、`waitpid`が1回だけ消費します。
 - `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
   processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
+  `waitpid`も同じBlocked再実行モデルで、対象processがliveなら呼び出しprocessを`BlockedOnPid`へ移し、対象の終了で起こして終了codeを返します。
   Stdin frameの受信は`StdinStaging`内の再開可能なdecoderがbyte単位で蓄積し、frame途中でbyteが尽きた再試行は`WouldBlock`として再び`Blocked`へ戻るため、受信途中の間も他processが進み続けます。
 
 ### シェル
@@ -131,7 +133,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、schedを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、file-spawn、file-waitpid、schedを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
 - `guest.rs`：Rust guestのrelease buildと、kernelのELF parserによる配置契約のhost検査を担当します。

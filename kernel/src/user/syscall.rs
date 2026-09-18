@@ -140,10 +140,19 @@ pub trait ControlSource {
     }
 
     /// `path`のFAT32 fileをELFとして新processへ読み込み、採番したpidを
-    /// 返す。childは親と独立してscheduleされ、終了statusの受け渡しは
-    /// ない。`Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    /// 返す。childは親と独立してscheduleされ、終了codeは`waitpid`で
+    /// 回収できる。`Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
     fn spawn(&mut self, path: &str) -> Result<usize, isize> {
         let _ = path;
+        Err(ENOSYS)
+    }
+
+    /// `pid`のprocessの終了codeを返す。`Ok(None)`は対象がまだliveで
+    /// 呼び出しprocessをblockすることを意味し、対象の終了で同じecallが
+    /// 再実行される。`Err`はそのまま`a0`へ返すerrnoである。
+    /// default実装は`ENOSYS`。
+    fn waitpid(&mut self, pid: usize) -> Result<Option<u32>, isize> {
+        let _ = pid;
         Err(ENOSYS)
     }
 }
@@ -225,6 +234,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_getpid(context, source)
     } else if number == SyscallNumber::Spawn as usize {
         dispatch_spawn(context, space, memory, source)
+    } else if number == SyscallNumber::Waitpid as usize {
+        dispatch_waitpid(context, source)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -448,6 +459,30 @@ fn dispatch_spawn<M: FrameStore, E, R: ControlSource>(
         Err(errno) => context.set_register(10, errno as usize),
     }
     SyscallFlow::Resume
+}
+
+/// `waitpid` (`a0=pid`)。`Ok(Some(code))`は終了codeを`a0`へ、
+/// `Ok(None)`は対象がliveなので`read`と同じく`sepc`をecallへ戻して
+/// `Blocked`を返し、対象終了後の再実行でcodeを回収する。
+/// `Err(errno)`は`ECHILD`/`EINVAL`等をそのまま`a0`へ返す。
+fn dispatch_waitpid<E, R: ControlSource>(
+    context: &mut UserContext,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    match source.waitpid(context.register(10)) {
+        Ok(Some(code)) => {
+            context.set_register(10, code as usize);
+            SyscallFlow::Resume
+        }
+        Ok(None) => {
+            context.set_sepc(context.sepc() - 4);
+            SyscallFlow::Blocked
+        }
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
 }
 
 /// `lseek` (`a0=fd, a1=offset(isize), a2=whence`)。file fdのみが対象で、
@@ -745,6 +780,7 @@ mod tests {
     const PWRITE_NUMBER: usize = SyscallNumber::Pwrite as usize;
     const GETPID_NUMBER: usize = SyscallNumber::Getpid as usize;
     const SPAWN_NUMBER: usize = SyscallNumber::Spawn as usize;
+    const WAITPID_NUMBER: usize = SyscallNumber::Waitpid as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1008,6 +1044,9 @@ mod tests {
         getpid_result: isize,
         spawns: usize,
         spawn_result: Result<usize, isize>,
+        waitpids: usize,
+        seen_wait_pid: Option<usize>,
+        waitpid_result: Result<Option<u32>, isize>,
     }
 
     impl FileSource {
@@ -1037,6 +1076,9 @@ mod tests {
                 getpid_result: 7,
                 spawns: 0,
                 spawn_result: Ok(11),
+                waitpids: 0,
+                seen_wait_pid: None,
+                waitpid_result: Ok(Some(42)),
             }
         }
 
@@ -1156,6 +1198,12 @@ mod tests {
             self.spawns += 1;
             self.seen_path = Some(Vec::from(path.as_bytes()));
             self.spawn_result
+        }
+
+        fn waitpid(&mut self, pid: usize) -> Result<Option<u32>, isize> {
+            self.waitpids += 1;
+            self.seen_wait_pid = Some(pid);
+            self.waitpid_result
         }
     }
 
@@ -2481,6 +2529,95 @@ mod tests {
             0,
             0,
             b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches waitpid dropping the reaped code or the waited pid: a
+    // recorded exit must land in a0 after one source call with a0's pid.
+    #[test]
+    fn waitpid_returns_the_reaped_exit_code() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_fixture(
+            WAITPID_NUMBER,
+            3,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 42);
+        assert_eq!(source.waitpids, 1);
+        assert_eq!(source.seen_wait_pid, Some(3));
+    }
+
+    // Catches a live-target wait resuming instead of blocking, or blocking
+    // without rewinding sepc: Ok(None) must return Blocked and point sepc
+    // back at the ecall so the retry re-runs the same waitpid.
+    #[test]
+    fn waitpid_on_a_live_target_blocks_and_rewinds_sepc() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        source.waitpid_result = Ok(None);
+        let (context, flow) = dispatch_fixture(
+            WAITPID_NUMBER,
+            3,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Blocked);
+        assert_eq!(context.sepc(), 0x0010_0500 - 4);
+        assert_eq!(context.register(10), 3);
+    }
+
+    // Catches waitpid swallowing the source errno: ECHILD/EINVAL must pass
+    // through to a0 unchanged.
+    #[test]
+    fn waitpid_passes_the_source_errno_through() {
+        use minios_abi::syscall::ECHILD;
+
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        source.waitpid_result = Err(ECHILD);
+        let (context, flow) = dispatch_fixture(
+            WAITPID_NUMBER,
+            99,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ECHILD as usize);
+        assert_eq!(source.seen_wait_pid, Some(99));
+    }
+
+    // Catches the default ControlSource::waitpid leaking a successful
+    // result: without a process context the guest must see ENOSYS.
+    #[test]
+    fn waitpid_without_process_context_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_fixture(
+            WAITPID_NUMBER,
+            1,
+            0,
+            0,
             &mut sink,
             &mut source,
             &mut scratch(),

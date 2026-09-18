@@ -82,6 +82,13 @@ bench = false
 doctest = false
 
 [[bin]]
+name = "minios-guest-file-waitpid"
+path = "src/bin/file_waitpid.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
 name = "minios-guest-sched-a"
 path = "src/bin/sched_a.rs"
 test = false

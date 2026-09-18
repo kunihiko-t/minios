@@ -63,6 +63,8 @@ U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類さ
 `cargo xtask test sched`は、busy-waitするprocessの出力の間に短命processの出力が挟まることと、切り替え回数の報告をQEMU上で確認します。
 `read`は入力未到着ならprocessを`BlockedOnStdin`へ回してecallをやり直すため、stdin待ちの間も他processが進みます（`cargo xtask test sched-io`で検証）。
 Stdin frameの受信は`StdinStaging`の再開可能なdecoderが担い、frame途中のbyte枯渇でもprocessは再びstdin待ちへ戻ります（`cargo xtask test sched-io-partial`で検証）。
+guestからの動的process生成も完了しており、`spawn`はFAT32上のELFを新processとして起動してpidを返し、`getpid`は呼び出しprocessのpidを返します（`cargo xtask test file-spawn`で検証）。
+`waitpid`は対象processの終了codeを終了台帳から回収し、対象がliveなら呼び出しprocessを`BlockedOnPid`へ回して対象の終了で起こします（`cargo xtask test file-waitpid`で検証）。
 
 ## 次
 

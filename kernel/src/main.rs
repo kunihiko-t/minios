@@ -1762,6 +1762,33 @@ unsafe fn insert_spawned(process: Process) -> Result<usize, Process> {
     }
 }
 
+/// `waitpid`のtable側処理。`target`の終了codeが台帳にあれば消費して
+/// `Ok(Some(code))`、liveならcallerを`BlockedOnPid(target)`へ移して
+/// `Ok(None)`（callerは同じecallを再実行してcodeを回収する）、
+/// self/不在/既reapは`ECHILD`、wait連鎖のcycleは`EINVAL`。
+/// process contextがなければ`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。callerの`BlockedOnPid` markは
+/// table経由で現在processへ書くため、run loopがBlockedを受けて呼ぶ
+/// `block_on_stdin`（runnable時のみ遷移）で上書きされない。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn wait_pid(target: usize) -> Result<Option<u32>, isize> {
+    let Some(caller) = (unsafe { current_pid() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    let Some(table) = (unsafe { table.as_mut() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    if let Some(code) = table.take_exit(target) {
+        return Ok(Some(code));
+    }
+    table.block_waitpid(caller, target).map(|()| None)
+}
+
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
 #[cfg(target_arch = "riscv64")]
 fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
@@ -2588,6 +2615,10 @@ fn run_boot_payload(
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_EXIT) => {
                 let code = USER_EXIT_CODE.load(Ordering::Relaxed) as u32;
                 last_code = code;
+                // `waitpid`のreapより先にstatusを台帳へ記録し、待っている
+                // processをrunnableへ戻す。reclaimはledger消費を妨げない。
+                table.record_exit(pid, code);
+                table.wake_on_exit(pid);
                 if multi {
                     let payload = minios_abi::control::ProcExitPayload {
                         pid: pid as u32,
@@ -2609,6 +2640,9 @@ fn run_boot_payload(
                 | USER_RUN_OUTCOME_SOURCE_FAILURE,
             ) => {
                 failed += 1;
+                // statusを持たない異常終了は台帳へ記録せず、waiterだけを
+                // 解放する。再dispatchした`waitpid`は`ECHILD`を得る。
+                table.wake_on_exit(pid);
                 reclaim_process_slot(&mut table, pid, frames);
             }
             // `ReturnToKernel`以外の戻りや、handlerがoutcomeを記録しないまま
