@@ -46,7 +46,7 @@ cat       Read a file
 rm        Remove a file
 mkdir     Create a directory
 rmdir     Remove an empty directory
-mv        Rename a file or directory
+mv        Rename or move a file or directory
 clear     Clear the terminal
 shutdown  Shut down MiniOS
 minios> info
@@ -96,6 +96,12 @@ minios> ls
 minios> cat NOTESD/NOTE.TXT
 note inside docs
 minios> mv NOTESD DOCS
+minios> mv HELLO.TXT DOCS/MOVED.TXT
+minios> ls
+<DIR> DOCS
+minios> cat DOCS/MOVED.TXT
+hello from virtio
+minios> mv DOCS/MOVED.TXT HELLO.TXT
 minios> unknown
 unknown command: unknown; try 'help'
 ```

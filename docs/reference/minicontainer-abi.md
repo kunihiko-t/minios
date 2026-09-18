@@ -165,7 +165,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 9 | `lseek` | `a0=fd`、`a1=offset（符号付き）`、`a2=whence` | fdのoffsetを`whence`（0=file先頭、1=現在offset、2=file末尾）基準の`offset`へ更新する。戻り値は新しいoffsetか負のerrno |
 | 10 | `pread` | `a0=fd`、`a1=pointer`、`a2=length`、`a3=offset` | fileの`offset` byte目から読む。fdが保持するoffsetは動かさない。戻り値はbyte数、EOFは0 |
 | 11 | `pwrite` | `a0=fd`、`a1=pointer`、`a2=length`、`a3=offset` | fileの`offset` byte目へ書く。fdが保持するoffsetは動かさない。戻り値は書いたbyte数 |
-| 12 | `rename` | `a0=old pointer`、`a1=old length`、`a2=new pointer`、`a3=new length` | 同一directory内でfileまたはdirectoryの名前を変える。両pathはUTF-8のFAT32パスで256 byte以下。戻り値は0か負のerrno |
+| 12 | `rename` | `a0=old pointer`、`a1=old length`、`a2=new pointer`、`a3=new length` | fileまたはdirectoryを別のpathへ移す（同一directory内では改名）。両pathはUTF-8のFAT32パスで256 byte以下。戻り値は0か負のerrno |
 | 13 | `mkdir` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、directoryを作成する。戻り値は0か負のerrno |
 | 14 | `rmdir` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、空のdirectoryを削除する。戻り値は0か負のerrno |
 
@@ -187,11 +187,11 @@ fdはread専用（`open`由来）またはwrite専用（`create`由来）のど�
 `close`はfdを解放します。標準stream（0、1、2）は閉じられず、processは終了時に残ったfdを自動的に閉じます。
 `unlink`はdir entryとそれに続く長い名前のrecord列を削除し、fileのcluster chainを解放します。directoryには使えず、`EISDIR`を返します。
 POSIXと異なり、削除したentryを指すfdはどのprocessのものも即座に失効し、以後の`read`/`write`/`close`は`EBADF`を返します。これはclusterを即座に解放するために必要な規約です。
-`rename`は同一directory内でfileまたはdirectoryの名前を変えます。新しい名前は`create`と同じく8.3へ正規化できる名前のみ受理します。
-entryのcluster chainと内容、dir entryの物理位置は変わらないため、fileを開いているfdは有効なままです。同名へのrenameは成功のno-opです。
+`rename`はfileまたはdirectoryを別のpathへ移します。同一directory内では名前の変更、別directoryを指定した場合は移動になります。新しい名前は`create`と同じく8.3へ正規化できる名前のみ受理します。
+同一directory内の改名ではentryのcluster chainと内容、dir entryの物理位置は変わらないため、fileを開いているfdは有効なままです。別directoryへの移動ではdir entryが新しい親の中の別の物理位置へ移りますが、kernelが開いているfdのwrite-back先を新しい位置へ追従させるため、fdは有効のままです。同名へのrenameは成功のno-opです。
 新しい名前が既存のfileと一致する場合はPOSIXと同じく置き換えで、消えたfileを指すfdは`unlink`と同じく即座に失効します。既存のtargetがdirectoryの場合は`EISDIR`を返します。
-directoryのrenameも同一directory内に限ります。`..`は親のcluster番号を指すため、改名では更新しません。sourceがdirectoryでtargetがfileの場合は`ENOTDIR`、targetが空でないdirectoryの場合は`ENOTEMPTY`を返します。空のdirectoryへのrenameは置き換えとなり、targetのentryとcluster chainが解放されます。
-別directoryへの移動には対応しておらず、`EXDEV`を返します。
+directoryの移動も可能で、移したdirectoryの`..`は新しい親のcluster番号（root親の場合は0）へ更新されます。sourceがdirectoryでtargetがfileの場合は`ENOTDIR`、targetが空でないdirectoryの場合は`ENOTEMPTY`を返します。空のdirectoryへのrenameは置き換えとなり、targetのentryとcluster chainが解放されます。
+directoryを自身またはその子孫directoryの中へ移す指定は`EINVAL`を返します。
 `mkdir`は`create`と同じ名規約でdirectoryを作成し、`.`と`..`のentryを持つclusterを割り当てます。同名のentryが既にある場合は`EEXIST`を返します。
 `rmdir`は`.`と`..`以外のentryを持たないdirectoryを削除し、そのcluster chainを解放します。対象がfileの場合は`ENOTDIR`、空でない場合は`ENOTEMPTY`を返します。root directoryは削除できません。
 directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdはありません。
@@ -205,11 +205,10 @@ directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdは�
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
 | `-17` | `EEXIST` | `mkdir`の対象と同名のentryが既にある |
-| `-18` | `EXDEV` | `rename`で新旧の親directoryが異なる |
 | `-19` | `ENODEV` | block deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`の対象がdirectoryである |
-| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence |
+| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename` |
 | `-24` | `EMFILE` | processの同時open数（4個）を超えた |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-38` | `ENOSYS` | 未知のsyscall番号、またはstorageを持たない経路でのfile操作 |

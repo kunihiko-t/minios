@@ -75,7 +75,7 @@ const USER_EXIT_STDERR_FRAME: &[u8] = b"MCF1\x03\0\0\0\x03\0\0\0MK5";
 const USER_EXIT_CONTROL_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x2a\0\0\0";
 const SHELL_PROMPT: &str = "minios> ";
 const SHELL_SCRIPT: &[u8] =
-    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nrm Long File Name.txt\nls\ncat Long File Name.txt\nmkdir NEWDIR\nls\nrmdir DOCS\nrmdir NEWDIR\nls\nmv HELLO.TXT WORLD.TXT\nls\nmv WORLD.TXT HELLO.TXT\nmv DOCS NOTESD\nls\ncat NOTESD/NOTE.TXT\nmv NOTESD DOCS\nnot-a-command\nshutdown\n";
+    b"help\ninfo\nuptime\nmemory\nls\nls DOCS\ncat DOCS/NOTE.TXT\ncat Long File Name.txt\nrm Long File Name.txt\nls\ncat Long File Name.txt\nmkdir NEWDIR\nls\nrmdir DOCS\nrmdir NEWDIR\nls\nmv HELLO.TXT WORLD.TXT\nls\nmv WORLD.TXT HELLO.TXT\nmv DOCS NOTESD\nls\ncat NOTESD/NOTE.TXT\nmv NOTESD DOCS\nmv HELLO.TXT DOCS/MOVED.TXT\nls\ncat DOCS/MOVED.TXT\nmv DOCS/MOVED.TXT HELLO.TXT\nnot-a-command\nshutdown\n";
 const SHELL_UPTIME_FORMAT: &str = "uptime: <number> ms";
 const SHELL_TICKS_FORMAT: &str = "ticks: <number>";
 const SHELL_MEMORY_FORMAT: &str = "memory: total=<number> allocated=<number> free=<number> pages";
@@ -2270,6 +2270,26 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat NOTESD/NOTE.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "note inside docs"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> mv NOTESD DOCS"))
+        // cross-directory move：fileをdirの中へ移し、新pathで読み、
+        // rootへ戻す。`ls`は移動後のroot列挙でHELLO.TXTが消える。
+        .and_then(|()| {
+            expect_shell_line(
+                transcript,
+                &mut cursor,
+                "minios> mv HELLO.TXT DOCS/MOVED.TXT",
+            )
+        })
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "<DIR> DOCS"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat DOCS/MOVED.TXT"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "hello from virtio"))
+        .and_then(|()| {
+            expect_shell_line(
+                transcript,
+                &mut cursor,
+                "minios> mv DOCS/MOVED.TXT HELLO.TXT",
+            )
+        })
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> not-a-command"))
         .and_then(|()| {
             expect_shell_line(
@@ -2903,6 +2923,12 @@ mod tests {
             "minios> cat NOTESD/NOTE.TXT",
             "note inside docs",
             "minios> mv NOTESD DOCS",
+            "minios> mv HELLO.TXT DOCS/MOVED.TXT",
+            "minios> ls",
+            "<DIR> DOCS",
+            "minios> cat DOCS/MOVED.TXT",
+            "hello from virtio",
+            "minios> mv DOCS/MOVED.TXT HELLO.TXT",
             "minios> not-a-command",
             "unknown command: not-a-command; try 'help'",
             "minios> shutdown",

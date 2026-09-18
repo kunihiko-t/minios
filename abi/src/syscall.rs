@@ -39,7 +39,6 @@ pub const EBADF: isize = -9;
 pub const ENOMEM: isize = -12;
 pub const EFAULT: isize = -14;
 pub const EEXIST: isize = -17;
-pub const EXDEV: isize = -18;
 pub const ENODEV: isize = -19;
 pub const ENOTDIR: isize = -20;
 pub const EISDIR: isize = -21;
@@ -86,7 +85,6 @@ mod tests {
         assert_eq!(ENOMEM, -12);
         assert_eq!(EFAULT, -14);
         assert_eq!(EEXIST, -17);
-        assert_eq!(EXDEV, -18);
         assert_eq!(ENODEV, -19);
         assert_eq!(ENOTDIR, -20);
         assert_eq!(EISDIR, -21);

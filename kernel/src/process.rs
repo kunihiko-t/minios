@@ -179,6 +179,23 @@ impl FileFdTable {
             }
         }
     }
+
+    /// `(old_cluster, old_index)`を指すfdのwrite-back先を
+    /// `(new_cluster, new_index)`へ書き換える。cross-directory moveで
+    /// entryが別dirのslotへ移った際、開いているfile fdを追従させる。
+    fn relocate_fd_at(
+        &mut self,
+        old_cluster: u32,
+        old_index: u32,
+        new_cluster: u32,
+        new_index: u32,
+    ) {
+        for fd in self.slots.iter_mut().flatten() {
+            if fd.desc.dir_location() == (old_cluster, old_index) {
+                fd.desc.set_dir_location(new_cluster, new_index);
+            }
+        }
+    }
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -355,6 +372,21 @@ impl Process {
     #[cfg(not(target_arch = "riscv32"))]
     pub fn revoke_fd_at(&mut self, dir_cluster: u32, dir_index: u32) {
         self.file_fds.revoke_fd_at(dir_cluster, dir_index);
+    }
+
+    /// `(old_cluster, old_index)`を指すfdのwrite-back先を
+    /// `(new_cluster, new_index)`へ書き換える。cross-directory move
+    /// 成功後にtable経由で呼ばれる。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn relocate_fd_at(
+        &mut self,
+        old_cluster: u32,
+        old_index: u32,
+        new_cluster: u32,
+        new_index: u32,
+    ) {
+        self.file_fds
+            .relocate_fd_at(old_cluster, old_index, new_cluster, new_index);
     }
 
     /// stdinへのbyte到着で再びdispatch可能にする。
@@ -586,6 +618,24 @@ impl ProcessTable {
     pub fn revoke_file_fds(&mut self, dir_cluster: u32, dir_index: u32) {
         for process in self.procs.iter_mut() {
             process.revoke_fd_at(dir_cluster, dir_index);
+        }
+    }
+
+    /// `(old_cluster, old_index)`のdir entryを指すfdを全processで
+    /// `(new_cluster, new_index)`へ追従させる。cross-directory moveで
+    /// entryの物理位置が変わってもopen fileは有効のままにするための
+    /// POSIX不変条件。呼び出しprocess自身のfdも対象になる。
+    /// trap窓からのみ呼ばれる。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn relocate_file_fds(
+        &mut self,
+        old_cluster: u32,
+        old_index: u32,
+        new_cluster: u32,
+        new_index: u32,
+    ) {
+        for process in self.procs.iter_mut() {
+            process.relocate_fd_at(old_cluster, old_index, new_cluster, new_index);
         }
     }
 }
