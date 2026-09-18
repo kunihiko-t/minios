@@ -1668,6 +1668,19 @@ unsafe fn revoke_file_fds(dir_cluster: u32, dir_index: u32) {
     }
 }
 
+/// `(old_cluster, old_index)`のdir entryを指すfdを全processで
+/// `(new_cluster, new_index)`へ追従させる。cross-directory moveで
+/// entryの物理位置が変わってもopen file fdを有効に保つ。
+/// `PROC_TABLE_PTR`はtrap handlerの実行窓内でのみderef可能。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn relocate_file_fds(old_cluster: u32, old_index: u32, new_cluster: u32, new_index: u32) {
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    if let Some(table) = unsafe { table.as_mut() } {
+        table.relocate_file_fds(old_cluster, old_index, new_cluster, new_index);
+    }
+}
+
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
 #[cfg(target_arch = "riscv64")]
 fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {

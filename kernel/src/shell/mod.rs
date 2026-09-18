@@ -580,8 +580,8 @@ fn print_fat_error<E>(prefix: &str, error: crate::storage::fat32::FatError<E>) {
         crate::storage::fat32::FatError::InvalidOffset => {
             crate::println!("{prefix}: invalid offset");
         }
-        crate::storage::fat32::FatError::CrossDirectory => {
-            crate::println!("{prefix}: cross-directory rename");
+        crate::storage::fat32::FatError::MoveIntoItself => {
+            crate::println!("{prefix}: cannot move directory into itself");
         }
         crate::storage::fat32::FatError::Exists => {
             crate::println!("{prefix}: entry already exists");

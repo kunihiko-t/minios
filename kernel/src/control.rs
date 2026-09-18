@@ -145,15 +145,20 @@ impl ControlSource for UartControlSource<'_> {
         Ok(())
     }
 
-    /// guestの`rename`をstorage sessionへ委譲する。dir entryの位置は
-    /// 変わらないためsource fileのfdはそのまま有効だが、置き換えられた
-    /// target fileのclusterは解放されるため、そのfdは失効させる。
+    /// guestの`rename`をstorage sessionへ委譲する。in-place改名では
+    /// source fileのfdはそのまま有効で、cross-directory moveでは
+    /// entryの物理位置が変わるため全processのfdを新位置へ追従させる。
+    /// 置き換えられたtargetのclusterは解放されるため、そのfdは失効。
     #[cfg(target_arch = "riscv64")]
     fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let replaced = session.rename(old_path, new_path).map_err(fat_errno)?;
-        if let Some((dir_cluster, dir_index)) = replaced {
+        let outcome = session.rename(old_path, new_path).map_err(fat_errno)?;
+        if let Some(((oc, oi), (nc, ni))) = outcome.moved {
+            // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
+            unsafe { crate::relocate_file_fds(oc, oi, nc, ni) };
+        }
+        if let Some((dir_cluster, dir_index)) = outcome.replaced {
             // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
             unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
         }
@@ -286,8 +291,7 @@ fn fat_errno(
         FatError::NotFound => ENOENT,
         FatError::IsDirectory => EISDIR,
         FatError::NotDirectory => ENOTDIR,
-        FatError::InvalidName | FatError::InvalidOffset => EINVAL,
-        FatError::CrossDirectory => minios_abi::syscall::EXDEV,
+        FatError::InvalidName | FatError::InvalidOffset | FatError::MoveIntoItself => EINVAL,
         FatError::Exists => minios_abi::syscall::EEXIST,
         FatError::NotEmpty => minios_abi::syscall::ENOTEMPTY,
         FatError::NoSpace => minios_abi::syscall::ENOSPC,

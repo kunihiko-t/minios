@@ -2,8 +2,8 @@
 //!
 //! fileをrenameして開いているfdが有効なまま動くこと、旧名が`ENOENT`に
 //! なること、置き換えられたfileを指すfdが`EBADF`で失効すること、
-//! directoryのrenameとdir/file組合せのerrno、別dirへのrenameが
-//! `EXDEV`を返すことを確認し、42で終了する。
+//! directoryのrenameとdir/file組合せのerrno、別directoryへのmove
+//! （fd追従・`..`更新・cycle拒否・cross-dir置換）を確認し、42で終了する。
 //! 失敗時は70で終了する。E2Eのfile-rename検査が使う。
 
 #![no_std]
@@ -11,7 +11,7 @@
 
 use core::arch::{asm, naked_asm};
 use minios_abi::syscall::{
-    EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EXDEV, FIRST_FILE_FD, STDOUT, SyscallNumber,
+    EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, FIRST_FILE_FD, STDOUT, SyscallNumber,
 };
 
 /// exit異常の的内code。syscall失敗や契約違反、panicで使う。
@@ -23,7 +23,21 @@ const OLD_PATH: &[u8] = b"RENAME.TXT";
 const NEW_PATH: &[u8] = b"RENAMED.TXT";
 const VICTIM_PATH: &[u8] = b"VICTIM.TXT";
 const DIR_PATH: &[u8] = b"DOCS";
-const CROSS_PATH: &[u8] = b"DOCS/X.TXT";
+const MOVE_TARGET: &[u8] = b"DOCS/MOVED.TXT";
+const MOVFD_PATH: &[u8] = b"MOVFD.TXT";
+const MOVFD_DOCS: &[u8] = b"DOCS/MOVFD.TXT";
+const TARG_DOCS: &[u8] = b"DOCS/TARG.TXT";
+const CYCLE_PATH: &[u8] = b"DOCS/X.TXT";
+const SRCDIR_PATH: &[u8] = b"SRCDIR";
+const SRCDIR_INNER: &[u8] = b"SRCDIR/F.TXT";
+const DOCS_SRCDIR: &[u8] = b"DOCS/SRCDIR";
+const DOCS_SRCDIR_INNER: &[u8] = b"DOCS/SRCDIR/F.TXT";
+const SRCDIR2_PATH: &[u8] = b"SRCDIR2";
+const SRCDIR2_INNER: &[u8] = b"SRCDIR2/F.TXT";
+const DDA_PATH: &[u8] = b"DDA";
+const DDA_INNER_DIR: &[u8] = b"DDA/INNER";
+const DDA_CYCLE: &[u8] = b"DDA/INNER/X";
+const NOPARENT_PATH: &[u8] = b"MISSINGD/X.TXT";
 const LFN_PATH: &[u8] = b"long name.txt";
 const MISSING_PATH: &[u8] = b"MISSING.TXT";
 const OLDDIR_PATH: &[u8] = b"OLDDIR";
@@ -293,15 +307,6 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     if sys_rename(
         NEW_PATH.as_ptr(),
         NEW_PATH.len(),
-        CROSS_PATH.as_ptr(),
-        CROSS_PATH.len(),
-    ) != EXDEV
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        NEW_PATH.as_ptr(),
-        NEW_PATH.len(),
         LFN_PATH.as_ptr(),
         LFN_PATH.len(),
     ) != EINVAL
@@ -456,6 +461,233 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
         sys_exit(FAILURE_EXIT);
     }
     if sys_close(fd as usize) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // cross-directory move：fileをDOCSへ移す。旧名はENOENT、新名で
+    // 内容を照合し、rootへ戻す。
+    if sys_rename(
+        VICTIM_PATH.as_ptr(),
+        VICTIM_PATH.len(),
+        MOVE_TARGET.as_ptr(),
+        MOVE_TARGET.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_open(VICTIM_PATH.as_ptr(), VICTIM_PATH.len()) != ENOENT {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_open(MOVE_TARGET.as_ptr(), MOVE_TARGET.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = fd as usize;
+    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if buffer[..PAYLOAD.len()] != *PAYLOAD {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        MOVE_TARGET.as_ptr(),
+        MOVE_TARGET.len(),
+        VICTIM_PATH.as_ptr(),
+        VICTIM_PATH.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_open(MOVE_TARGET.as_ptr(), MOVE_TARGET.len()) != ENOENT {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // move中のfd追従：writable fdを開いたまま別dirへ移し、fd経由の追記が
+    // 新しいdir entryへwrite-backされることをsizeで照合する。
+    let fd = sys_create(MOVFD_PATH.as_ptr(), MOVFD_PATH.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = fd as usize;
+    if sys_write(fd, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        MOVFD_PATH.as_ptr(),
+        MOVFD_PATH.len(),
+        MOVFD_DOCS.as_ptr(),
+        MOVFD_DOCS.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_write(fd, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_open(MOVFD_DOCS.as_ptr(), MOVFD_DOCS.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = fd as usize;
+    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len() * 2) != (PAYLOAD.len() * 2) as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_open(MOVFD_PATH.as_ptr(), MOVFD_PATH.len()) != ENOENT {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // cross-dir置換：DOCS内の既存fileへfileを移すと、targetを指すfdは
+    // EBADFで失効し、sourceの内容が新名で読める。
+    let fd = sys_create(TARG_DOCS.as_ptr(), TARG_DOCS.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd as usize) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    let victim = sys_open(TARG_DOCS.as_ptr(), TARG_DOCS.len());
+    if victim < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let victim = victim as usize;
+    if sys_rename(
+        MOVFD_DOCS.as_ptr(),
+        MOVFD_DOCS.len(),
+        TARG_DOCS.as_ptr(),
+        TARG_DOCS.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_read(victim, buffer.as_mut_ptr(), 8) != EBADF {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_open(TARG_DOCS.as_ptr(), TARG_DOCS.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = fd as usize;
+    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len() * 2) != (PAYLOAD.len() * 2) as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // directoryのcross-dir move：dirごとDOCSの中へ移し、中身を新pathで
+    // 読んでからrootへ戻す（`..`が新parentへ更新される）。
+    if sys_mkdir(SRCDIR_PATH.as_ptr(), SRCDIR_PATH.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_create(SRCDIR_INNER.as_ptr(), SRCDIR_INNER.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_write(fd as usize, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd as usize) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        SRCDIR_PATH.as_ptr(),
+        SRCDIR_PATH.len(),
+        DOCS_SRCDIR.as_ptr(),
+        DOCS_SRCDIR.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_open(SRCDIR_INNER.as_ptr(), SRCDIR_INNER.len()) != ENOENT {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_open(DOCS_SRCDIR_INNER.as_ptr(), DOCS_SRCDIR_INNER.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = fd as usize;
+    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        DOCS_SRCDIR.as_ptr(),
+        DOCS_SRCDIR.len(),
+        SRCDIR2_PATH.as_ptr(),
+        SRCDIR2_PATH.len(),
+    ) != 0
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    let fd = sys_open(SRCDIR2_INNER.as_ptr(), SRCDIR2_INNER.len());
+    if fd < FIRST_FILE_FD as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_close(fd as usize) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // cycle：dirを自身や子孫の中へ移す指定はEINVAL。不在の親dirへの
+    // 移動はENOENT。
+    if sys_rename(
+        DIR_PATH.as_ptr(),
+        DIR_PATH.len(),
+        CYCLE_PATH.as_ptr(),
+        CYCLE_PATH.len(),
+    ) != EINVAL
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_mkdir(DDA_PATH.as_ptr(), DDA_PATH.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_mkdir(DDA_INNER_DIR.as_ptr(), DDA_INNER_DIR.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        DDA_PATH.as_ptr(),
+        DDA_PATH.len(),
+        DDA_CYCLE.as_ptr(),
+        DDA_CYCLE.len(),
+    ) != EINVAL
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rename(
+        VICTIM_PATH.as_ptr(),
+        VICTIM_PATH.len(),
+        NOPARENT_PATH.as_ptr(),
+        NOPARENT_PATH.len(),
+    ) != ENOENT
+    {
+        sys_exit(FAILURE_EXIT);
+    }
+
+    // moveで作ったfileとdirを片付ける。
+    if sys_unlink(TARG_DOCS.as_ptr(), TARG_DOCS.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_unlink(SRCDIR2_INNER.as_ptr(), SRCDIR2_INNER.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rmdir(SRCDIR2_PATH.as_ptr(), SRCDIR2_PATH.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rmdir(DDA_INNER_DIR.as_ptr(), DDA_INNER_DIR.len()) != 0 {
+        sys_exit(FAILURE_EXIT);
+    }
+    if sys_rmdir(DDA_PATH.as_ptr(), DDA_PATH.len()) != 0 {
         sys_exit(FAILURE_EXIT);
     }
 

@@ -202,7 +202,7 @@ queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`と�
 `storage::fat32`は`SectorReader`境界で`VirtioBlk`へ差し替わるため、parser本体はRV32経路と共有です。
 書き込み経路（`create_file`、`write_range`、`unlink_file`、`rename`、`create_dir`、`remove_dir`）は`SectorWriter`境界を追加で要求するため、read-only想定のRV32 SD経路では構成されません。
 `unlink_file`はdir entryと先行する長い名前のrecord列を`0xe5`へ書き換えてcluster chainを解放し、削除したentryを指すfdはkernelが`ProcessTable`内の全processから失効させます。
-`rename`は同一directory内でentryの8.3名を書き換えます。fileでもdirectoryでも使え、cluster chainと内容、entryの物理位置は変わらないため、開いているfdは有効なままです。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。directoryのtargetは空に限り置き換えられ、fileへのdir改名は`NotDirectory`、非空dirへの改名は`NotEmpty`です。別directoryへの移動は`CrossDirectory`として拒否します。
+`rename`はentryを別のpathへ移します。同一directory内では8.3名をin-placeに書き換え、別directoryを指定した場合はrecordを新しい親のslotへ複写してsource側を削除する移動になります。fileでもdirectoryでも使え、cluster chainと内容は変わりません。in-place改名ではentryの物理位置が不変なので開いているfdは有効なままです。移動ではentryの物理位置が変わるため、kernelは全processの該当fdのwrite-back先を新しい位置へ追従させ（`relocate_file_fds`）、POSIXの「open fileはrenameしても有効」をmoveでも維持します。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。directoryのtargetは空に限り置き換えられ、fileへのdir改名は`NotDirectory`、非空dirへの改名は`NotEmpty`です。移したdirectoryの`..`は新しい親のcluster番号（root親なら0）へ更新し、directoryを自身または子孫の中へ移す指定は`MoveIntoItself`として`EINVAL`で拒否します。
 `create_dir`は新しいclusterを`.`と`..`のentryで初期化してから親directoryへentryを公開し、途中の失敗では割り当てたclusterを解放してから失敗を返します。
 `remove_dir`は`.`と`..`以外のentryがないことを確かめてから、`unlink_file`と同じくentry削除とchain解放を行います。
 
