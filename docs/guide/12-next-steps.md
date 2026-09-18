@@ -41,7 +41,7 @@ Device Tree解析は、QEMU `virt`の固定値をmachine記述へ置き換える
 
 ## 実行と確認
 
-実装後の全検査には、43段階のrelease gateを実行します。
+実装後の全検査には、44段階のrelease gateを実行します。
 
 ```sh
 cargo xtask check

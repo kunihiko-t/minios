@@ -18,9 +18,12 @@ pub enum SyscallNumber {
     /// 呼び出しprocessのpidを返す。
     Getpid = 15,
     /// `a0`/`a1`が指すFAT32 pathのELF fileを新processとして起動し、
-    /// childのpidを返す。childはfire-and-forgetで、終了statusの
-    /// 受け渡しはない。
+    /// childのpidを返す。childは親と独立してscheduleされる。
     Spawn = 16,
+    /// `a0`のpidを持つprocessの終了を待ち、その終了codeを返す。
+    /// 対象がまだliveなら呼び出しprocessをblockし、対象の終了で
+    /// 再実行される。
+    Waitpid = 17,
 }
 
 pub const STDIN: usize = 0;
@@ -42,6 +45,7 @@ pub const SEEK_END: usize = 2;
 pub const ENOENT: isize = -2;
 pub const EIO: isize = -5;
 pub const EBADF: isize = -9;
+pub const ECHILD: isize = -10;
 pub const ENOMEM: isize = -12;
 pub const EFAULT: isize = -14;
 pub const EEXIST: isize = -17;
@@ -76,6 +80,7 @@ mod tests {
         assert_eq!(SyscallNumber::Rmdir as usize, 14);
         assert_eq!(SyscallNumber::Getpid as usize, 15);
         assert_eq!(SyscallNumber::Spawn as usize, 16);
+        assert_eq!(SyscallNumber::Waitpid as usize, 17);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
@@ -90,6 +95,7 @@ mod tests {
         assert_eq!(ENOENT, -2);
         assert_eq!(EIO, -5);
         assert_eq!(EBADF, -9);
+        assert_eq!(ECHILD, -10);
         assert_eq!(ENOMEM, -12);
         assert_eq!(EFAULT, -14);
         assert_eq!(EEXIST, -17);

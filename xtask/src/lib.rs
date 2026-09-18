@@ -225,6 +225,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::FileRename) => "QEMU file-rename test".to_owned(),
             Self::Qemu(qemu::TestKind::FileMkdir) => "QEMU file-mkdir test".to_owned(),
             Self::Qemu(qemu::TestKind::FileSpawn) => "QEMU file-spawn test".to_owned(),
+            Self::Qemu(qemu::TestKind::FileWaitpid) => "QEMU file-waitpid test".to_owned(),
             Self::Qemu(qemu::TestKind::Sched) => "QEMU sched test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIo) => "QEMU sched-io test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIoPartial) => "QEMU sched-io-partial test".to_owned(),
@@ -262,6 +263,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::FileRename),
         Phase::Qemu(qemu::TestKind::FileMkdir),
         Phase::Qemu(qemu::TestKind::FileSpawn),
+        Phase::Qemu(qemu::TestKind::FileWaitpid),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -310,6 +312,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::FileRename),
         Phase::Qemu(qemu::TestKind::FileMkdir),
         Phase::Qemu(qemu::TestKind::FileSpawn),
+        Phase::Qemu(qemu::TestKind::FileWaitpid),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -441,6 +444,9 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         }
         Command::Test(TestFilter::FileMkdir) => Some(vec![Phase::Qemu(qemu::TestKind::FileMkdir)]),
         Command::Test(TestFilter::FileSpawn) => Some(vec![Phase::Qemu(qemu::TestKind::FileSpawn)]),
+        Command::Test(TestFilter::FileWaitpid) => {
+            Some(vec![Phase::Qemu(qemu::TestKind::FileWaitpid)])
+        }
         Command::Test(TestFilter::Sched) => Some(vec![Phase::Qemu(qemu::TestKind::Sched)]),
         Command::Test(TestFilter::SchedIo) => Some(vec![Phase::Qemu(qemu::TestKind::SchedIo)]),
         Command::Test(TestFilter::SchedIoPartial) => {
@@ -529,6 +535,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::FileRename),
                 Phase::Qemu(qemu::TestKind::FileMkdir),
                 Phase::Qemu(qemu::TestKind::FileSpawn),
+                Phase::Qemu(qemu::TestKind::FileWaitpid),
                 Phase::Qemu(qemu::TestKind::Sched),
                 Phase::Qemu(qemu::TestKind::SchedIo),
                 Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -599,6 +606,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::FileRename),
             Phase::Qemu(qemu::TestKind::FileMkdir),
             Phase::Qemu(qemu::TestKind::FileSpawn),
+            Phase::Qemu(qemu::TestKind::FileWaitpid),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -662,13 +670,14 @@ mod tests {
             Phase::Qemu(qemu::TestKind::FileRename),
             Phase::Qemu(qemu::TestKind::FileMkdir),
             Phase::Qemu(qemu::TestKind::FileSpawn),
+            Phase::Qemu(qemu::TestKind::FileWaitpid),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 28], expected);
-        assert_eq!(plan.len(), 43);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 29], expected);
+        assert_eq!(plan.len(), 44);
     }
 
     #[test]

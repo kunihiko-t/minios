@@ -70,6 +70,9 @@ pub enum ProcessState {
     Runnable,
     /// `read`が入力待ちで中断した。stdinへbyteが届くと`Runnable`へ戻る。
     BlockedOnStdin,
+    /// `waitpid`が対象processの終了待ちで中断した。対象が終了して
+    /// `wake_on_exit`されると`Runnable`へ戻る。値は待つ対象のpid。
+    BlockedOnPid(usize),
 }
 
 /// `open`/`create`がprocessへ割り当てたfile descriptor 1個。
@@ -343,8 +346,24 @@ impl Process {
     }
 
     /// stdin待ちへ移す。`dispatch`が`Blocked`を返した直後に呼ぶ。
+    /// `waitpid`が先に`BlockedOnPid`へ移した場合は遷移しない。
     pub fn block_on_stdin(&mut self) {
-        self.state = ProcessState::BlockedOnStdin;
+        if self.is_runnable() {
+            self.state = ProcessState::BlockedOnStdin;
+        }
+    }
+
+    /// `waitpid`で`pid`の終了待ちへ移す。trap窓のtable経由でのみ呼ばれる。
+    pub fn block_on_pid(&mut self, pid: usize) {
+        self.state = ProcessState::BlockedOnPid(pid);
+    }
+
+    /// `waitpid`で待っている対象pid。pid待ちでなければ`None`。
+    pub const fn waiting_on(&self) -> Option<usize> {
+        match self.state {
+            ProcessState::BlockedOnPid(pid) => Some(pid),
+            _ => None,
+        }
     }
 
     /// `fd`に対応するslotを借りる。未割り当てや範囲外なら`None`。
@@ -505,6 +524,10 @@ pub struct ProcessTable {
     procs: Vec<Process>,
     next_pid: usize,
     last_picked: Option<usize>,
+    /// 終了したprocessの`(pid, exit code)`。`waitpid`が1回だけ消費する
+    /// 未回収statusの台帳。上限`MAX_PROCS`件で、超過時は最古をdropする
+    /// （dropされたpidへの`waitpid`は`ECHILD`を返す）。
+    exits: Vec<(usize, u32)>,
 }
 
 impl Default for ProcessTable {
@@ -524,6 +547,7 @@ impl ProcessTable {
             procs: Vec::with_capacity(MAX_PROCS),
             next_pid: 0,
             last_picked: None,
+            exits: Vec::new(),
         }
     }
 
@@ -607,12 +631,75 @@ impl ProcessTable {
 
     /// processがありながら`pick_next`が`None`＝全processがstdin待ち。
     /// stdinへbyteが届いたら呼び、blocked processをすべてrunnableへ戻す。
+    /// pid待ちのprocessも起こされるが、再dispatchで条件未達なら再び
+    /// blockする（疑似wakeは許容する）。
     pub fn wake_all_blocked(&mut self) {
         for process in self.procs.iter_mut() {
             if !process.is_runnable() {
                 process.wake();
             }
         }
+    }
+
+    /// 終了したprocessの`(pid, code)`を台帳へ記録する。run loopのexit
+    /// 経路から呼ぶ。`MAX_PROCS`件を越える場合は最古をdropする。
+    pub fn record_exit(&mut self, pid: usize, code: u32) {
+        if self.exits.len() == MAX_PROCS {
+            self.exits.remove(0);
+        }
+        self.exits.push((pid, code));
+    }
+
+    /// `pid`の未回収statusを消費して返す。未記録か消費済みなら`None`。
+    pub fn take_exit(&mut self, pid: usize) -> Option<u32> {
+        let index = self.exits.iter().position(|(p, _)| *p == pid)?;
+        Some(self.exits.remove(index).1)
+    }
+
+    /// `pid`が終了したときに呼び、`BlockedOnPid(pid)`のprocessをすべて
+    /// `Runnable`へ戻す。statusの有無に関わらずwaiterは解放される。
+    pub fn wake_on_exit(&mut self, pid: usize) {
+        for process in self.procs.iter_mut() {
+            if process.waiting_on() == Some(pid) {
+                process.wake();
+            }
+        }
+    }
+
+    /// `caller`を`target`の終了待ちへ移す。`ECHILD`は自分自身・対象
+    /// 不在（未記録のpid）、`EINVAL`はwait連鎖がcallerへ戻るcycle。
+    /// live確認とcycle検査をblockへの遷移より先に行う。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn block_waitpid(&mut self, caller: usize, target: usize) -> Result<(), isize> {
+        use minios_abi::syscall::{ECHILD, EINVAL};
+
+        if caller == target {
+            return Err(ECHILD);
+        }
+        if self.get(target).is_none() {
+            return Err(ECHILD);
+        }
+        // targetのwait連鎖を辿り、callerへ戻る経路があればcycle。
+        // 連鎖はblocked processの数だけ辿れば必ず終端かcycleへ着く。
+        let mut cursor = target;
+        for _ in 0..self.procs.len() {
+            let Some(next) = self
+                .procs
+                .iter()
+                .find(|process| process.pid == cursor)
+                .and_then(Process::waiting_on)
+            else {
+                break;
+            };
+            if next == caller {
+                return Err(EINVAL);
+            }
+            cursor = next;
+        }
+        self.get_mut(caller)
+            .expect("caller pid is live")
+            .block_on_pid(target);
+        Ok(())
     }
 
     /// `(dir_cluster, dir_index)`のdir entryを指すfdを全processから閉じる。
@@ -975,6 +1062,118 @@ mod tests {
 
         assert_eq!(table.pick_next(), None);
         assert!(!table.is_empty());
+    }
+
+    // Catches the exit ledger losing a status or letting one be reaped
+    // twice: record_exit must make exactly one take_exit succeed per exit,
+    // and unknown or already-reaped pids must come back empty.
+    #[test]
+    fn exit_ledger_records_and_reaps_each_status_once() {
+        let mut table = ProcessTable::new();
+
+        table.record_exit(7, 42);
+        table.record_exit(8, 3);
+
+        assert_eq!(table.take_exit(7), Some(42));
+        assert_eq!(table.take_exit(7), None);
+        assert_eq!(table.take_exit(9), None);
+        assert_eq!(table.take_exit(8), Some(3));
+    }
+
+    // Catches the ledger growing without bound or evicting the wrong entry:
+    // past MAX_PROCS records the oldest status must be dropped so a waiter
+    // on it sees ECHILD, while newer statuses stay reapable.
+    #[test]
+    fn exit_ledger_is_bounded_and_drops_the_oldest() {
+        let mut table = ProcessTable::new();
+
+        for index in 0..MAX_PROCS + 1 {
+            table.record_exit(index, index as u32);
+        }
+
+        assert_eq!(table.take_exit(0), None);
+        assert_eq!(table.take_exit(MAX_PROCS), Some(MAX_PROCS as u32));
+    }
+
+    // Catches waitpid blocking the caller before checking the target, or
+    // failing to skip a pid-blocked slot: block_waitpid must mark the
+    // caller BlockedOnPid only for a live, distinct target, pick_next
+    // must skip it, and a stale block_on_stdin must not clobber the wait.
+    #[test]
+    fn waitpid_blocks_the_caller_and_survives_stdin_wakeup() {
+        use minios_abi::syscall::ECHILD;
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        let p0 = fixture.spawn("parent");
+        let p1 = fixture.spawn("child");
+        table.insert(p0).expect("insert parent");
+        table.insert(p1).expect("insert child");
+
+        table.block_waitpid(0, 1).expect("live child must block");
+        assert_eq!(table.get(0).unwrap().waiting_on(), Some(1));
+        assert_eq!(table.pick_next(), Some(1));
+
+        // dispatchが`Blocked`を返した後にrun loopが呼ぶblock_on_stdinは、
+        // controlが先にmarkしたpid待ちをstdin待ちへ書き換えてはならない。
+        table.get_mut(0).unwrap().block_on_stdin();
+        assert_eq!(table.get(0).unwrap().waiting_on(), Some(1));
+
+        // stdin到着の疑似wakeはpid待ちも一度runnableへ戻すが、再実行された
+        // waitpidがlive targetを見て再びBlockedOnPidへmarkするため許容する。
+        table.wake_all_blocked();
+        assert!(table.get(0).unwrap().is_runnable());
+        table.block_waitpid(0, 1).expect("retry must re-block");
+        assert_eq!(table.get(0).unwrap().waiting_on(), Some(1));
+
+        // 自分自身や存在しないpidへのwaitはblockせずECHILDを返す。
+        assert_eq!(table.block_waitpid(0, 0), Err(ECHILD));
+        assert_eq!(table.block_waitpid(0, 99), Err(ECHILD));
+        assert_eq!(table.get(0).unwrap().waiting_on(), Some(1));
+    }
+
+    // Catches a waiter never being released: when the target exits,
+    // wake_on_exit must return every BlockedOnPid waiter to the rotation.
+    #[test]
+    fn waiters_wake_when_the_target_exits() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        for name in ["w0", "w1", "child"] {
+            let process = fixture.spawn(name);
+            table.insert(process).expect("insert");
+        }
+        table.block_waitpid(0, 2).expect("live child must block");
+        table.block_waitpid(1, 2).expect("live child must block");
+        assert_eq!(table.pick_next(), Some(2));
+
+        table.wake_on_exit(2);
+        let sequence: Vec<usize> = (0..3).map(|_| table.pick_next().unwrap()).collect();
+        assert_eq!(sequence, [0, 1, 2]);
+    }
+
+    // Catches a wait cycle deadlocking the whole table: if following the
+    // target's wait chain returns to the caller, block_waitpid must reject
+    // with EINVAL and leave the caller runnable instead of blocking forever.
+    #[test]
+    fn waitpid_rejects_wait_cycles() {
+        use minios_abi::syscall::EINVAL;
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        for name in ["a", "b", "c"] {
+            let process = fixture.spawn(name);
+            table.insert(process).expect("insert");
+        }
+        table.block_waitpid(0, 1).expect("a waits b");
+        table.block_waitpid(1, 2).expect("b waits c");
+
+        assert_eq!(table.block_waitpid(2, 0), Err(EINVAL));
+        assert!(table.get(2).unwrap().is_runnable());
+        assert_eq!(table.block_waitpid(2, 1), Err(EINVAL));
+        assert!(table.get(2).unwrap().is_runnable());
     }
 
     // Catches fd numbering or capacity drifting: a fresh process must

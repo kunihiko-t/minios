@@ -220,6 +220,15 @@ impl ControlSource for UartControlSource<'_> {
         }
     }
 
+    /// guestの`waitpid`をprocess tableへ委譲する。`Ok(Some(code))`は
+    /// 回収した終了code、`Ok(None)`は対象がliveでblockへ移すこと、
+    /// `Err`は`ECHILD`/`EINVAL`/`ENOSYS`である。
+    #[cfg(target_arch = "riscv64")]
+    fn waitpid(&mut self, pid: usize) -> Result<Option<u32>, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::wait_pid(pid) }
+    }
+
     /// guestの`mkdir`をstorage sessionへ委譲する。dir作成はfdを返さず、
     /// 失効させるfdもない。
     #[cfg(target_arch = "riscv64")]
