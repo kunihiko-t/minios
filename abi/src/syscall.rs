@@ -15,6 +15,12 @@ pub enum SyscallNumber {
     Rename = 12,
     Mkdir = 13,
     Rmdir = 14,
+    /// 呼び出しprocessのpidを返す。
+    Getpid = 15,
+    /// `a0`/`a1`が指すFAT32 pathのELF fileを新processとして起動し、
+    /// childのpidを返す。childはfire-and-forgetで、終了statusの
+    /// 受け渡しはない。
+    Spawn = 16,
 }
 
 pub const STDIN: usize = 0;
@@ -68,6 +74,8 @@ mod tests {
         assert_eq!(SyscallNumber::Rename as usize, 12);
         assert_eq!(SyscallNumber::Mkdir as usize, 13);
         assert_eq!(SyscallNumber::Rmdir as usize, 14);
+        assert_eq!(SyscallNumber::Getpid as usize, 15);
+        assert_eq!(SyscallNumber::Spawn as usize, 16);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);

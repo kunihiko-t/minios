@@ -165,6 +165,61 @@ impl ControlSource for UartControlSource<'_> {
         Ok(())
     }
 
+    /// guestの`getpid`を現在processへ委譲する。trap中のprocessが
+    /// なければ`ENOSYS`。
+    #[cfg(target_arch = "riscv64")]
+    fn getpid(&mut self) -> isize {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        match unsafe { crate::current_pid() } {
+            Some(pid) => pid as isize,
+            None => minios_abi::syscall::ENOSYS,
+        }
+    }
+
+    /// guestの`spawn`をstorage sessionとprocess tableへ委譲する。
+    /// `path`のfileをELFとして読み込み、basenameをprocess名として
+    /// 新processを生成してtableへ登録し、採番pidを返す。
+    #[cfg(target_arch = "riscv64")]
+    fn spawn(&mut self, path: &str) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
+        // 外へ持ち出さない。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let mut elf = alloc::vec::Vec::new();
+        session
+            .read_file(path, |chunk| elf.extend_from_slice(chunk))
+            .map_err(fat_errno)?;
+
+        // `Process.name`は`&'static str`必須のため、basenameをleakする。
+        // spawn回数比例の小さいleakとして明示的に許容する。
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let name = alloc::string::String::from(name).leak();
+
+        // Safety: 同上。返り値のprocess所有権はinsertか回収まで持つ。
+        let process = match unsafe { crate::spawn_process(name, &elf, &[]) } {
+            Ok(process) => process,
+            Err(failure) => {
+                // 回収しきれなかったimageが残っていればdestroyを一度試す。
+                if let Some(image) = failure.image {
+                    let mut frames = crate::GlobalFrames;
+                    let _ = image.destroy(&mut frames);
+                }
+                return Err(match failure.error {
+                    minios_kernel::process::SpawnError::Load(_) => minios_abi::syscall::EINVAL,
+                    _ => minios_abi::syscall::ENOMEM,
+                });
+            }
+        };
+        // Safety: 同上。table満杯はprocessを返すため所有frameを回収する。
+        match unsafe { crate::insert_spawned(process) } {
+            Ok(pid) => Ok(pid),
+            Err(mut process) => {
+                let mut frames = crate::GlobalFrames;
+                let _ = process.reclaim(&mut frames);
+                Err(minios_abi::syscall::ENOMEM)
+            }
+        }
+    }
+
     /// guestの`mkdir`をstorage sessionへ委譲する。dir作成はfdを返さず、
     /// 失効させるfdもない。
     #[cfg(target_arch = "riscv64")]
