@@ -171,6 +171,8 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 15 | `getpid` | なし | 呼び出したprocessのpidを返す |
 | 16 | `spawn` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、pathのELF fileを新しいprocessとして起動する。戻り値はchildのpidか負のerrno |
 | 17 | `waitpid` | `a0=pid` | `pid`のprocessの終了codeを返す。対象がliveなら呼び出しprocessをblockし、対象の終了後に同じecallが再実行されてcodeを返す。負のerrnoは`ECHILD`/`EINVAL` |
+| 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
+| 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -203,13 +205,16 @@ directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdは�
 `spawn`が失敗した場合、途中まで確保したframe・address space・imageはすべて解放され、新しいprocessは登録されません。pathがfileを指さない（`ENOENT`）、directoryを指す（`EISDIR`）、ELFとして受理できない（`EINVAL`）、process tableが満杯または資源が足りない（`ENOMEM`）場合がerrnoです。
 `waitpid`は`a0`のpidを持つprocessの終了codeを返します。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
 対象が自分自身・存在しない・既にreap済み・異常終了でstatusを持たない場合は`ECHILD`、wait連鎖が呼び出し側へ戻るcycleは`EINVAL`を返します。複数のprocessが同じpidを待つこともでき、終了時に全員がwakeしますが、codeを回収できるのは先に再実行された1つだけで、残りは`ECHILD`を受け取ります。kernelは終了codeをprocess数上限分だけ台帳へ保持し、超過分は最古からdropします。
+
+`stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの8 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、残り4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1）です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile fdだけを受理して標準streamや未割り当てfdに`EBADF`を返します。
+どちらも`read`と同じく、out pointerが指す8 byteがユーザー空間の書き込み可能ページにすべて含まれることを要求し、検証を通ってからstorageやfd tableへ触れます。成功時の戻り値は`read`系のbyte数規約に従う`STAT_LEN`（8）です。
 負のABI error値は次のとおりです。
 
 | 値 | 名前 | 条件 |
 | ---: | --- | --- |
 | `-2` | `ENOENT` | fileが存在しない |
 | `-5` | `EIO` | storageの読み取りまたはfilesystem構造の失敗 |
-| `-9` | `EBADF` | 未知のfile descriptor、標準streamへの`close`/`lseek`、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、`unlink`や`rename`の置き換えで失効したfdへの操作 |
+| `-9` | `EBADF` | 未知のfile descriptor、標準streamへの`close`/`lseek`/`fstat`、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、`unlink`や`rename`の置き換えで失効したfdへの操作 |
 | `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない |
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足 |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
@@ -220,7 +225,7 @@ directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdは�
 | `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`waitpid`のwait連鎖が呼び出し側へ戻るcycle |
 | `-24` | `EMFILE` | processの同時open数（4個）を超えた |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
-| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid` |
+| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat` |
 | `-39` | `ENOTEMPTY` | `rmdir`の対象directoryに`.`と`..`以外のentryが残っている |
 
 ## 初期スタック ABI v1

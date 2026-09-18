@@ -89,6 +89,13 @@ bench = false
 doctest = false
 
 [[bin]]
+name = "minios-guest-file-stat"
+path = "src/bin/file_stat.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
 name = "minios-guest-sched-a"
 path = "src/bin/sched_a.rs"
 test = false

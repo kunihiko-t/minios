@@ -24,6 +24,12 @@ pub enum SyscallNumber {
     /// 対象がまだliveなら呼び出しprocessをblockし、対象の終了で
     /// 再実行される。
     Waitpid = 17,
+    /// `a0`/`a1`が指すFAT32 pathのmetadataを`a2`のuser bufferへ
+    /// 8 byteの`Stat`として書き込む。fileとdirectory両方を受理する。
+    Stat = 18,
+    /// `a0`のfile descriptorが指すfileのmetadataを`a1`のuser bufferへ
+    /// 8 byteの`Stat`として書き込む。
+    Fstat = 19,
 }
 
 pub const STDIN: usize = 0;
@@ -41,6 +47,40 @@ pub const SEEK_SET: usize = 0;
 pub const SEEK_CUR: usize = 1;
 /// file末尾からの相対offset。
 pub const SEEK_END: usize = 2;
+
+/// `Stat::kind`の値。通常のfile。
+pub const STAT_KIND_FILE: u32 = 0;
+/// `Stat::kind`の値。directory。
+pub const STAT_KIND_DIR: u32 = 1;
+/// `stat`/`fstat`が`out` pointerへ書き込む`Stat`のbyte長。
+pub const STAT_LEN: usize = 8;
+
+/// `stat`/`fstat`がuser bufferへ書き込むmetadata。`size`はfileの
+/// byte数（directoryはFAT32の規約で0）、`kind`は`STAT_KIND_*`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stat {
+    pub size: u32,
+    pub kind: u32,
+}
+
+impl Stat {
+    /// LEの8 byteへserializeする。guestは同じlayoutで読み戻す。
+    pub const fn to_le_bytes(self) -> [u8; STAT_LEN] {
+        let size = self.size.to_le_bytes();
+        let kind = self.kind.to_le_bytes();
+        [
+            size[0], size[1], size[2], size[3], kind[0], kind[1], kind[2], kind[3],
+        ]
+    }
+
+    /// `to_le_bytes`が書いた形式から読み戻す。guest側のdecodeに使う。
+    pub const fn from_le_bytes(bytes: [u8; STAT_LEN]) -> Self {
+        Self {
+            size: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            kind: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        }
+    }
+}
 
 pub const ENOENT: isize = -2;
 pub const EIO: isize = -5;
@@ -81,6 +121,8 @@ mod tests {
         assert_eq!(SyscallNumber::Getpid as usize, 15);
         assert_eq!(SyscallNumber::Spawn as usize, 16);
         assert_eq!(SyscallNumber::Waitpid as usize, 17);
+        assert_eq!(SyscallNumber::Stat as usize, 18);
+        assert_eq!(SyscallNumber::Fstat as usize, 19);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
@@ -107,5 +149,23 @@ mod tests {
         assert_eq!(ENOSPC, -28);
         assert_eq!(ENOSYS, -38);
         assert_eq!(ENOTEMPTY, -39);
+        assert_eq!(STAT_KIND_FILE, 0);
+        assert_eq!(STAT_KIND_DIR, 1);
+        assert_eq!(STAT_LEN, 8);
+    }
+
+    // Catches the Stat wire layout drifting: size must occupy the first
+    // four LE bytes and kind the last four, matching what the guest reads.
+    #[test]
+    fn stat_serializes_size_then_kind_as_le_bytes() {
+        let stat = Stat {
+            size: 0x0102_0304,
+            kind: STAT_KIND_DIR,
+        };
+        assert_eq!(
+            stat.to_le_bytes(),
+            [0x04, 0x03, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(Stat::from_le_bytes(stat.to_le_bytes()), stat);
     }
 }

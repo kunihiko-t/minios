@@ -113,6 +113,18 @@ impl FileDesc {
     }
 }
 
+/// `Fat32::stat`が返すfile metadata。`size`とdirectory bitだけを持ち、
+/// recordの物理位置は返さない——`stat`はside effectを持たないため
+/// write-back先は不要である。
+#[cfg(not(target_arch = "riscv32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStat {
+    /// fileのbyteサイズ。directoryはFAT32のdir entry規約に従い0。
+    pub size: u32,
+    /// directoryなら`true`。
+    pub directory: bool,
+}
+
 /// directory走査中のentryの物理位置。`dir_head`はそのentryを含む
 /// directory chainの先頭cluster、`cluster`はrecordを含むcluster、
 /// `index`はそのcluster内のrecord番号（`sector * 16 + record`）。
@@ -311,6 +323,18 @@ impl<R: SectorReader> Fat32<R> {
             size: entry.size,
             dir_cluster: loc.cluster,
             dir_index: loc.index,
+        })
+    }
+
+    /// `path`を解決してsizeとdirectory bitを返す。`open_file`と違い
+    /// directoryも受理し、file contentは読まない。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn stat(&mut self, path: &str) -> Result<FileStat, FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        let (entry, _) = self.resolve_path(path, &mut scratch)?;
+        Ok(FileStat {
+            size: entry.size,
+            directory: entry.directory,
         })
     }
 
@@ -2088,7 +2112,8 @@ mod tests {
     extern crate std;
 
     use super::{
-        DirEntry, Fat32, FatError, FileDesc, lfn_checksum, read_u16, read_u32, to_short_name,
+        DirEntry, Fat32, FatError, FileDesc, FileStat, lfn_checksum, read_u16, read_u32,
+        to_short_name,
     };
     use crate::storage::fat32::RenameOutcome;
     use crate::storage::{SectorReader, SectorWriter};
@@ -2762,6 +2787,52 @@ mod tests {
         assert!(matches!(fs.open_file("SUBDIR"), Err(FatError::IsDirectory)));
         assert!(matches!(fs.open_file("MISSING"), Err(FatError::NotFound)));
         assert!(matches!(fs.open_file("A//B"), Err(FatError::InvalidName)));
+    }
+
+    // Catches stat rejecting directories, dropping the size, or resolving
+    // a different entry than open_file: file and directory metadata must
+    // come from the same resolve_path as the rest of the API.
+    #[test]
+    fn stat_reports_size_and_kind_for_files_and_directories() {
+        let mut fs = mounted_nested_fixture();
+
+        let file = fs.stat("SUBDIR/NOTE.TXT").unwrap();
+        assert_eq!(
+            file,
+            FileStat {
+                size: 11,
+                directory: false
+            }
+        );
+
+        let dir = fs.stat("SUBDIR").unwrap();
+        assert_eq!(
+            dir,
+            FileStat {
+                size: 0,
+                directory: true
+            }
+        );
+
+        assert!(matches!(fs.stat("MISSING"), Err(FatError::NotFound)));
+        assert!(matches!(fs.stat("A//B"), Err(FatError::InvalidName)));
+        assert!(matches!(
+            fs.stat("SUBDIR/NOTE.TXT/DEEP"),
+            Err(FatError::NotDirectory)
+        ));
+    }
+
+    // Catches stat reporting a stale size after writes: the dir entry
+    // write-back must be visible to a later stat on the same path.
+    #[test]
+    fn stat_sees_size_growth_after_write() {
+        let mut fs = mounted_writable_fixture();
+        let mut desc = fs.create_file("GROW.TXT").unwrap();
+        assert_eq!(fs.stat("GROW.TXT").unwrap().size, 0);
+
+        fs.write_range(&mut desc, 0, b"abcde").unwrap();
+        let file = fs.stat("GROW.TXT").unwrap();
+        assert_eq!(file.size, 5);
     }
 
     // Catches read_range skipping the wrong clusters, ignoring the output

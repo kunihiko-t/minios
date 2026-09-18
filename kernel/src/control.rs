@@ -229,6 +229,40 @@ impl ControlSource for UartControlSource<'_> {
         unsafe { crate::wait_pid(pid) }
     }
 
+    /// guestの`stat`をstorage sessionへ委譲する。fileとdirectoryの両方を
+    /// 受理し、sizeとkindをABIの`Stat`へ写像する。
+    #[cfg(target_arch = "riscv64")]
+    fn stat(&mut self, path: &str) -> Result<minios_abi::syscall::Stat, isize> {
+        use minios_abi::syscall::{STAT_KIND_DIR, STAT_KIND_FILE, Stat};
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let info = session.stat(path).map_err(fat_errno)?;
+        Ok(Stat {
+            size: info.size,
+            kind: if info.directory {
+                STAT_KIND_DIR
+            } else {
+                STAT_KIND_FILE
+            },
+        })
+    }
+
+    /// guestの`fstat`をfdのFileDescから返す。`FileDesc`はopen時のsizeを
+    /// 保持し`write_range`が更新するため、sessionへ触れずに済む。
+    /// standard streamや未割当fdは`EBADF`。
+    #[cfg(target_arch = "riscv64")]
+    fn fstat(&mut self, fd: usize) -> Result<minios_abi::syscall::Stat, isize> {
+        use minios_abi::syscall::{EBADF, STAT_KIND_FILE, Stat};
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        Ok(Stat {
+            size: entry.desc().size(),
+            kind: STAT_KIND_FILE,
+        })
+    }
+
     /// guestの`mkdir`をstorage sessionへ委譲する。dir作成はfdを返さず、
     /// 失効させるfdもない。
     #[cfg(target_arch = "riscv64")]

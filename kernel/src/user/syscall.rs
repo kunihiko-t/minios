@@ -11,7 +11,7 @@ use minios_abi::{
     control::FrameKind,
     syscall::{
         EBADF, EFAULT, EINVAL, ENOSYS, FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN,
-        MAX_WRITE_LEN, STDERR, STDIN, STDOUT, SyscallNumber,
+        MAX_WRITE_LEN, STAT_LEN, STDERR, STDIN, STDOUT, Stat, SyscallNumber,
     },
 };
 
@@ -155,6 +155,20 @@ pub trait ControlSource {
         let _ = pid;
         Err(ENOSYS)
     }
+
+    /// `path`のfileまたはdirectoryのmetadataを返す。`Err`はそのまま
+    /// `a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn stat(&mut self, path: &str) -> Result<Stat, isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
+
+    /// `fd`のfile metadataを返す。`Err`はそのまま`a0`へ返すerrno
+    /// である。default実装は`ENOSYS`。
+    fn fstat(&mut self, fd: usize) -> Result<Stat, isize> {
+        let _ = fd;
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -236,6 +250,10 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_spawn(context, space, memory, source)
     } else if number == SyscallNumber::Waitpid as usize {
         dispatch_waitpid(context, source)
+    } else if number == SyscallNumber::Stat as usize {
+        dispatch_stat(context, space, memory, source, read_scratch)
+    } else if number == SyscallNumber::Fstat as usize {
+        dispatch_fstat(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -477,6 +495,78 @@ fn dispatch_waitpid<E, R: ControlSource>(
         Ok(None) => {
             context.set_sepc(context.sepc() - 4);
             SyscallFlow::Blocked
+        }
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
+}
+
+/// `stat` (`a0=path_ptr, a1=path_len, a2=out_ptr`)。pathとoutの検証を
+/// sourceのside effect前に確定し、成功時はserializeした`Stat`をscratch
+/// 経由で`out`へcopyする。`read`と同じReadCompleteのcopy-outを使う。
+fn dispatch_stat<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    let Some(path_len) = copy_user_path(context, space, memory, &mut path_buf) else {
+        return SyscallFlow::Resume;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    };
+    let start = context.register(12) as u64;
+    if check_user_writable_range(space, memory, start, STAT_LEN).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.stat(path) {
+        Ok(stat) => {
+            read_scratch[..STAT_LEN].copy_from_slice(&stat.to_le_bytes());
+            SyscallFlow::ReadComplete {
+                start,
+                len: STAT_LEN,
+            }
+        }
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
+}
+
+/// `fstat` (`a0=fd, a1=out_ptr`)。file fdのみが対象で、標準streamや
+/// 未割当fdは`EBADF`を返す。copy-outは`stat`と同じReadComplete経路。
+fn dispatch_fstat<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let fd = context.register(10);
+    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
+        context.set_register(10, EBADF as usize);
+        return SyscallFlow::Resume;
+    }
+    let start = context.register(11) as u64;
+    if check_user_writable_range(space, memory, start, STAT_LEN).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.fstat(fd) {
+        Ok(stat) => {
+            read_scratch[..STAT_LEN].copy_from_slice(&stat.to_le_bytes());
+            SyscallFlow::ReadComplete {
+                start,
+                len: STAT_LEN,
+            }
         }
         Err(errno) => {
             context.set_register(10, errno as usize);
@@ -758,8 +848,8 @@ mod tests {
         control::FrameKind,
         syscall::{
             EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT, ENOSYS, ENOTDIR, ENOTEMPTY,
-            FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STDERR,
-            STDIN, STDOUT, SyscallNumber,
+            FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN,
+            STAT_KIND_FILE, STAT_LEN, STDERR, STDIN, STDOUT, Stat, SyscallNumber,
         },
     };
 
@@ -781,6 +871,8 @@ mod tests {
     const GETPID_NUMBER: usize = SyscallNumber::Getpid as usize;
     const SPAWN_NUMBER: usize = SyscallNumber::Spawn as usize;
     const WAITPID_NUMBER: usize = SyscallNumber::Waitpid as usize;
+    const STAT_NUMBER: usize = SyscallNumber::Stat as usize;
+    const FSTAT_NUMBER: usize = SyscallNumber::Fstat as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1047,6 +1139,11 @@ mod tests {
         waitpids: usize,
         seen_wait_pid: Option<usize>,
         waitpid_result: Result<Option<u32>, isize>,
+        stats: usize,
+        stat_result: Result<Stat, isize>,
+        fstats: usize,
+        seen_fstat_fd: Option<usize>,
+        fstat_result: Result<Stat, isize>,
     }
 
     impl FileSource {
@@ -1079,6 +1176,17 @@ mod tests {
                 waitpids: 0,
                 seen_wait_pid: None,
                 waitpid_result: Ok(Some(42)),
+                stats: 0,
+                stat_result: Ok(Stat {
+                    size: 18,
+                    kind: STAT_KIND_FILE,
+                }),
+                fstats: 0,
+                seen_fstat_fd: None,
+                fstat_result: Ok(Stat {
+                    size: 18,
+                    kind: STAT_KIND_FILE,
+                }),
             }
         }
 
@@ -1204,6 +1312,18 @@ mod tests {
             self.waitpids += 1;
             self.seen_wait_pid = Some(pid);
             self.waitpid_result
+        }
+
+        fn stat(&mut self, path: &str) -> Result<Stat, isize> {
+            self.stats += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.stat_result
+        }
+
+        fn fstat(&mut self, fd: usize) -> Result<Stat, isize> {
+            self.fstats += 1;
+            self.seen_fstat_fd = Some(fd);
+            self.fstat_result
         }
     }
 
@@ -2624,6 +2744,188 @@ mod tests {
         );
 
         assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches stat dropping the metadata, mislabeling the out copy, or
+    // reaching the source before the out pointer is validated: a success
+    // must produce a ReadComplete of STAT_LEN serialized bytes at `a2`.
+    #[test]
+    fn stat_writes_the_serialized_metadata_to_the_out_pointer() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let mut scratch_buf = scratch();
+        let (context, flow) = dispatch_numbered_file_fixture(
+            STAT_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            MESSAGE_PAGE + 0x100,
+            0,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+
+        assert_eq!(
+            flow,
+            SyscallFlow::ReadComplete {
+                start: (MESSAGE_PAGE + 0x100) as u64,
+                len: STAT_LEN,
+            }
+        );
+        assert_eq!(source.stats, 1);
+        assert_eq!(source.seen_path.as_deref(), Some(b"HELLO.TXT".as_slice()));
+        assert_eq!(
+            Stat::from_le_bytes(scratch_buf[..STAT_LEN].try_into().unwrap()),
+            Stat {
+                size: 18,
+                kind: STAT_KIND_FILE,
+            }
+        );
+        // 成功時の戻り値は`complete_read`が`a0`へ書く`len` (=STAT_LEN)——
+        // `read`系のbyte-count規約。dispatch自体はa0へ触れない。
+        let _ = context;
+    }
+
+    // Catches an unwritable out pointer reaching the source or passing
+    // without EFAULT: validation must reject it before any side effect.
+    #[test]
+    fn stat_rejects_an_unwritable_out_pointer_before_the_source() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            STAT_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0,
+            0,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.stats, 0);
+    }
+
+    // Catches stat swallowing the source errno: ENOENT/ENOTDIR must pass
+    // through to a0 unchanged.
+    #[test]
+    fn stat_passes_the_source_errno_through() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        source.stat_result = Err(ENOENT);
+        let (context, flow) = dispatch_numbered_file_fixture(
+            STAT_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            MESSAGE_PAGE + 0x100,
+            0,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOENT as usize);
+        assert_eq!(source.stats, 1);
+    }
+
+    // Catches fstat dispatching to the wrong fd or skipping the writable
+    // check: a file fd must reach the source and produce the same
+    // ReadComplete shape as stat.
+    #[test]
+    fn fstat_writes_metadata_for_a_file_fd() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let mut scratch_buf = scratch();
+        let (context, flow) = dispatch_fixture(
+            FSTAT_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE + 0x200,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+
+        assert_eq!(
+            flow,
+            SyscallFlow::ReadComplete {
+                start: (MESSAGE_PAGE + 0x200) as u64,
+                len: STAT_LEN,
+            }
+        );
+        assert_eq!(source.fstats, 1);
+        assert_eq!(source.seen_fstat_fd, Some(FIRST_FILE_FD));
+        let _ = context;
+    }
+
+    // Catches fstat accepting a standard stream or unallocated fd, and an
+    // unwritable out pointer reaching the source.
+    #[test]
+    fn fstat_rejects_bad_fds_and_unwritable_out_pointers() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_fixture(
+            FSTAT_NUMBER,
+            STDOUT,
+            MESSAGE_PAGE,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), EBADF as usize);
+        assert_eq!(source.fstats, 0);
+
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_fixture(
+            FSTAT_NUMBER,
+            FIRST_FILE_FD,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.fstats, 0);
+    }
+
+    // Catches the default ControlSource::stat/fstat leaking a successful
+    // result: without storage the guest must see ENOSYS.
+    #[test]
+    fn stat_and_fstat_without_storage_return_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, _) = dispatch_numbered_file_fixture(
+            STAT_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            MESSAGE_PAGE + 0x100,
+            0,
+            b"HELLO.TXT",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), ENOSYS as usize);
+
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, _) = dispatch_fixture(
+            FSTAT_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
         assert_eq!(context.register(10), ENOSYS as usize);
     }
 
