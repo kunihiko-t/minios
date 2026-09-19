@@ -30,6 +30,10 @@ pub enum SyscallNumber {
     /// `a0`のfile descriptorが指すfileのmetadataを`a1`のuser bufferへ
     /// 8 byteの`Stat`として書き込む。
     Fstat = 19,
+    /// `a0`/`a1`が指すdirectoryの`a2`番目のentryを`a3`のuser bufferへ
+    /// `DirEnt`として書き込む。`a1`=0はroot directoryを指し、
+    /// indexが末尾を越えれば0を返す。
+    Readdir = 20,
 }
 
 pub const STDIN: usize = 0;
@@ -82,6 +86,44 @@ impl Stat {
     }
 }
 
+/// `DirEnt::name`の容量。FAT32のLFN上限255 charと同じ。
+pub const DIRENT_NAME_LEN: usize = 255;
+/// `readdir`が`out` pointerへ書き込む`DirEnt`のbyte長。
+pub const DIRENT_LEN: usize = 4 + 4 + DIRENT_NAME_LEN;
+
+/// `readdir`がuser bufferへ書き込むdirectory entry。`name_len`は
+/// `name`内の有効byte数で、`kind`は`STAT_KIND_*`を再利用する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirEnt {
+    pub name_len: u32,
+    pub kind: u32,
+    pub name: [u8; DIRENT_NAME_LEN],
+}
+
+impl DirEnt {
+    /// LEの`DIRENT_LEN` byteへserializeする。`name`の未使用部は0。
+    pub fn to_le_bytes(&self) -> [u8; DIRENT_LEN] {
+        let name_len = self.name_len.to_le_bytes();
+        let kind = self.kind.to_le_bytes();
+        let mut out = [0u8; DIRENT_LEN];
+        out[0..4].copy_from_slice(&name_len);
+        out[4..8].copy_from_slice(&kind);
+        out[8..].copy_from_slice(&self.name);
+        out
+    }
+
+    /// `to_le_bytes`が書いた形式から読み戻す。guest側のdecodeに使う。
+    pub fn from_le_bytes(bytes: [u8; DIRENT_LEN]) -> Self {
+        let mut name = [0u8; DIRENT_NAME_LEN];
+        name.copy_from_slice(&bytes[8..]);
+        Self {
+            name_len: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            kind: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            name,
+        }
+    }
+}
+
 pub const ENOENT: isize = -2;
 pub const EIO: isize = -5;
 pub const EBADF: isize = -9;
@@ -123,6 +165,7 @@ mod tests {
         assert_eq!(SyscallNumber::Waitpid as usize, 17);
         assert_eq!(SyscallNumber::Stat as usize, 18);
         assert_eq!(SyscallNumber::Fstat as usize, 19);
+        assert_eq!(SyscallNumber::Readdir as usize, 20);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
@@ -167,5 +210,24 @@ mod tests {
             [0x04, 0x03, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00]
         );
         assert_eq!(Stat::from_le_bytes(stat.to_le_bytes()), stat);
+    }
+
+    // Catches the DirEnt wire layout drifting: name_len first, kind next,
+    // then the zero-padded name — matching what the guest decodes.
+    #[test]
+    fn dirent_serializes_name_len_kind_and_a_zero_padded_name() {
+        let mut name = [0u8; DIRENT_NAME_LEN];
+        name[..9].copy_from_slice(b"HELLO.TXT");
+        let dirent = DirEnt {
+            name_len: 9,
+            kind: STAT_KIND_FILE,
+            name,
+        };
+        let bytes = dirent.to_le_bytes();
+        assert_eq!(&bytes[..8], &[9, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8..17], b"HELLO.TXT");
+        assert!(bytes[17..].iter().all(|byte| *byte == 0));
+        assert_eq!(DirEnt::from_le_bytes(bytes), dirent);
+        assert_eq!(DIRENT_LEN, 263);
     }
 }

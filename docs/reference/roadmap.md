@@ -66,6 +66,7 @@ Stdin frameの受信は`StdinStaging`の再開可能なdecoderが担い、frame�
 guestからの動的process生成も完了しており、`spawn`はFAT32上のELFを新processとして起動してpidを返し、`getpid`は呼び出しprocessのpidを返します（`cargo xtask test file-spawn`で検証）。
 `waitpid`は対象processの終了codeを終了台帳から回収し、対象がliveなら呼び出しprocessを`BlockedOnPid`へ回して対象の終了で起こします（`cargo xtask test file-waitpid`で検証）。
 file metadataの公開も完了しており、`stat`はpathで解決したfileまたはdirectoryの`Stat`（sizeとkind）をuser bufferへ、`fstat`はopen中のfdのmetadataを同じ形式で返します（`cargo xtask test file-stat`で検証）。
+`readdir`はdirectoryの中身をindex順の`DirEnt`（nameとkind）として返し、空pathはroot directoryを指します（`cargo xtask test file-readdir`で検証）。
 
 ## 次
 

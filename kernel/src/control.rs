@@ -263,6 +263,35 @@ impl ControlSource for UartControlSource<'_> {
         })
     }
 
+    /// guestの`readdir`をstorage sessionへ委譲する。`""`はrootを指し、
+    /// index番目のentryを`DirEnt`へ写像する。末尾超過は`Ok(None)`。
+    #[cfg(target_arch = "riscv64")]
+    fn readdir(
+        &mut self,
+        path: &str,
+        index: usize,
+    ) -> Result<Option<minios_abi::syscall::DirEnt>, isize> {
+        use minios_abi::syscall::{DIRENT_NAME_LEN, DirEnt, STAT_KIND_DIR, STAT_KIND_FILE};
+
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let Some(entry) = session.entry_at(path, index).map_err(fat_errno)? else {
+            return Ok(None);
+        };
+        let name = entry.name().as_bytes();
+        let mut buffer = [0u8; DIRENT_NAME_LEN];
+        buffer[..name.len()].copy_from_slice(name);
+        Ok(Some(DirEnt {
+            name_len: name.len() as u32,
+            kind: if entry.is_directory() {
+                STAT_KIND_DIR
+            } else {
+                STAT_KIND_FILE
+            },
+            name: buffer,
+        }))
+    }
+
     /// guestの`mkdir`をstorage sessionへ委譲する。dir作成はfdを返さず、
     /// 失効させるfdもない。
     #[cfg(target_arch = "riscv64")]
