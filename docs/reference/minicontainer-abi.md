@@ -173,6 +173,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 17 | `waitpid` | `a0=pid` | `pid`のprocessの終了codeを返す。対象がliveなら呼び出しprocessをblockし、対象の終了後に同じecallが再実行されてcodeを返す。負のerrnoは`ECHILD`/`EINVAL` |
 | 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 | 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
+| 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ263 byteの`DirEnt`として書き込む。`a1`=0はroot directoryを指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（263）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -208,6 +209,8 @@ directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdは�
 
 `stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの8 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、残り4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1）です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile fdだけを受理して標準streamや未割り当てfdに`EBADF`を返します。
 どちらも`read`と同じく、out pointerが指す8 byteがユーザー空間の書き込み可能ページにすべて含まれることを要求し、検証を通ってからstorageやfd tableへ触れます。成功時の戻り値は`read`系のbyte数規約に従う`STAT_LEN`（8）です。
+
+`readdir`はdirectoryの中身をindex順に1件ずつ返します。`DirEnt`は263 byteで、先頭4 byteが`name_len`、次の4 byteが`kind`（`STAT_KIND_*`と同じ値）、残り255 byteがゼロ詰めの`name`です。`readdir`は呼び出しごとにdirectoryを先頭から走査して`index`番目のentryを返すため、一覧はindex 0からの連続呼び出しで得ます。`.`と`..`は列挙に含まれず、末尾を越えたindexは0を返します。空path（`a1`=0）はroot directoryを指し、fileへの指定は`ENOTDIR`を返します。out pointerの検証は`stat`と同じく、走査より先に`EFAULT`を確定します。
 負のABI error値は次のとおりです。
 
 | 値 | 名前 | 条件 |

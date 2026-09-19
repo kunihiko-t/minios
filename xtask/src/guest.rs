@@ -25,6 +25,9 @@ pub const GUEST_FILE_WAITPID: &str = "minios-guest-file-waitpid";
 
 /// `stat`/`fstat`のmetadataとerrno経路を検証するguest bin名。
 pub const GUEST_FILE_STAT: &str = "minios-guest-file-stat";
+
+/// `readdir`のindex列挙とerrno経路を検証するguest bin名。
+pub const GUEST_FILE_READDIR: &str = "minios-guest-file-readdir";
 /// scheduler検証のCPU-bound側bin名。
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 /// scheduler検証の短命側bin名。

@@ -67,6 +67,8 @@ const FILE_WAITPID_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2e\0\0\0MiniOS sched: spawned pid=0 name=file-waitpid\n";
 const FILE_STAT_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-stat\n";
+const FILE_READDIR_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2e\0\0\0MiniOS sched: spawned pid=0 name=file-readdir\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -78,6 +80,7 @@ const FILE_SPAWN_CHILD_STDOUT: &[u8] = b"spawn-child\n";
 const FILE_WAITPID_CHILD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0c\0\0\0spawn-child\n";
 const FILE_WAITPID_PARENT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0waitpid verified\n";
 const FILE_STAT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0stat verified\n";
+const FILE_READDIR_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0readdir verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -117,6 +120,7 @@ pub enum TestKind {
     FileSpawn,
     FileWaitpid,
     FileStat,
+    FileReaddir,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -165,6 +169,9 @@ impl TestKind {
             }
             Self::FileStat => {
                 unreachable!("the file-stat test boots the normal kernel")
+            }
+            Self::FileReaddir => {
+                unreachable!("the file-readdir test boots the normal kernel")
             }
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -218,6 +225,9 @@ impl TestKind {
             }
             Self::FileStat => {
                 unreachable!("the file-stat test verifies raw control frames")
+            }
+            Self::FileReaddir => {
+                unreachable!("the file-readdir test verifies raw control frames")
             }
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -585,6 +595,25 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         bundle.remove();
         disk.remove();
         return verify_file_stat_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::FileReaddir {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_readdir()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_readdir_result(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+        );
     }
 
     if kind == TestKind::FileSeek {
@@ -1335,6 +1364,17 @@ const FILE_STAT_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file-readdir検査で期待されるcontrol frame列。guestがreaddirの
+/// index列挙・kind・EOF・errno・EFAULTの経路を通してから、検証済みの
+/// 旨をstdoutへ出力する。
+const FILE_READDIR_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    FILE_READDIR_SPAWNED_FRAME,
+    FILE_READDIR_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1606,6 +1646,29 @@ fn verify_file_stat_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_STAT_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+/// file-readdir検証: guestがreaddirの契約を全て確認し、`readdir
+/// verified`とExit(42)を出す。単一processなのでexact照合できる。
+fn verify_file_readdir_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_READDIR_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -1937,6 +2000,11 @@ impl PayloadBundle {
         Self::create_with(payload_file_stat_bundle_bytes(&elf)?)
     }
 
+    fn create_file_readdir() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_READDIR)?;
+        Self::create_with(payload_file_readdir_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -2169,6 +2237,14 @@ fn payload_file_waitpid_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// 確かめて`stat verified`をstdoutへ書きexit(42)する。
 fn payload_file_stat_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-stat\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-readdir検査用bundle: file_readdir guestのELFと引数なしmanifestを
+/// 組み立てる。guestはreaddirのindex列挙・kind・EOF・errno・EFAULT
+/// 経路を確かめて`readdir verified`をstdoutへ書きexit(42)する。
+fn payload_file_readdir_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-readdir\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 

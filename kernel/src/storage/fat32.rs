@@ -293,6 +293,40 @@ impl<R: SectorReader> Fat32<R> {
         })
     }
 
+    /// `path`が参照するdirectoryの`index`番目のentryを返す。`""`は
+    /// root、indexが末尾を越えれば`None`。`for_each_entry`と同じ
+    /// 解釈で、fileへの指定は`NotDirectory`を返す。`.`/`..`は
+    /// 列挙に含まれない。index番目へ到達した時点で走査を打ち切る。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn entry_at(
+        &mut self,
+        path: &str,
+        index: usize,
+    ) -> Result<Option<DirEntry>, FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        let dir_cluster = if path.is_empty() {
+            self.root_cluster
+        } else {
+            let (entry, _loc) = self.resolve_path(path, &mut scratch)?;
+            if !entry.directory {
+                return Err(FatError::NotDirectory);
+            }
+            entry.first_cluster
+        };
+        let mut found = None;
+        let mut seen = 0usize;
+        self.walk_dir(dir_cluster, &mut scratch, |entry, _loc| {
+            if seen == index {
+                found = Some(*entry);
+                true
+            } else {
+                seen += 1;
+                false
+            }
+        })?;
+        Ok(found)
+    }
+
     /// `path`が参照するfileを先頭からstreamする。directoryを指すpathは
     /// `IsDirectory`、fileの途中に潜るpathは`NotDirectory`を返す。
     #[cfg(not(target_arch = "riscv32"))]
@@ -2833,6 +2867,38 @@ mod tests {
         fs.write_range(&mut desc, 0, b"abcde").unwrap();
         let file = fs.stat("GROW.TXT").unwrap();
         assert_eq!(file.size, 5);
+    }
+
+    // Catches entry_at enumerating the wrong order, exposing `.`/`..`,
+    // or reporting EOF too early: the index sequence must match
+    // for_each_entry and end exactly at the entry count.
+    #[test]
+    fn entry_at_enumerates_entries_by_index_and_reports_eof() {
+        let mut fs = mounted_nested_fixture();
+
+        // ""はroot。nested fixtureのrootはSUBDIRとHELLO.TXTの2件。
+        let first = fs.entry_at("", 0).unwrap().unwrap();
+        assert_eq!(first.name(), "SUBDIR");
+        assert!(first.is_directory());
+        let second = fs.entry_at("", 1).unwrap().unwrap();
+        assert_eq!(second.name(), "HELLO.TXT");
+        assert!(!second.is_directory());
+        assert!(fs.entry_at("", 2).unwrap().is_none());
+        assert!(fs.entry_at("", 9).unwrap().is_none());
+
+        // subdirectoryも同じindex規約。NOTE.TXTだけが列挙される。
+        let note = fs.entry_at("SUBDIR", 0).unwrap().unwrap();
+        assert_eq!(note.name(), "NOTE.TXT");
+        assert_eq!(note.size(), 11);
+        assert!(fs.entry_at("SUBDIR", 1).unwrap().is_none());
+
+        // file・不在・不正名は列挙ではなくerrnoとして返る。
+        assert!(matches!(
+            fs.entry_at("HELLO.TXT", 0),
+            Err(FatError::NotDirectory)
+        ));
+        assert!(matches!(fs.entry_at("MISSING", 0), Err(FatError::NotFound)));
+        assert!(matches!(fs.entry_at("A//B", 0), Err(FatError::InvalidName)));
     }
 
     // Catches read_range skipping the wrong clusters, ignoring the output
