@@ -1748,7 +1748,22 @@ unsafe fn spawn_process(
     };
     let memory = unsafe { &mut *(USER_SYSCALL_PROBE_MEMORY as *mut IdentityFrameStore) };
     let mut frames = GlobalFrames;
-    Process::spawn(name, elf, arguments, &mut frames, memory, plan.mappings())
+    // callerのfd tableをsnapshotで引き継ぐ。`CURRENT_PROC`はsyscall経路では
+    // 必ず設定済みだが、未設定でも空tableでspawnできる形にする。
+    let caller = unsafe { *&raw const CURRENT_PROC };
+    let file_fds = unsafe { caller.as_ref() }
+        .map_or_else(minios_kernel::process::FileFdTable::new, |process| {
+            process.file_fds_snapshot()
+        });
+    Process::spawn(
+        name,
+        elf,
+        arguments,
+        file_fds,
+        &mut frames,
+        memory,
+        plan.mappings(),
+    )
 }
 
 /// `spawn`で作ったprocessをtableへ登録し、採番したpidを返す。
@@ -2554,6 +2569,7 @@ fn run_boot_payload(
             spec.name(),
             payload.image_elf(&spec),
             &argv[..argc],
+            minios_kernel::process::FileFdTable::new(),
             frames,
             memory,
             plan.mappings(),

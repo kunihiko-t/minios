@@ -122,20 +122,24 @@ impl FileFd {
 
 /// processごとのfile descriptor table。fd番号はslot index +
 /// `FIRST_FILE_FD`であり、tableはprocess内に閉じるため他processのfdを
-/// 構造的に参照できない。RV32はfdを持たないためZSTでコスト0にする。
+/// 構造的に参照できない。`spawn`はこのtableのsnapshotをchildへ渡すため、
+/// 継承はcopyでありspawn後のoffsetやcloseは互いに影響しない。
+/// RV32はfdを持たないためZSTでコスト0にする。
 #[cfg(not(target_arch = "riscv32"))]
-#[derive(Debug)]
-struct FileFdTable {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileFdTable {
     slots: [Option<FileFd>; minios_abi::syscall::MAX_OPEN_FILES],
 }
 
 #[cfg(target_arch = "riscv32")]
-#[derive(Debug)]
-struct FileFdTable;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileFdTable;
 
 #[cfg(not(target_arch = "riscv32"))]
 impl FileFdTable {
-    const fn new() -> Self {
+    /// 空のfd table。manifestから起動する初期processやfd非継承の
+    /// spawnに使う。
+    pub const fn new() -> Self {
         Self {
             slots: [const { None }; minios_abi::syscall::MAX_OPEN_FILES],
         }
@@ -203,7 +207,8 @@ impl FileFdTable {
 
 #[cfg(target_arch = "riscv32")]
 impl FileFdTable {
-    const fn new() -> Self {
+    /// 空のfd table。RV32ではfdを持たないため常にZSTを返す。
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -256,6 +261,7 @@ impl Process {
         name: &'static str,
         elf: &[u8],
         arguments: &[&str],
+        file_fds: FileFdTable,
         allocator: &mut dyn FrameSource,
         memory: &mut M,
         kernel_mappings: I,
@@ -337,7 +343,7 @@ impl Process {
             user_satp,
             context,
             state: ProcessState::Runnable,
-            file_fds: FileFdTable::new(),
+            file_fds,
         })
     }
 
@@ -444,6 +450,12 @@ impl Process {
             ProcessState::BlockedOnPid(pid) => Some(pid),
             _ => None,
         }
+    }
+
+    /// fd tableのsnapshot。`spawn`がchildの初期tableとして引き継ぐため
+    /// trap窓から呼ばれる。copyなのでcaller側tableへの影響はない。
+    pub const fn file_fds_snapshot(&self) -> FileFdTable {
+        self.file_fds
     }
 
     /// `fd`に対応するslotを借りる。未割り当てや範囲外なら`None`。
@@ -957,11 +969,16 @@ mod tests {
         }
 
         fn spawn(&mut self, name: &'static str) -> Process {
+            self.spawn_with_fds(name, FileFdTable::new())
+        }
+
+        fn spawn_with_fds(&mut self, name: &'static str, file_fds: FileFdTable) -> Process {
             let bytes = valid_riscv64_elf();
             Process::spawn(
                 name,
                 &bytes,
                 &[],
+                file_fds,
                 &mut self.frames,
                 &mut self.memory,
                 core::iter::empty(),
@@ -1014,6 +1031,7 @@ mod tests {
             "proc-b",
             &bytes,
             &[],
+            FileFdTable::new(),
             &mut frames,
             &mut memory,
             core::iter::empty(),
@@ -1412,6 +1430,35 @@ mod tests {
             Some((8, 7))
         );
         assert!(p1.fd_mut(fd1 + 1).is_none());
+    }
+
+    // Catches spawn losing the caller's fd snapshot: a child spawned with the
+    // parent's table must see the same fd numbers, descriptors, and offsets,
+    // while later parent-side seeks and closes leave the child's copy intact.
+    #[test]
+    fn spawn_inherits_fd_table_snapshot() {
+        let mut fixture = SpawnFixture::new();
+        let mut parent = fixture.spawn("fd-parent");
+        let fd = parent
+            .alloc_fd(FileDesc::for_test(5, 0), false)
+            .expect("slot must be free");
+        parent.fd_mut(fd).expect("parent fd is live").set_offset(4);
+
+        let mut child = fixture.spawn_with_fds("fd-child", parent.file_fds_snapshot());
+
+        let inherited = child.fd_mut(fd).expect("child inherits the fd");
+        assert_eq!(inherited.desc().dir_location(), (5, 0));
+        assert_eq!(inherited.offset(), 4);
+        assert!(!inherited.writable());
+
+        parent
+            .fd_mut(fd)
+            .expect("parent fd is live")
+            .set_offset(100);
+        assert!(parent.close_fd(fd));
+        let still = child.fd_mut(fd).expect("child copy survives parent edits");
+        assert_eq!(still.offset(), 4);
+        assert_eq!(still.desc().dir_location(), (5, 0));
     }
 
     // Catches close leaving a slot stuck or double-close reporting success:

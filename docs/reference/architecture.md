@@ -104,6 +104,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   各`Process`は`LoadedImage`（user address spaceとその所有frame）、4ページの専用kernel trap stack、前回中断時の`UserContext`、file descriptor table、採番されたpidを所有します。
   allocatorやframe memoryへの参照は保持しないため、生存中のprocess同士がborrowを共有しません。
   fd tableはprocess内に閉じるため他processのfdを構造的に参照できず、`take`されたprocessとともに死ぬので、終了時の明示的なclose処理は要りません。
+  `spawn` syscallはcallerのfd tableのsnapshotをchildの初期tableとして渡すため、childはparentが開いたfileを同じfd番号とその時点のoffsetで読めます（継承はcopyで、後のseekやcloseは互いに影響しません）。
   pidは`insert`のたびに`next_pid`から単調採番され再利用されないため、終了frameが参照するpidと後続processのpidは衝突しません。tableは`Vec`なのでメモリーはlive process数に比例し、admission capはmanifest上限の`MAX_PROCS`です。
 - manifest v2のbundleは`image=`sectionごとに`elf=<offset>,<len>`で共有ELF領域内のrangeを宣言し、初回spawn列はmanifest順にpid 0から採番されます。
 - U-mode実行中のsupervisor timer割り込みは`user/trap.rs`が`TrapAction::Timer`へ分類し、trap handlerはtickを再アームしてから`Preempted`のoutcomeでkernelへ戻ります。
@@ -133,7 +134,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、file-spawn、file-waitpid、file-stat、file-readdir、file-exec、schedを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、file-spawn、file-waitpid、file-stat、file-readdir、file-exec、file-fdinherit、schedを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
 - `guest.rs`：Rust guestのrelease buildと、kernelのELF parserによる配置契約のhost検査を担当します。
