@@ -34,6 +34,10 @@ pub enum SyscallNumber {
     /// `DirEnt`として書き込む。`a1`=0はroot directoryを指し、
     /// indexが末尾を越えれば0を返す。
     Readdir = 20,
+    /// `a0`/`a1`が指すFAT32 pathのELFで呼び出しprocessのimageを
+    /// 置き換える。pidとfd tableは引き継ぎ、成功時は新imageの
+    /// entryから始まるため戻らない。失敗時のみ負のerrnoを返す。
+    Exec = 21,
 }
 
 pub const STDIN: usize = 0;
@@ -166,6 +170,7 @@ mod tests {
         assert_eq!(SyscallNumber::Stat as usize, 18);
         assert_eq!(SyscallNumber::Fstat as usize, 19);
         assert_eq!(SyscallNumber::Readdir as usize, 20);
+        assert_eq!(SyscallNumber::Exec as usize, 21);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);

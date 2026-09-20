@@ -178,6 +178,15 @@ pub trait ControlSource {
         let _ = (path, index);
         Err(ENOSYS)
     }
+
+    /// `path`のELFで呼び出しprocessのimageを置き換える。`Ok`の
+    /// `UserContext`は新imageの初期frameで、dispatchがtrap slotへ
+    /// 書き込み`Exec`を返す。`Err`はそのまま`a0`へ返すerrnoである。
+    /// 旧imageの解放はrun loop側の契約である。default実装は`ENOSYS`。
+    fn exec(&mut self, path: &str) -> Result<UserContext, isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -200,6 +209,11 @@ pub enum SyscallFlow<E, SE = E> {
     /// 入力到着後の再開で同じsyscallがやり直される。schedulerはこのprocessを
     /// stdin待ちへ回し、他のrunnable processを動かせる。
     Blocked,
+    /// `exec`がimageを差し替え、trap slotへ新imageの初期contextを書いた。
+    /// kernelへ戻ってcaller satpを離れた後、run loopが退避した旧imageを
+    /// 解放する。process自体はrunnableのまま残り、次のdispatchで
+    /// 新しいsatpとcontextで`__run_user`へ入る。
+    Exec,
 }
 
 /// `a7`のsystem call番号に従って`context`を処理する。
@@ -265,6 +279,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_fstat(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Readdir as usize {
         dispatch_readdir(context, space, memory, source, read_scratch)
+    } else if number == SyscallNumber::Exec as usize {
+        dispatch_exec(context, space, memory, source)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -488,6 +504,38 @@ fn dispatch_spawn<M: FrameStore, E, R: ControlSource>(
         Err(errno) => context.set_register(10, errno as usize),
     }
     SyscallFlow::Resume
+}
+
+/// `exec` (`a0=path_ptr, a1=path_len`)。path検証は`spawn`と同じ規約。
+/// 成功時はsourceが返す新imageの初期contextをtrap slotへ上書きして
+/// `Exec`を返す——`sepc`のecallへは戻らず、kernel復帰後にprocessは
+/// 新しいsatpとcontextでdispatchされる。旧imageはcaller satpが有効な
+/// 間は解放できないため、source側が`Process::retired_image`へ退避済み
+/// である。失敗時はerrnoを`a0`へ書いてResumeし、旧imageのまま続く。
+fn dispatch_exec<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    let Some(path_len) = copy_user_path(context, space, memory, &mut path_buf) else {
+        return SyscallFlow::Resume;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    };
+    match source.exec(path) {
+        Ok(initial) => {
+            *context = initial;
+            SyscallFlow::Exec
+        }
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
 }
 
 /// `waitpid` (`a0=pid`)。`Ok(Some(code))`は終了codeを`a0`へ、
@@ -936,6 +984,7 @@ mod tests {
     const STAT_NUMBER: usize = SyscallNumber::Stat as usize;
     const FSTAT_NUMBER: usize = SyscallNumber::Fstat as usize;
     const READDIR_NUMBER: usize = SyscallNumber::Readdir as usize;
+    const EXEC_NUMBER: usize = SyscallNumber::Exec as usize;
     const EXIT_NUMBER: usize = SyscallNumber::Exit as usize;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1221,6 +1270,9 @@ mod tests {
         readdirs: usize,
         seen_readdir_index: Option<usize>,
         readdir_result: Result<Option<DirEnt>, isize>,
+        execs: usize,
+        /// `exec`成功時に返す新contextの`(entry, sp)`。
+        exec_result: Result<(u64, u64), isize>,
     }
 
     impl FileSource {
@@ -1267,6 +1319,8 @@ mod tests {
                 readdirs: 0,
                 seen_readdir_index: None,
                 readdir_result: Ok(Some(dirent_fixture())),
+                execs: 0,
+                exec_result: Ok((0x40_0000, 0x40_7000)),
             }
         }
 
@@ -1411,6 +1465,17 @@ mod tests {
             self.seen_path = Some(Vec::from(path.as_bytes()));
             self.seen_readdir_index = Some(index);
             self.readdir_result
+        }
+
+        fn exec(&mut self, path: &str) -> Result<UserContext, isize> {
+            self.execs += 1;
+            self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.exec_result.map(|(entry, sp)| {
+                UserContext::new(
+                    crate::vm::VirtAddr::try_new(entry).expect("fixture entry"),
+                    crate::vm::VirtAddr::try_new(sp).expect("fixture stack top"),
+                )
+            })
         }
     }
 
@@ -3174,6 +3239,96 @@ mod tests {
             &mut source,
             &mut scratch(),
         );
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches exec resuming into the old image or skipping the slot write:
+    // a hit must overwrite the trap context with the new initial frame —
+    // new entry in sepc, a fresh user stack in sp — and return Exec so the
+    // run loop knows a retired image is waiting to be freed.
+    #[test]
+    fn exec_rewrites_the_trap_context_and_returns_the_exec_flow() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            EXEC_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Exec);
+        assert_eq!(source.execs, 1);
+        assert_eq!(source.seen_path.as_deref(), Some(b"CHILD.ELF".as_slice()));
+        assert_eq!(context.sepc(), 0x40_0000);
+        assert_eq!(context.register(2), 0x40_7000);
+    }
+
+    // Catches exec reaching the source after a bad path pointer: EFAULT
+    // must win over every storage or image side effect, and the source
+    // errno must reach a0 unchanged while the context stays intact.
+    #[test]
+    fn exec_validates_the_path_and_passes_errnos_through() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            EXEC_NUMBER,
+            0x40_000,
+            9,
+            0,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.execs, 0);
+
+        let mut source = FileSource::serving(b"");
+        source.exec_result = Err(ENOENT);
+        let (context, flow) = dispatch_numbered_file_fixture(
+            EXEC_NUMBER,
+            MESSAGE_PAGE,
+            7,
+            0,
+            0,
+            b"MISSING",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOENT as usize);
+        assert_eq!(source.execs, 1);
+        // 失敗時はcontextを書き換えず、旧imageのままecallの次へ戻る。
+        assert_ne!(context.sepc(), 0x40_0000);
+    }
+
+    // Catches the default ControlSource::exec leaking a successful result:
+    // without storage the guest must see ENOSYS and keep running.
+    #[test]
+    fn exec_without_storage_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) = dispatch_numbered_file_fixture(
+            EXEC_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOSYS as usize);
     }
 
