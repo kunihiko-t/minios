@@ -32,6 +32,7 @@ const DOCS_CLUSTER: u32 = 4;
 const NOTE_CLUSTER: u32 = 5;
 const LFN_CLUSTER: u32 = 6;
 const CHILD_CLUSTER: u32 = 7;
+const FDCHILD_CLUSTER: u32 = 8;
 
 /// `DOCS/CHILD.ELF`のfile長。guestの`spawn`検査が起動する最小ELF64で、
 /// ELF header + program header + code + messageをfile offset 0から
@@ -84,6 +85,66 @@ fn child_elf() -> [u8; CHILD_ELF_LEN] {
         bytes[start..start + 4].copy_from_slice(&instruction.to_le_bytes());
     }
     bytes[0xc0..0xcc].copy_from_slice(b"spawn-child\n");
+    bytes
+}
+
+/// `DOCS/FDCHILD.ELF`のfile長。guestのfd継承検査が起動する最小ELF64。
+const FDCHILD_ELF_LEN: usize = 0xc8;
+
+/// guestのfd継承検査用の最小ELF64 executable。entry (0x0010_0080) から
+/// `read(3, sp-64, 13)` → 13 byte読めたら`write(1, sp-64, 13)` → `exit(42)`
+/// を行い、読み取り失敗なら`exit(70)`で落ちる。parentが`lseek`で進めた
+/// offsetをsnapshotで引き継ぐため、継承が効いていればfd 3から
+/// `" inside docs\n"`（offset 4以降の13 byte）が読める。
+/// bufferはR+X segmentでは書けないためuser stack上に取る。
+fn fdchild_elf() -> [u8; FDCHILD_ELF_LEN] {
+    const CODE: [u32; 18] = [
+        0x0030_0513, // addi a0, x0, 3     ; fd = 3 (inherited)
+        0xfc01_0593, // addi a1, sp, -64   ; buf = sp - 64
+        0x00d0_0613, // addi a2, x0, 13    ; len
+        0x0030_0893, // addi a7, x0, 3     ; Read
+        0x0000_0073, // ecall
+        0x00d0_0293, // addi t0, x0, 13    ; expect 13 bytes
+        0x0255_1263, // bne  a0, t0, fail  ; → exit(70)
+        0x0010_0513, // addi a0, x0, 1     ; fd = STDOUT
+        0xfc01_0593, // addi a1, sp, -64   ; buf
+        0x00d0_0613, // addi a2, x0, 13    ; len
+        0x0010_0893, // addi a7, x0, 1     ; Write
+        0x0000_0073, // ecall
+        0x02a0_0513, // addi a0, x0, 42
+        0x0020_0893, // addi a7, x0, 2     ; Exit
+        0x0000_0073, // ecall
+        0x0460_0513, // fail: addi a0, x0, 70
+        0x0020_0893, // addi a7, x0, 2     ; Exit
+        0x0000_0073, // ecall
+    ];
+    let mut bytes = [0u8; FDCHILD_ELF_LEN];
+    bytes[0..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2; // ELFCLASS64
+    bytes[5] = 1; // little-endian
+    bytes[6] = 1; // ident version
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    bytes[18..20].copy_from_slice(&243u16.to_le_bytes()); // EM_RISCV
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
+    bytes[24..32].copy_from_slice(&0x0010_0080u64.to_le_bytes()); // entry
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+    bytes[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
+
+    // program header: PT_LOAD, R+X, file offset 0 → vaddr 0x0010_0000。
+    bytes[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    bytes[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R|PF_X
+    // offset=0, paddr=0はzeroのまま。
+    bytes[80..88].copy_from_slice(&0x0010_0000u64.to_le_bytes()); // vaddr
+    bytes[96..104].copy_from_slice(&(FDCHILD_ELF_LEN as u64).to_le_bytes()); // filesz
+    bytes[104..112].copy_from_slice(&(FDCHILD_ELF_LEN as u64).to_le_bytes()); // memsz
+    bytes[112..120].copy_from_slice(&0x1000u64.to_le_bytes()); // align
+
+    for (index, instruction) in CODE.iter().enumerate() {
+        let start = 0x80 + index * 4;
+        bytes[start..start + 4].copy_from_slice(&instruction.to_le_bytes());
+    }
     bytes
 }
 
@@ -219,6 +280,7 @@ fn image_bytes() -> Vec<u8> {
     set(&mut fat, NOTE_CLUSTER, 0x0fff_ffff);
     set(&mut fat, LFN_CLUSTER, 0x0fff_ffff);
     set(&mut fat, CHILD_CLUSTER, 0x0fff_ffff);
+    set(&mut fat, FDCHILD_CLUSTER, 0x0fff_ffff);
     for copy in 0..FAT_COUNT {
         let start = (u32::from(RESERVED_SECTORS) + u32::from(copy) * fat_sectors) as usize * SECTOR;
         image[start..start + fat.len()].copy_from_slice(&fat);
@@ -257,7 +319,7 @@ fn image_bytes() -> Vec<u8> {
         );
     }
 
-    // --- DOCS directory (cluster 4): `.`/`..` + NOTE.TXT ---
+    // --- DOCS directory (cluster 4): `.`/`..` + NOTE.TXT + ELF fixtures ---
     {
         let docs_start = (data_start + (DOCS_CLUSTER - 2)) as usize * SECTOR;
         let docs = &mut image[docs_start..docs_start + SECTOR];
@@ -279,6 +341,14 @@ fn image_bytes() -> Vec<u8> {
             CHILD_CLUSTER,
             CHILD_ELF_LEN as u32,
         );
+        dir_entry(
+            docs,
+            4,
+            b"FDCHILD ELF",
+            0x20,
+            FDCHILD_CLUSTER,
+            FDCHILD_ELF_LEN as u32,
+        );
     }
 
     // --- file data (cluster 3 = HELLO.TXT, cluster 5 = NOTE.TXT) ---
@@ -290,6 +360,8 @@ fn image_bytes() -> Vec<u8> {
     image[lfn_start..lfn_start + LFN_TXT.len()].copy_from_slice(LFN_TXT);
     let child_start = (data_start + (CHILD_CLUSTER - 2)) as usize * SECTOR;
     image[child_start..child_start + CHILD_ELF_LEN].copy_from_slice(&child_elf());
+    let fdchild_start = (data_start + (FDCHILD_CLUSTER - 2)) as usize * SECTOR;
+    image[fdchild_start..fdchild_start + FDCHILD_ELF_LEN].copy_from_slice(&fdchild_elf());
 
     image
 }
@@ -375,7 +447,7 @@ mod tests {
         let mut docs = Vec::new();
         fs.for_each_entry("DOCS", |entry| docs.push(entry.name().to_owned()))
             .expect("DOCS listing must succeed");
-        assert_eq!(docs, ["NOTE.TXT", "CHILD.ELF"]);
+        assert_eq!(docs, ["NOTE.TXT", "CHILD.ELF", "FDCHILD.ELF"]);
         let mut note = Vec::new();
         fs.read_file("DOCS/NOTE.TXT", |chunk| note.extend_from_slice(chunk))
             .expect("DOCS/NOTE.TXT must be readable");

@@ -204,6 +204,7 @@ directoryを自身またはその子孫directoryの中へ移す指定は`EINVAL`
 directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdはありません。
 `getpid`は呼び出したprocessのpidを返します。pidはprocess tableが採番する単調な識別子で、manifest宣言順のimageは0から始まり、`spawn`で起動したprocessは以後の番号を受け取ります。
 `spawn`は`path`のfileをELF executableとして読み込み、新しいprocessを生成してschedulerへ登録し、childのpidを返します。childは呼び出し側と独立してscheduleされ、親が終了しても残り続けます。
+childは呼び出し側のfd tableのsnapshotを引き継ぎます。同じfd番号が同じfileを指し、spawn時点のoffsetを引き継ぎますが、継承はcopyなのでその後のseekやcloseは互いに影響しません。manifestから起動するprocessは空のtableで開始します。
 `spawn`が失敗した場合、途中まで確保したframe・address space・imageはすべて解放され、新しいprocessは登録されません。pathがfileを指さない（`ENOENT`）、directoryを指す（`EISDIR`）、ELFとして受理できない（`EINVAL`）、process tableが満杯または資源が足りない（`ENOMEM`）場合がerrnoです。
 `waitpid`は`a0`のpidを持つprocessの終了codeを返します。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
 対象が自分自身・存在しない・既にreap済み・異常終了でstatusを持たない場合は`ECHILD`、wait連鎖が呼び出し側へ戻るcycleは`EINVAL`を返します。複数のprocessが同じpidを待つこともでき、終了時に全員がwakeしますが、codeを回収できるのは先に再実行された1つだけで、残りは`ECHILD`を受け取ります。kernelは終了codeをprocess数上限分だけ台帳へ保持し、超過分は最古からdropします。

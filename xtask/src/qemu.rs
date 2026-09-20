@@ -71,6 +71,8 @@ const FILE_READDIR_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2e\0\0\0MiniOS sched: spawned pid=0 name=file-readdir\n";
 const FILE_EXEC_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-exec\n";
+const FILE_FDINHERIT_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x30\0\0\0MiniOS sched: spawned pid=0 name=file-fdinherit\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -89,6 +91,9 @@ const FILE_EXEC_EXIT_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x29\0\0\0";
 /// file-execの回収診断。最後のexit codeは41である。
 const FILE_EXEC_DIAGNOSTIC_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x1d\0\0\0\r\nMiniOS payload: ok code=41\n";
+/// fd継承したchildが`DOCS/NOTE.TXT`のoffset 4以降13 byteを写すstdout frame。
+const FILE_FDINHERIT_CHILD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0 inside docs\n";
+const FILE_FDINHERIT_PARENT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x14\0\0\0fd-inherit verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -130,6 +135,7 @@ pub enum TestKind {
     FileStat,
     FileReaddir,
     FileExec,
+    FileFdinherit,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -184,6 +190,9 @@ impl TestKind {
             }
             Self::FileExec => {
                 unreachable!("the file-exec test boots the normal kernel")
+            }
+            Self::FileFdinherit => {
+                unreachable!("the file-fdinherit test boots the normal kernel")
             }
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -243,6 +252,9 @@ impl TestKind {
             }
             Self::FileExec => {
                 unreachable!("the file-exec test verifies raw control frames")
+            }
+            Self::FileFdinherit => {
+                unreachable!("the file-fdinherit test verifies interleaved control frames")
             }
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -644,6 +656,25 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         bundle.remove();
         disk.remove();
         return verify_file_exec_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::FileFdinherit {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_fdinherit()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_fdinherit_result(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+        );
     }
 
     if kind == TestKind::FileSeek {
@@ -1416,6 +1447,20 @@ const FILE_EXEC_EXPECTED_FRAMES: [&[u8]; 5] = [
     FILE_EXEC_DIAGNOSTIC_FRAME,
 ];
 
+/// file-fdinherit検査で期待されるcontrol frame列。parentがwaitpidで
+/// blockするため、継承fdを読んだchildのstdoutとExitはparentの
+/// `fd-inherit verified`とExitより必ず先に出る＝exact順序照合が
+/// blockingと継承の両方の直接証拠になる。
+const FILE_FDINHERIT_EXPECTED_FRAMES: [&[u8]; 7] = [
+    PAYLOAD_READY_FRAME,
+    FILE_FDINHERIT_SPAWNED_FRAME,
+    FILE_FDINHERIT_CHILD_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    FILE_FDINHERIT_PARENT_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1734,6 +1779,31 @@ fn verify_file_exec_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_EXEC_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+/// file-fdinherit検証: parentがopenしてoffset 4へ進めたfdを継承した
+/// childが`" inside docs\n"`をstdoutへ写してExit(42)し、parentが
+/// 継承のsnapshot semanticsを確かめて`fd-inherit verified`とExit(42)を
+/// 出す。waitpidのblockによりframe順は確定的である。
+fn verify_file_fdinherit_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_FDINHERIT_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -2075,6 +2145,12 @@ impl PayloadBundle {
         Self::create_with(payload_file_exec_bundle_bytes(&elf)?)
     }
 
+    /// file-fdinherit検査用bundle。
+    fn create_file_fdinherit() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_FDINHERIT)?;
+        Self::create_with(payload_file_fdinherit_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -2323,6 +2399,16 @@ fn payload_file_readdir_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// execし、差し替え後のimageが`spawn-child`を書きexit(41)する。
 fn payload_file_exec_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-exec\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-fdinherit検査用bundle: file_fdinherit guestのELFと引数なしmanifestを
+/// 組み立てる。guestは`DOCS/NOTE.TXT`を開きoffsetを進めてから
+/// `DOCS/FDCHILD.ELF`をspawnし、waitpidでblockされてchildのexit(42)を
+/// 回収し、parent側でsnapshot semanticsを確かめて`fd-inherit verified`
+/// をstdoutへ書きexit(42)する。
+fn payload_file_fdinherit_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-fdinherit\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 
@@ -2643,6 +2729,7 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> ls DOCS"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "        17 NOTE.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "       204 CHILD.ELF"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "       200 FDCHILD.ELF"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat DOCS/NOTE.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "note inside docs"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat Long File Name.txt"))
@@ -3304,6 +3391,7 @@ mod tests {
             "minios> ls DOCS",
             "        17 NOTE.TXT",
             "       204 CHILD.ELF",
+            "       200 FDCHILD.ELF",
             "minios> cat DOCS/NOTE.TXT",
             "note inside docs",
             "minios> cat Long File Name.txt",
