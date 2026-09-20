@@ -222,6 +222,10 @@ pub struct Process {
     name: &'static str,
     pid: usize,
     image: Option<LoadedImage>,
+    /// `exec`で置き換えられた旧image。trap実行窓では旧callerのsatpが
+    /// activeのままなため解放できず、run loopがkernel satpへ戻った直後に
+    /// `take_retired_image`で取り出してdestroyする。
+    retired_image: Option<LoadedImage>,
     kernel_stack: [Option<PhysFrame>; KERNEL_STACK_PAGES],
     kernel_stack_bottom: usize,
     user_satp: u64,
@@ -327,6 +331,7 @@ impl Process {
             name,
             pid: usize::MAX,
             image: Some(image),
+            retired_image: None,
             kernel_stack,
             kernel_stack_bottom: stack_bottom.expect("kernel stack has at least one page"),
             user_satp,
@@ -334,6 +339,81 @@ impl Process {
             state: ProcessState::Runnable,
             file_fds: FileFdTable::new(),
         })
+    }
+
+    /// 呼び出しprocessのimageを`elf`で置き換える (`exec` syscall)。
+    /// pid・kernel trap stack・fd tableは引き継ぎ、address spaceと
+    /// 初期contextだけを新しくする。
+    ///
+    /// 新imageの構築をすべて終えてからswapするため、失敗時は旧imageに
+    /// 触れずcallerはerrnoを受けて動き続ける。成功時は旧imageを
+    /// `retired_image`へ退避し、新imageの初期contextを返す。
+    /// 退避したimageはtrap実行窓ではまだ旧satpがactiveなため解放
+    /// できず、run loopがkernel satpへ戻った直後に回収する。
+    pub fn exec<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
+        &mut self,
+        name: &'static str,
+        elf: &[u8],
+        arguments: &[&str],
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+        kernel_mappings: I,
+    ) -> Result<UserContext, SpawnFailure<M::Error>> {
+        let image = match load_image_with_kernel_mappings(elf, allocator, memory, kernel_mappings) {
+            Ok(image) => image,
+            Err(error) => {
+                return Err(SpawnFailure {
+                    error: SpawnError::Load(error),
+                    image: None,
+                });
+            }
+        };
+
+        let initial = match write_initial_argv(image.address_space(), memory, name, arguments) {
+            Ok(initial) => initial,
+            Err(error) => {
+                // kernel stackは既存を使い回すため回収対象はimageだけである。
+                return Err(match image.destroy(allocator) {
+                    Ok(()) => SpawnFailure {
+                        error: SpawnError::Argv(error),
+                        image: None,
+                    },
+                    Err(destroy_error) => {
+                        let (frame_error, image) = destroy_error.into_parts();
+                        SpawnFailure {
+                            error: SpawnError::Cleanup(frame_error),
+                            image: Some(image),
+                        }
+                    }
+                });
+            }
+        };
+
+        let stack_pointer = VirtAddr::try_new(initial.stack_pointer as u64)
+            .expect("initial user stack pointer is a canonical user address");
+        let context = UserContext::with_arguments(
+            image.entry(),
+            stack_pointer,
+            initial.argc,
+            initial.argv_address,
+        );
+        let user_root = PhysPageNum::from_start(image.address_space().root().as_u64())
+            .expect("loaded image roots are page-aligned physical page numbers");
+
+        // ここ以降は失敗しない。旧imageはtrap実行窓では旧satp経由で
+        // kernel textが動いているため、解放をrun loopへ遅延する。
+        let old = self.image.replace(image);
+        debug_assert!(self.retired_image.is_none());
+        self.retired_image = old;
+        self.user_satp = sv39_satp_bits(user_root);
+        self.name = name;
+        Ok(context)
+    }
+
+    /// `exec`で退避した旧imageを取り出す。run loopがkernel satpへ
+    /// 戻った直後に呼んで解放する。退避がなければ`None`。
+    pub fn take_retired_image(&mut self) -> Option<LoadedImage> {
+        self.retired_image.take()
     }
 
     pub const fn name(&self) -> &'static str {
@@ -455,7 +535,15 @@ impl Process {
 
     /// user address spaceがinactiveな状態で、trap stackとimageの全所有frameを
     /// 回収する。失敗したframeはstruct内へ戻すため再試行できる。
+    /// `exec`退避imageが残っていれば先に解放する。
     pub fn reclaim(&mut self, allocator: &mut dyn FrameSource) -> Result<(), FrameError> {
+        if let Some(image) = self.retired_image.take()
+            && let Err(error) = image.destroy(allocator)
+        {
+            let (frame_error, image) = error.into_parts();
+            self.retired_image = Some(image);
+            return Err(frame_error);
+        }
         for index in (0..KERNEL_STACK_PAGES).rev() {
             let Some(frame) = self.kernel_stack[index].take() else {
                 continue;
@@ -944,6 +1032,103 @@ mod tests {
         let mut fixture = SpawnFixture::new();
         let before = fixture.baseline();
         let mut process = fixture.spawn("proc-c");
+
+        process
+            .reclaim(&mut fixture.frames)
+            .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
+
+        assert_eq!(fixture.baseline(), before);
+    }
+
+    // Catches exec leaking or swapping before the new image is complete: a
+    // successful exec must keep pid and kernel stack, retire the old image
+    // without freeing it, and hand back a context that starts at the new
+    // entry on a fresh user stack.
+    #[test]
+    fn exec_swaps_the_image_and_defers_the_old_one() {
+        let mut fixture = SpawnFixture::new();
+        let mut process = fixture.spawn("proc-exec");
+        let old_satp = process.user_satp();
+        let old_stack_top = process.kernel_stack_top();
+        let allocated_before = fixture.frames.stats().allocated;
+        let bytes = valid_riscv64_elf();
+
+        let context = process
+            .exec(
+                "proc-exec-2",
+                &bytes,
+                &[],
+                &mut fixture.frames,
+                &mut fixture.memory,
+                core::iter::empty(),
+            )
+            .unwrap_or_else(|error| panic!("exec must succeed: {error:?}"));
+
+        assert_eq!(process.name(), "proc-exec-2");
+        assert_eq!(process.kernel_stack_top(), old_stack_top);
+        assert_ne!(process.user_satp(), old_satp);
+        assert_eq!(process.user_satp() >> 60, 8);
+        assert_eq!(context.register(10), 1);
+        assert_ne!(context.register(2), 0);
+        // 旧imageはretiredへ退避され、まだallocatorへ返っていない。
+        assert!(fixture.frames.stats().allocated > allocated_before);
+        let retired = process
+            .take_retired_image()
+            .expect("exec must retire the old image");
+        retired
+            .destroy(&mut fixture.frames)
+            .unwrap_or_else(|error| panic!("retired image must destroy: {error:?}"));
+        assert!(process.take_retired_image().is_none());
+        assert_eq!(fixture.frames.stats().allocated, allocated_before);
+    }
+
+    // Catches exec touching the live image on a failed load: the process
+    // must keep its old image, satp, and name so the caller can continue.
+    #[test]
+    fn exec_failure_leaves_the_old_image_untouched() {
+        let mut fixture = SpawnFixture::new();
+        let mut process = fixture.spawn("proc-exec-bad");
+        let old_satp = process.user_satp();
+        let allocated_before = fixture.frames.stats().allocated;
+
+        let failure = match process.exec(
+            "never",
+            b"not an elf",
+            &[],
+            &mut fixture.frames,
+            &mut fixture.memory,
+            core::iter::empty(),
+        ) {
+            Err(failure) => failure,
+            Ok(_) => panic!("a non-ELF payload must fail exec"),
+        };
+
+        assert!(matches!(failure.error, SpawnError::Load(_)));
+        assert_eq!(process.name(), "proc-exec-bad");
+        assert_eq!(process.user_satp(), old_satp);
+        assert!(process.take_retired_image().is_none());
+        assert_eq!(fixture.frames.stats().allocated, allocated_before);
+    }
+
+    // Catches reclaim forgetting the retired image: frames from a replaced
+    // image must also return to the allocator when the process dies before
+    // the run loop drained the retired slot.
+    #[test]
+    fn reclaim_releases_the_retired_image_too() {
+        let mut fixture = SpawnFixture::new();
+        let before = fixture.baseline();
+        let mut process = fixture.spawn("proc-exec-c");
+        let bytes = valid_riscv64_elf();
+        process
+            .exec(
+                "proc-exec-c2",
+                &bytes,
+                &[],
+                &mut fixture.frames,
+                &mut fixture.memory,
+                core::iter::empty(),
+            )
+            .unwrap_or_else(|error| panic!("exec must succeed: {error:?}"));
 
         process
             .reclaim(&mut fixture.frames)

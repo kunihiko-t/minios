@@ -69,6 +69,8 @@ const FILE_STAT_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-stat\n";
 const FILE_READDIR_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2e\0\0\0MiniOS sched: spawned pid=0 name=file-readdir\n";
+const FILE_EXEC_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-exec\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -81,6 +83,12 @@ const FILE_WAITPID_CHILD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0c\0\0\0spawn-c
 const FILE_WAITPID_PARENT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0waitpid verified\n";
 const FILE_STAT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0stat verified\n";
 const FILE_READDIR_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0readdir verified\n";
+/// `exec`先のCHILD.ELFが発行するExit frame。pid 0を保持したまま
+/// `getpid()+41`で終了するためcodeは41になる。
+const FILE_EXEC_EXIT_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x29\0\0\0";
+/// file-execの回収診断。最後のexit codeは41である。
+const FILE_EXEC_DIAGNOSTIC_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x1d\0\0\0\r\nMiniOS payload: ok code=41\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -121,6 +129,7 @@ pub enum TestKind {
     FileWaitpid,
     FileStat,
     FileReaddir,
+    FileExec,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -172,6 +181,9 @@ impl TestKind {
             }
             Self::FileReaddir => {
                 unreachable!("the file-readdir test boots the normal kernel")
+            }
+            Self::FileExec => {
+                unreachable!("the file-exec test boots the normal kernel")
             }
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -228,6 +240,9 @@ impl TestKind {
             }
             Self::FileReaddir => {
                 unreachable!("the file-readdir test verifies raw control frames")
+            }
+            Self::FileExec => {
+                unreachable!("the file-exec test verifies raw control frames")
             }
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -614,6 +629,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
         );
+    }
+
+    if kind == TestKind::FileExec {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_exec()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_exec_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::FileSeek {
@@ -1375,6 +1405,17 @@ const FILE_READDIR_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file-exec検査で期待されるcontrol frame列。guestがexecのerrno経路を
+/// 確かめてから`DOCS/CHILD.ELF`へexecする。差し替え後のimageが
+/// `spawn-child`をstdoutへ出し、pid 0のまま`getpid()+41`=41で終了する。
+const FILE_EXEC_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    FILE_EXEC_SPAWNED_FRAME,
+    FILE_WAITPID_CHILD_STDOUT_FRAME,
+    FILE_EXEC_EXIT_FRAME,
+    FILE_EXEC_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1669,6 +1710,30 @@ fn verify_file_readdir_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_READDIR_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+/// file-exec検証: guestがexecのerrno経路を確かめてからCHILD.ELFへ
+/// execし、差し替え後のimageが`spawn-child`とExit(41)を出す。
+/// Exit code 41はexecがpid 0を保持したことの証明である。
+fn verify_file_exec_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_EXEC_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -2005,6 +2070,11 @@ impl PayloadBundle {
         Self::create_with(payload_file_readdir_bundle_bytes(&elf)?)
     }
 
+    fn create_file_exec() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_EXEC)?;
+        Self::create_with(payload_file_exec_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -2245,6 +2315,14 @@ fn payload_file_stat_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// 経路を確かめて`readdir verified`をstdoutへ書きexit(42)する。
 fn payload_file_readdir_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-readdir\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-exec検査用bundle: file_exec guestのELFと引数なしmanifestを
+/// 組み立てる。guestはerrno経路を確かめてから`DOCS/CHILD.ELF`へ
+/// execし、差し替え後のimageが`spawn-child`を書きexit(41)する。
+fn payload_file_exec_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-exec\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 

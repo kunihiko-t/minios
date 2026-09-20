@@ -229,6 +229,42 @@ impl ControlSource for UartControlSource<'_> {
         unsafe { crate::wait_pid(pid) }
     }
 
+    /// guestの`exec`をstorage sessionと現在processへ委譲する。`path`の
+    /// fileをELFとして読み込み、basenameをprocess名として呼び出し
+    /// processのimageを置き替える。成功時は新imageの初期contextを返し、
+    /// 旧imageは`retired_image`へ退避されてrun loopが解放する。
+    #[cfg(target_arch = "riscv64")]
+    fn exec(&mut self, path: &str) -> Result<minios_kernel::user::UserContext, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
+        // 外へ持ち出さない。
+        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+        let mut elf = alloc::vec::Vec::new();
+        session
+            .read_file(path, |chunk| elf.extend_from_slice(chunk))
+            .map_err(fat_errno)?;
+
+        // `spawn`と同じく`Process.name`は`&'static str`必須のため、
+        // basenameをleakする。
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let name = alloc::string::String::from(name).leak();
+
+        // Safety: 同上。失敗してもprocessは旧imageのまま残る。
+        match unsafe { crate::exec_current_process(name, &elf) } {
+            Ok(context) => Ok(context),
+            Err(failure) => {
+                // 回収しきれなかったimageが残っていればdestroyを一度試す。
+                if let Some(image) = failure.image {
+                    let mut frames = crate::GlobalFrames;
+                    let _ = image.destroy(&mut frames);
+                }
+                Err(match failure.error {
+                    minios_kernel::process::SpawnError::Load(_) => minios_abi::syscall::EINVAL,
+                    _ => minios_abi::syscall::ENOMEM,
+                })
+            }
+        }
+    }
+
     /// guestの`stat`をstorage sessionへ委譲する。fileとdirectoryの両方を
     /// 受理し、sizeとkindをABIの`Stat`へ写像する。
     #[cfg(target_arch = "riscv64")]

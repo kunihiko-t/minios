@@ -566,6 +566,12 @@ const USER_RUN_OUTCOME_PREEMPTED: usize = 5;
 /// 届いて再開されると同じsyscallがやり直される。
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_BLOCKED: usize = 6;
+
+/// `exec`がimageを差し替えた。trap slotには新imageの初期contextが
+/// 書き込まれており、`reload_context`がそのまま拾う。旧imageは
+/// `retired_image`へ退避済みで、kernel satpへ戻った今ここで解放する。
+#[cfg(target_arch = "riscv64")]
+const USER_RUN_OUTCOME_EXEC: usize = 7;
 /// run単位のstdin staging。resetはrunnerが実行窓の前に行い、handlerだけが
 /// assemblyの実行窓で借りる。runnerが待機中のため同時にaliasしない。
 #[cfg(target_arch = "riscv64")]
@@ -1789,6 +1795,45 @@ unsafe fn wait_pid(target: usize) -> Result<Option<u32>, isize> {
     table.block_waitpid(caller, target).map(|()| None)
 }
 
+/// 現在processのimageを`elf`で置き替える (`exec`)。kernel stackとfd
+/// tableは引き継ぎ、成功時は旧imageをprocessの`retired_image`へ退避して
+/// 新imageの初期contextを返す。旧imageの解放はkernel satpへ戻った後の
+/// run loopが行う。失敗時はprocessに触れずcallerは旧imageで動き続ける。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。`spawn_process`と同じく
+/// `KERNEL_MAP_PLAN_PTR`と`USER_SYSCALL_PROBE_MEMORY`を使う。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn exec_current_process(
+    name: &'static str,
+    elf: &[u8],
+) -> Result<
+    UserContext,
+    minios_kernel::process::SpawnFailure<minios_kernel::vm::storage::IdentityFrameStoreError>,
+> {
+    use minios_kernel::process::SpawnError;
+
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let Some(process) = (unsafe { process.as_mut() }) else {
+        return Err(minios_kernel::process::SpawnFailure {
+            error: SpawnError::OutOfFrames,
+            image: None,
+        });
+    };
+    let plan = unsafe { *&raw const KERNEL_MAP_PLAN_PTR };
+    let Some(plan) = (unsafe { plan.as_ref() }) else {
+        return Err(minios_kernel::process::SpawnFailure {
+            error: SpawnError::OutOfFrames,
+            image: None,
+        });
+    };
+    let memory = unsafe { &mut *(USER_SYSCALL_PROBE_MEMORY as *mut IdentityFrameStore) };
+    let mut frames = GlobalFrames;
+    process.exec(name, elf, &[], &mut frames, memory, plan.mappings())
+}
+
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
 #[cfg(target_arch = "riscv64")]
 fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
@@ -1857,6 +1902,10 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
         }
         SyscallFlow::Blocked => {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_BLOCKED, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
+        SyscallFlow::Exec => {
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXEC, Ordering::Relaxed);
             RunExit::ReturnToKernel
         }
         SyscallFlow::Fatal(()) => {
@@ -1995,6 +2044,16 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
                 arch::riscv64::sbi::ResetReason::SystemFailure,
             )
         }
+        SyscallFlow::Exec => {
+            // probe fixtureはexecを呼ばない。到達したらharness側の欠陥。
+            crate::console::emergency_print(format_args!(
+                "[MINIOS_TEST] failed: user-syscall exec\r\n"
+            ));
+            arch::riscv64::sbi::system_reset(
+                arch::riscv64::sbi::ResetType::Shutdown,
+                arch::riscv64::sbi::ResetReason::SystemFailure,
+            )
+        }
         SyscallFlow::Fatal(()) => {
             crate::console::emergency_print(format_args!(
                 "[MINIOS_TEST] failed: user-syscall sink failure\r\n"
@@ -2049,6 +2108,16 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
             // このprobeのfixtureはreadを呼ばない。blocked readはharness欠陥。
             crate::console::emergency_print(format_args!(
                 "[MINIOS_TEST] failed: user-exit blocked read\r\n"
+            ));
+            arch::riscv64::sbi::system_reset(
+                arch::riscv64::sbi::ResetType::Shutdown,
+                arch::riscv64::sbi::ResetReason::SystemFailure,
+            )
+        }
+        SyscallFlow::Exec => {
+            // このprobeのfixtureはexecを呼ばない。到達したらharness欠陥。
+            crate::console::emergency_print(format_args!(
+                "[MINIOS_TEST] failed: user-exit exec\r\n"
             ));
             arch::riscv64::sbi::system_reset(
                 arch::riscv64::sbi::ResetType::Shutdown,
@@ -2611,6 +2680,22 @@ fn run_boot_payload(
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_PREEMPTED) => {}
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_BLOCKED) => {
                 process.block_on_stdin();
+            }
+            (RunExit::ReturnToKernel, USER_RUN_OUTCOME_EXEC) => {
+                // kernel satpへ戻ったため旧imageのpage tableはinactive。
+                // `reload_context`はtrap slotの新初期contextを拾い済みで、
+                // processはrunnableのまま残り、次のdispatchで新imageを走る。
+                // 解放失敗はreclaimと同じく一回だけ再試行する。
+                if let Some(retired) = process.take_retired_image()
+                    && let Err(error) = retired.destroy(frames)
+                {
+                    let (_, image) = error.into_parts();
+                    if image.destroy(frames).is_err() {
+                        fatal_payload_error(format_args!(
+                            "MiniOS payload: exec reclaim pid={pid} failed\r\n"
+                        ));
+                    }
+                }
             }
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_EXIT) => {
                 let code = USER_EXIT_CODE.load(Ordering::Relaxed) as u32;
