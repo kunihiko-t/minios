@@ -38,6 +38,10 @@ pub enum SyscallNumber {
     /// 置き換える。pidとfd tableは引き継ぎ、成功時は新imageの
     /// entryから始まるため戻らない。失敗時のみ負のerrnoを返す。
     Exec = 21,
+    /// `a0`が指すwritableな8 byte領域へ`[read_fd: u32, write_fd: u32]`
+    /// をLEで書き込み、8を返す。両端は`spawn`したchildへ継承され、
+    /// kernel所有のbounded bufferを介してbyteをやり取りする。
+    Pipe = 22,
 }
 
 pub const STDIN: usize = 0;
@@ -60,6 +64,8 @@ pub const SEEK_END: usize = 2;
 pub const STAT_KIND_FILE: u32 = 0;
 /// `Stat::kind`の値。directory。
 pub const STAT_KIND_DIR: u32 = 1;
+/// `Stat::kind`の値。`pipe`が生成したfdの端。`size`は常に0。
+pub const STAT_KIND_PIPE: u32 = 2;
 /// `stat`/`fstat`が`out` pointerへ書き込む`Stat`のbyte長。
 pub const STAT_LEN: usize = 8;
 
@@ -94,6 +100,10 @@ impl Stat {
 pub const DIRENT_NAME_LEN: usize = 255;
 /// `readdir`が`out` pointerへ書き込む`DirEnt`のbyte長。
 pub const DIRENT_LEN: usize = 4 + 4 + DIRENT_NAME_LEN;
+
+/// `pipe`が`a0`のuser bufferへ書き込むfd pairのbyte長。
+/// `[read_fd: u32, write_fd: u32]`のLE列。
+pub const PIPE_OUT_LEN: usize = 8;
 
 /// `readdir`がuser bufferへ書き込むdirectory entry。`name_len`は
 /// `name`内の有効byte数で、`kind`は`STAT_KIND_*`を再利用する。
@@ -132,6 +142,10 @@ pub const ENOENT: isize = -2;
 pub const EIO: isize = -5;
 pub const EBADF: isize = -9;
 pub const ECHILD: isize = -10;
+/// kernel内部のsignalとして使う。control層がcallerをblockedへmark
+/// した上で`Err(EAGAIN)`を返すとdispatchがecallへ巻き戻して再実行する。
+/// guestへ表面化しない。
+pub const EAGAIN: isize = -11;
 pub const ENOMEM: isize = -12;
 pub const EFAULT: isize = -14;
 pub const EEXIST: isize = -17;
@@ -141,6 +155,10 @@ pub const EISDIR: isize = -21;
 pub const EINVAL: isize = -22;
 pub const EMFILE: isize = -24;
 pub const ENOSPC: isize = -28;
+/// `lseek`/`pread`/`pwrite`の対象fdがpipe端だった。
+pub const ESPIPE: isize = -29;
+/// read端がすべて閉じたpipeへ`write`した。
+pub const EPIPE: isize = -32;
 pub const ENOSYS: isize = -38;
 pub const ENOTEMPTY: isize = -39;
 
@@ -171,6 +189,7 @@ mod tests {
         assert_eq!(SyscallNumber::Fstat as usize, 19);
         assert_eq!(SyscallNumber::Readdir as usize, 20);
         assert_eq!(SyscallNumber::Exec as usize, 21);
+        assert_eq!(SyscallNumber::Pipe as usize, 22);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
@@ -186,6 +205,7 @@ mod tests {
         assert_eq!(EIO, -5);
         assert_eq!(EBADF, -9);
         assert_eq!(ECHILD, -10);
+        assert_eq!(EAGAIN, -11);
         assert_eq!(ENOMEM, -12);
         assert_eq!(EFAULT, -14);
         assert_eq!(EEXIST, -17);
@@ -195,11 +215,15 @@ mod tests {
         assert_eq!(EINVAL, -22);
         assert_eq!(EMFILE, -24);
         assert_eq!(ENOSPC, -28);
+        assert_eq!(ESPIPE, -29);
+        assert_eq!(EPIPE, -32);
         assert_eq!(ENOSYS, -38);
         assert_eq!(ENOTEMPTY, -39);
         assert_eq!(STAT_KIND_FILE, 0);
         assert_eq!(STAT_KIND_DIR, 1);
+        assert_eq!(STAT_KIND_PIPE, 2);
         assert_eq!(STAT_LEN, 8);
+        assert_eq!(PIPE_OUT_LEN, 8);
     }
 
     // Catches the Stat wire layout drifting: size must occupy the first

@@ -1,8 +1,8 @@
 //! MiniOS guestの`readdir`サンプル。
 //!
 //! `readdir`でrootの3件（HELLO.TXT→file、DOCS→dir、`Long File
-//! Name.txt`→file）をindex順に、`DOCS`の3件（NOTE.TXT、CHILD.ELF、
-//! FDCHILD.ELF）を
+//! Name.txt`→file）をindex順に、`DOCS`の4件（NOTE.TXT、CHILD.ELF、
+//! FDCHILD.ELF、PIPECH.ELF）をindex順に
 //! 確認し、index超過の0・file pathの`ENOTDIR`・不在pathの`ENOENT`・
 //! 書けないout pointerの`EFAULT`を確かめて42で終了する。
 //! 失敗時は70で終了する。E2Eのfile-readdir検査が使う。
@@ -122,10 +122,11 @@ extern "C" fn guest_main() -> ! {
     }
 
     // subdirectoryも同じindex規約。`.`/`..`は列挙に含まれない。
-    let expected_docs: [(&[u8], u32); 3] = [
+    let expected_docs: [(&[u8], u32); 4] = [
         (b"NOTE.TXT", STAT_KIND_FILE),
         (b"CHILD.ELF", STAT_KIND_FILE),
         (b"FDCHILD.ELF", STAT_KIND_FILE),
+        (b"PIPECH.ELF", STAT_KIND_FILE),
     ];
     for (index, (name, kind)) in expected_docs.iter().enumerate() {
         match entry_at(DOCS_PATH, index) {
@@ -133,7 +134,7 @@ extern "C" fn guest_main() -> ! {
             _ => sys_exit(FAILURE_EXIT),
         }
     }
-    if entry_at(DOCS_PATH, 3) != Err(0) {
+    if entry_at(DOCS_PATH, 4) != Err(0) {
         sys_exit(FAILURE_EXIT);
     }
 

@@ -105,6 +105,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   allocatorやframe memoryへの参照は保持しないため、生存中のprocess同士がborrowを共有しません。
   fd tableはprocess内に閉じるため他processのfdを構造的に参照できず、`take`されたprocessとともに死ぬので、終了時の明示的なclose処理は要りません。
   `spawn` syscallはcallerのfd tableのsnapshotをchildの初期tableとして渡すため、childはparentが開いたfileを同じfd番号とその時点のoffsetで読めます（継承はcopyで、後のseekやcloseは互いに影響しません）。
+  fdのentryは`FdEntry` enumで、file fdは`FileDesc`とoffsetをcopyされ、pipe端は`ProcessTable`所有の`PipeTable`内pipe idと方向だけを持つため、snapshot継承でcopy先が同じpipeを指します。pipe本体のbufferは共有される一方、fd entry自体は各processのtableへ閉じます。
   pidは`insert`のたびに`next_pid`から単調採番され再利用されないため、終了frameが参照するpidと後続processのpidは衝突しません。tableは`Vec`なのでメモリーはlive process数に比例し、admission capはmanifest上限の`MAX_PROCS`です。
 - manifest v2のbundleは`image=`sectionごとに`elf=<offset>,<len>`で共有ELF領域内のrangeを宣言し、初回spawn列はmanifest順にpid 0から採番されます。
 - U-mode実行中のsupervisor timer割り込みは`user/trap.rs`が`TrapAction::Timer`へ分類し、trap handlerはtickを再アームしてから`Preempted`のoutcomeでkernelへ戻ります。
@@ -115,6 +116,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 - `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
   processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
   `waitpid`も同じBlocked再実行モデルで、対象processがliveなら呼び出しprocessを`BlockedOnPid`へ移し、対象の終了で起こして終了codeを返します。
+  `pipe`の`read`/`write`も同じモデルで、空のread（write端がlive）と満杯のwrite（read端がlive）は呼び出しprocessを`BlockedOnPipe`へ移し、同pipeへのdata到着・空き発生・端のclose・process終了で起こしてecallをやり直します。
   Stdin frameの受信は`StdinStaging`内の再開可能なdecoderがbyte単位で蓄積し、frame途中でbyteが尽きた再試行は`WouldBlock`として再び`Blocked`へ戻るため、受信途中の間も他processが進み続けます。
 
 ### シェル
@@ -134,7 +136,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、file-spawn、file-waitpid、file-stat、file-readdir、file-exec、file-fdinherit、schedを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、file-spawn、file-waitpid、file-stat、file-readdir、file-exec、file-fdinherit、file-pipe、schedを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
 - `guest.rs`：Rust guestのrelease buildと、kernelのELF parserによる配置契約のhost検査を担当します。

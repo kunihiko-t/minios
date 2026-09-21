@@ -8,6 +8,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::pipe::{MAX_PIPES, PipeTable};
 #[cfg(not(target_arch = "riscv32"))]
 use crate::storage::fat32::FileDesc;
 use crate::{
@@ -73,6 +74,10 @@ pub enum ProcessState {
     /// `waitpid`が対象processの終了待ちで中断した。対象が終了して
     /// `wake_on_exit`されると`Runnable`へ戻る。値は待つ対象のpid。
     BlockedOnPid(usize),
+    /// pipeの`read`/`write`が条件待ちで中断した。同pipeへのdata
+    /// 到着・端のclose・いずれかのprocessのexitで`Runnable`へ戻る。
+    /// 値は待つ対象のpipe id。
+    BlockedOnPipe(usize),
 }
 
 /// `open`/`create`がprocessへ割り当てたfile descriptor 1個。
@@ -120,15 +125,48 @@ impl FileFd {
     }
 }
 
+/// fd tableのslotの中身。file fdはFAT32位置記述子とoffsetを持ち、
+/// pipe fdは`PipeTable`内のpipe idと方向だけを持つ（pipe本体は
+/// `ProcessTable`が所有する）。
+#[cfg(not(target_arch = "riscv32"))]
+#[derive(Debug, Clone, Copy)]
+pub enum FdEntry {
+    /// `open`/`create`が割り当てたfile fd。
+    File(FileFd),
+    /// `pipe`が割り当てたpipe端。`write`は書き込み端を示す。
+    Pipe { id: usize, write: bool },
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+impl FdEntry {
+    /// file fdならその可変参照を返す。pipe端には`None`を返し、
+    /// file専用の操作を呼び出し側へ委ねる。
+    pub fn file_mut(&mut self) -> Option<&mut FileFd> {
+        match self {
+            Self::File(file) => Some(file),
+            Self::Pipe { .. } => None,
+        }
+    }
+
+    /// pipe端ならそのpipe idを返す。close時のwake判定に使う。
+    pub const fn pipe_id(&self) -> Option<usize> {
+        match self {
+            Self::Pipe { id, .. } => Some(*id),
+            Self::File(_) => None,
+        }
+    }
+}
+
 /// processごとのfile descriptor table。fd番号はslot index +
 /// `FIRST_FILE_FD`であり、tableはprocess内に閉じるため他processのfdを
 /// 構造的に参照できない。`spawn`はこのtableのsnapshotをchildへ渡すため、
 /// 継承はcopyでありspawn後のoffsetやcloseは互いに影響しない。
+/// ただしpipe端はcopy先が同じpipe idを指すためbufferは共有される。
 /// RV32はfdを持たないためZSTでコスト0にする。
 #[cfg(not(target_arch = "riscv32"))]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FileFdTable {
-    slots: [Option<FileFd>; minios_abi::syscall::MAX_OPEN_FILES],
+    slots: [Option<FdEntry>; minios_abi::syscall::MAX_OPEN_FILES],
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -145,9 +183,15 @@ impl FileFdTable {
         }
     }
 
-    fn fd_mut(&mut self, fd: usize) -> Option<&mut FileFd> {
+    fn fd_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {
         let slot = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD)?;
         self.slots.get_mut(slot)?.as_mut()
+    }
+
+    /// `fd`のslotを読む。closeする前にentryの種別をpeekするために使う。
+    fn fd(&self, fd: usize) -> Option<&FdEntry> {
+        let slot = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD)?;
+        self.slots.get(slot)?.as_ref()
     }
 
     fn alloc_fd(&mut self, desc: FileDesc, writable: bool) -> Result<usize, isize> {
@@ -156,11 +200,23 @@ impl FileFdTable {
             .iter()
             .position(Option::is_none)
             .ok_or(minios_abi::syscall::EMFILE)?;
-        self.slots[slot] = Some(FileFd {
+        self.slots[slot] = Some(FdEntry::File(FileFd {
             desc,
             offset: 0,
             writable,
-        });
+        }));
+        Ok(minios_abi::syscall::FIRST_FILE_FD + slot)
+    }
+
+    /// `id`のpipeの端を`write`方向で割り当てfd番号を返す。
+    /// 空きslotがなければ`EMFILE`。
+    fn alloc_pipe_fd(&mut self, id: usize, write: bool) -> Result<usize, isize> {
+        let slot = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(minios_abi::syscall::EMFILE)?;
+        self.slots[slot] = Some(FdEntry::Pipe { id, write });
         Ok(minios_abi::syscall::FIRST_FILE_FD + slot)
     }
 
@@ -174,13 +230,33 @@ impl FileFdTable {
         }
     }
 
+    /// `id`のpipeを指すこのtable内の端を`(read側, write側)`で数える。
+    /// `ProcessTable`がpipeの生死を全process横断で派生するために使う。
+    fn pipe_ends(&self, id: usize) -> (usize, usize) {
+        let mut ends = (0, 0);
+        for entry in self.slots.iter().flatten() {
+            let &FdEntry::Pipe { id: end_id, write } = entry else {
+                continue;
+            };
+            if end_id == id {
+                if write {
+                    ends.1 += 1;
+                } else {
+                    ends.0 += 1;
+                }
+            }
+        }
+        ends
+    }
+
     /// `dir_location`が指すentryを開いているfdをすべて閉じる。
     /// `unlink`したfileのclusterは即座に解放されるため、残すと再利用
-    /// されたslotやclusterを壊し得る。
+    /// されたslotやclusterを壊し得る。pipe端はdir entryを指さないため
+    /// 対象外である。
     fn revoke_fd_at(&mut self, dir_cluster: u32, dir_index: u32) {
         for slot in self.slots.iter_mut() {
-            if let Some(fd) = slot
-                && fd.desc.dir_location() == (dir_cluster, dir_index)
+            if let Some(FdEntry::File(file)) = slot.as_mut()
+                && file.desc.dir_location() == (dir_cluster, dir_index)
             {
                 *slot = None;
             }
@@ -190,6 +266,7 @@ impl FileFdTable {
     /// `(old_cluster, old_index)`を指すfdのwrite-back先を
     /// `(new_cluster, new_index)`へ書き換える。cross-directory moveで
     /// entryが別dirのslotへ移った際、開いているfile fdを追従させる。
+    /// pipe端はdir entryを指さないため対象外である。
     fn relocate_fd_at(
         &mut self,
         old_cluster: u32,
@@ -197,9 +274,11 @@ impl FileFdTable {
         new_cluster: u32,
         new_index: u32,
     ) {
-        for fd in self.slots.iter_mut().flatten() {
-            if fd.desc.dir_location() == (old_cluster, old_index) {
-                fd.desc.set_dir_location(new_cluster, new_index);
+        for entry in self.slots.iter_mut().flatten() {
+            if let FdEntry::File(file) = entry
+                && file.desc.dir_location() == (old_cluster, old_index)
+            {
+                file.desc.set_dir_location(new_cluster, new_index);
             }
         }
     }
@@ -452,6 +531,20 @@ impl Process {
         }
     }
 
+    /// pipeのread/writeで`id`のpipe待ちへ移す。table経由でのみ呼ばれ、
+    /// callerがそのpipeの端を持つことはdispatch層が検証済みである。
+    pub fn block_on_pipe(&mut self, id: usize) {
+        self.state = ProcessState::BlockedOnPipe(id);
+    }
+
+    /// pipe待ちの対象id。pipe待ちでなければ`None`。
+    pub const fn waiting_on_pipe(&self) -> Option<usize> {
+        match self.state {
+            ProcessState::BlockedOnPipe(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// fd tableのsnapshot。`spawn`がchildの初期tableとして引き継ぐため
     /// trap窓から呼ばれる。copyなのでcaller側tableへの影響はない。
     pub const fn file_fds_snapshot(&self) -> FileFdTable {
@@ -461,8 +554,14 @@ impl Process {
     /// `fd`に対応するslotを借りる。未割り当てや範囲外なら`None`。
     /// trap窓からのみ呼ばれ、借用はその窓内で完結する。
     #[cfg(not(target_arch = "riscv32"))]
-    pub fn fd_mut(&mut self, fd: usize) -> Option<&mut FileFd> {
+    pub fn fd_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {
         self.file_fds.fd_mut(fd)
+    }
+
+    /// `fd`のslotを読む。closeする前にpipe端かをpeekするために使う。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn fd(&self, fd: usize) -> Option<&FdEntry> {
+        self.file_fds.fd(fd)
     }
 
     /// file記述子を割り当てfd番号を返す。`writable`のfdは`write`だけを
@@ -470,6 +569,13 @@ impl Process {
     #[cfg(not(target_arch = "riscv32"))]
     pub fn alloc_fd(&mut self, desc: FileDesc, writable: bool) -> Result<usize, isize> {
         self.file_fds.alloc_fd(desc, writable)
+    }
+
+    /// `id`のpipe端を`write`方向で割り当てfd番号を返す。
+    /// 空きslotがなければ`EMFILE`。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn alloc_pipe_fd(&mut self, id: usize, write: bool) -> Result<usize, isize> {
+        self.file_fds.alloc_pipe_fd(id, write)
     }
 
     /// `fd`を閉じる。未割り当てなら`false`を返す。
@@ -615,6 +721,32 @@ const fn sv39_satp_bits(root: PhysPageNum) -> u64 {
     (8_u64 << 60) | root.as_u64()
 }
 
+/// `ProcessTable::pipe_read`の結果。`Blocked`はcallerを
+/// `BlockedOnPipe`へmark済みであることを意味し、control層は
+/// `EAGAIN`へ写像してdispatchのBlocked経路へ渡す。
+#[cfg(not(target_arch = "riscv32"))]
+#[derive(Debug, PartialEq, Eq)]
+pub enum PipeReadOutcome {
+    /// `n` byte読み出した。
+    Read(usize),
+    /// write端が残っているためcallerをblockした。
+    Blocked,
+    /// write端がすべて閉じた。`read`は0を返す。
+    Eof,
+}
+
+/// `ProcessTable::pipe_write`の結果。
+#[cfg(not(target_arch = "riscv32"))]
+#[derive(Debug, PartialEq, Eq)]
+pub enum PipeWriteOutcome {
+    /// `n` byte書き込んだ。
+    Wrote(usize),
+    /// buffer満杯のためcallerをblockした。
+    Blocked,
+    /// read端がすべて閉じた。control層は`EPIPE`へ写像する。
+    Broken,
+}
+
 /// heap-backedのprocess table。`Vec`がlive processだけを保持し、
 /// pidは`insert`のたびに`next_pid`から単調採番される。終了したpidは
 /// 再利用されないため、PROC_EXIT frameや将来のspawn syscallが参照する
@@ -628,6 +760,9 @@ pub struct ProcessTable {
     /// 未回収statusの台帳。上限`MAX_PROCS`件で、超過時は最古をdropする
     /// （dropされたpidへの`waitpid`は`ECHILD`を返す）。
     exits: Vec<(usize, u32)>,
+    /// `pipe` syscallが生成したkernel所有のbuffer。slotの生死は
+    /// 全processのfd tableを走査したlive端数で派生する。
+    pipes: PipeTable,
 }
 
 impl Default for ProcessTable {
@@ -648,6 +783,7 @@ impl ProcessTable {
             next_pid: 0,
             last_picked: None,
             exits: Vec::new(),
+            pipes: PipeTable::new(),
         }
     }
 
@@ -758,12 +894,110 @@ impl ProcessTable {
 
     /// `pid`が終了したときに呼び、`BlockedOnPid(pid)`のprocessをすべて
     /// `Runnable`へ戻す。statusの有無に関わらずwaiterは解放される。
+    /// 終了したprocessのpipe端もtableから消えるため、pipe待ちのprocessも
+    /// 全て起こしてEOF/EPIPEを再判定させる。無関係なwaiterは再実行で
+    /// 条件未達なら再びblockする（疑似wakeは許容する）。
     pub fn wake_on_exit(&mut self, pid: usize) {
         for process in self.procs.iter_mut() {
-            if process.waiting_on() == Some(pid) {
+            if process.waiting_on() == Some(pid) || process.waiting_on_pipe().is_some() {
                 process.wake();
             }
         }
+    }
+
+    /// `id`のpipeを指す全processのlive端を`(read側, write側)`で数える。
+    /// pipeの生死とEOF/EPIPE判定はこの走査から派生する。
+    #[cfg(not(target_arch = "riscv32"))]
+    fn pipe_ends(&self, id: usize) -> (usize, usize) {
+        let mut ends = (0, 0);
+        for process in &self.procs {
+            let (readers, writers) = process.file_fds.pipe_ends(id);
+            ends.0 += readers;
+            ends.1 += writers;
+        }
+        ends
+    }
+
+    /// `BlockedOnPipe(id)`のprocessをすべて`Runnable`へ戻す。
+    /// pipeへのdata到着・空き発生・端のcloseで呼ぶ。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn wake_pipe_waiters(&mut self, id: usize) {
+        for process in self.procs.iter_mut() {
+            if process.waiting_on_pipe() == Some(id) {
+                process.wake();
+            }
+        }
+    }
+
+    /// 新しいpipeを割り当てidを返す。空slotかlive端0の死んだslotを
+    /// 再利用する。全slotがliveなら`None`（callerは`ENOMEM`へ写像）。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn pipe_alloc(&mut self) -> Option<usize> {
+        for id in 0..MAX_PIPES {
+            if self.pipes.is_vacant(id) || self.pipe_ends(id) == (0, 0) {
+                self.pipes.claim(id);
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// pipe `id`から`out`へ読む。dataがあれば`Read(n)`で同pipeの
+    /// waiterを起こす。空でwrite端がliveなら`caller`を`BlockedOnPipe`
+    /// へmarkして`Blocked`。write端が0なら`Eof`（`read`の0返し）。
+    /// `None`はfdが指すpipeがslotにない不変条件違反への防御である。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn pipe_read(
+        &mut self,
+        caller: usize,
+        id: usize,
+        out: &mut [u8],
+    ) -> Option<PipeReadOutcome> {
+        if self.pipes.get_mut(id)?.is_empty() {
+            if self.pipe_ends(id).1 > 0 {
+                self.get_mut(caller)
+                    .expect("caller pid is live")
+                    .block_on_pipe(id);
+                return Some(PipeReadOutcome::Blocked);
+            }
+            return Some(PipeReadOutcome::Eof);
+        }
+        let n = self.pipes.get_mut(id).expect("pipe exists above").read(out);
+        self.wake_pipe_waiters(id);
+        Some(PipeReadOutcome::Read(n))
+    }
+
+    /// pipe `id`へ`data`を書く。read端が0なら`Broken`（`EPIPE`）、
+    /// 空きがあれば`Wrote(n)`でwaiterを起こし、満杯なら`caller`を
+    /// `BlockedOnPipe`へmarkして`Blocked`。`data`が空ならpipeの状態に
+    /// 関わらず`Wrote(0)`を返す（`write`の0 byte規約）。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn pipe_write(
+        &mut self,
+        caller: usize,
+        id: usize,
+        data: &[u8],
+    ) -> Option<PipeWriteOutcome> {
+        self.pipes.get_mut(id)?;
+        if data.is_empty() {
+            return Some(PipeWriteOutcome::Wrote(0));
+        }
+        if self.pipe_ends(id).0 == 0 {
+            return Some(PipeWriteOutcome::Broken);
+        }
+        if self.pipes.get_mut(id).expect("pipe exists above").free() == 0 {
+            self.get_mut(caller)
+                .expect("caller pid is live")
+                .block_on_pipe(id);
+            return Some(PipeWriteOutcome::Blocked);
+        }
+        let n = self
+            .pipes
+            .get_mut(id)
+            .expect("pipe exists above")
+            .write(data);
+        self.wake_pipe_waiters(id);
+        Some(PipeWriteOutcome::Wrote(n))
     }
 
     /// `caller`を`target`の終了待ちへ移す。`ECHILD`は自分自身・対象
@@ -1422,11 +1656,15 @@ mod tests {
         assert_eq!(fd1, FIRST_FILE_FD);
 
         assert_eq!(
-            p0.fd_mut(fd0).map(|fd| fd.desc().dir_location()),
+            p0.fd_mut(fd0)
+                .and_then(FdEntry::file_mut)
+                .map(|fd| fd.desc().dir_location()),
             Some((9, 0))
         );
         assert_eq!(
-            p1.fd_mut(fd1).map(|fd| fd.desc().dir_location()),
+            p1.fd_mut(fd1)
+                .and_then(FdEntry::file_mut)
+                .map(|fd| fd.desc().dir_location()),
             Some((8, 7))
         );
         assert!(p1.fd_mut(fd1 + 1).is_none());
@@ -1442,21 +1680,32 @@ mod tests {
         let fd = parent
             .alloc_fd(FileDesc::for_test(5, 0), false)
             .expect("slot must be free");
-        parent.fd_mut(fd).expect("parent fd is live").set_offset(4);
+        parent
+            .fd_mut(fd)
+            .and_then(FdEntry::file_mut)
+            .expect("parent fd is live")
+            .set_offset(4);
 
         let mut child = fixture.spawn_with_fds("fd-child", parent.file_fds_snapshot());
 
-        let inherited = child.fd_mut(fd).expect("child inherits the fd");
+        let inherited = child
+            .fd_mut(fd)
+            .and_then(FdEntry::file_mut)
+            .expect("child inherits the fd");
         assert_eq!(inherited.desc().dir_location(), (5, 0));
         assert_eq!(inherited.offset(), 4);
         assert!(!inherited.writable());
 
         parent
             .fd_mut(fd)
+            .and_then(FdEntry::file_mut)
             .expect("parent fd is live")
             .set_offset(100);
         assert!(parent.close_fd(fd));
-        let still = child.fd_mut(fd).expect("child copy survives parent edits");
+        let still = child
+            .fd_mut(fd)
+            .and_then(FdEntry::file_mut)
+            .expect("child copy survives parent edits");
         assert_eq!(still.offset(), 4);
         assert_eq!(still.desc().dir_location(), (5, 0));
     }
@@ -1497,7 +1746,10 @@ mod tests {
             .alloc_fd(FileDesc::for_test(9, 0), true)
             .expect("slot must be free");
 
-        let entry = process.fd_mut(fd).expect("fd is live");
+        let entry = process
+            .fd_mut(fd)
+            .and_then(FdEntry::file_mut)
+            .expect("fd is live");
         assert!(entry.writable());
         assert_eq!(entry.offset(), 0);
         entry.advance(5);
@@ -1641,5 +1893,266 @@ mod tests {
             let process = table.get(pid).expect("process is live");
             assert_eq!(process as *const Process, *pointer);
         }
+    }
+
+    // Catches pipe_alloc leaking slots or ignoring dead pipes: slots must be
+    // handed out while any end is live, and a slot whose ends all closed
+    // must be reusable for the next pipe.
+    #[test]
+    fn pipe_alloc_reuses_slots_whose_ends_all_closed() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let process = fixture.spawn("pipe-proc");
+        table.insert(process).expect("insert");
+
+        let id = table.pipe_alloc().expect("slot is free");
+        let read_fd = table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id, false)
+            .expect("slot is free");
+        let write_fd = table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id, true)
+            .expect("slot is free");
+
+        // 端がliveな間はそのslotは再利用されない。
+        assert_ne!(table.pipe_alloc(), Some(id));
+        assert!(table.get_mut(0).unwrap().close_fd(read_fd));
+        assert!(table.get_mut(0).unwrap().close_fd(write_fd));
+
+        // 両端が消えたslotは再利用される。
+        assert_eq!(table.pipe_alloc(), Some(id));
+    }
+
+    // Catches pipe exhaustion reporting the wrong error: with MAX_PIPES
+    // live pipes, pipe_alloc must return None rather than recycle a slot
+    // that still has ends.
+    #[test]
+    fn pipe_alloc_refuses_when_every_slot_has_live_ends() {
+        use crate::pipe::MAX_PIPES;
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let process = fixture.spawn("pipe-full");
+        table.insert(process).expect("insert");
+
+        for _ in 0..MAX_PIPES {
+            let id = table.pipe_alloc().expect("slot is free");
+            table
+                .get_mut(0)
+                .unwrap()
+                .alloc_pipe_fd(id, true)
+                .expect("slot is free");
+        }
+        assert_eq!(table.pipe_alloc(), None);
+    }
+
+    // Catches the shared-buffer contract breaking across inherited fds: a
+    // child spawned with the parent's snapshot must write into the same
+    // pipe the parent's read end drains, and the write must wake a
+    // pipe-blocked reader.
+    #[test]
+    fn inherited_pipe_ends_share_the_buffer_and_wake_readers() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        let mut parent = fixture.spawn("pipe-parent");
+        let id = table.pipe_alloc().expect("slot is free");
+        parent.alloc_pipe_fd(id, false).expect("read end");
+        parent.alloc_pipe_fd(id, true).expect("write end");
+        table.insert(parent).expect("insert parent");
+
+        // childはparentのfd snapshotを継承し、両端がlivenessに計上される。
+        let snapshot = table.get(0).unwrap().file_fds_snapshot();
+        let child = fixture.spawn_with_fds("pipe-child", snapshot);
+        table.insert(child).expect("insert child");
+        assert_eq!(table.pipe_ends(id), (2, 2));
+
+        // 空なのでparentのreadはblockし、BlockedOnPipeへmarkされる。
+        let mut out = [0u8; 8];
+        assert_eq!(
+            table.pipe_read(0, id, &mut out),
+            Some(PipeReadOutcome::Blocked)
+        );
+        assert_eq!(table.get(0).unwrap().waiting_on_pipe(), Some(id));
+        assert_eq!(table.pick_next(), Some(1));
+
+        // childのwriteはbufferを共有し、blockしたreaderを起こす。
+        assert_eq!(
+            table.pipe_write(1, id, b"ping"),
+            Some(PipeWriteOutcome::Wrote(4))
+        );
+        assert!(table.get(0).unwrap().is_runnable());
+        assert_eq!(
+            table.pipe_read(0, id, &mut out),
+            Some(PipeReadOutcome::Read(4))
+        );
+        assert_eq!(&out[..4], b"ping");
+    }
+
+    // Catches EOF and broken-pipe polarity flipping: reads must block only
+    // while a write end is live and report EOF once all writers close,
+    // while writes must report Broken once all readers close.
+    #[test]
+    fn pipe_read_eof_and_write_broken_follow_open_ends() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let process = fixture.spawn("pipe-ends");
+        table.insert(process).expect("insert");
+
+        let id = table.pipe_alloc().expect("slot is free");
+        let read_fd = table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id, false)
+            .expect("read end");
+        let write_fd = table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id, true)
+            .expect("write end");
+
+        let mut out = [0u8; 4];
+        assert_eq!(
+            table.pipe_read(0, id, &mut out),
+            Some(PipeReadOutcome::Blocked)
+        );
+        table.get_mut(0).unwrap().wake();
+
+        // write端を閉じるとreadはEOFへ転じる。
+        assert!(table.get_mut(0).unwrap().close_fd(write_fd));
+        assert_eq!(table.pipe_read(0, id, &mut out), Some(PipeReadOutcome::Eof));
+
+        // read端を閉じるとwriteはBrokenへ転じる。
+        let id2 = table.pipe_alloc().expect("fresh slot");
+        let read_fd2 = table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id2, false)
+            .expect("read end");
+        table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id2, true)
+            .expect("write end");
+        assert_eq!(
+            table.pipe_write(0, id2, b"x"),
+            Some(PipeWriteOutcome::Wrote(1))
+        );
+        assert!(table.get_mut(0).unwrap().close_fd(read_fd2));
+        assert_eq!(
+            table.pipe_write(0, id2, b"x"),
+            Some(PipeWriteOutcome::Broken)
+        );
+        // 0 byte writeはEPIPEにならない。
+        assert_eq!(
+            table.pipe_write(0, id2, b""),
+            Some(PipeWriteOutcome::Wrote(0))
+        );
+    }
+
+    // Catches a writer blocking forever on a full pipe: a full buffer must
+    // mark the caller BlockedOnPipe, and a read draining it must wake the
+    // writer so the retried write succeeds.
+    #[test]
+    fn full_pipe_blocks_the_writer_until_a_read_drains_it() {
+        use crate::pipe::PIPE_CAPACITY;
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let process = fixture.spawn("pipe-full-io");
+        table.insert(process).expect("insert");
+
+        let id = table.pipe_alloc().expect("slot is free");
+        table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id, false)
+            .expect("read end");
+        table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id, true)
+            .expect("write end");
+
+        let data = alloc::vec![0xAAu8; PIPE_CAPACITY];
+        assert_eq!(
+            table.pipe_write(0, id, &data),
+            Some(PipeWriteOutcome::Wrote(PIPE_CAPACITY))
+        );
+        assert_eq!(
+            table.pipe_write(0, id, b"x"),
+            Some(PipeWriteOutcome::Blocked)
+        );
+        assert_eq!(table.get(0).unwrap().waiting_on_pipe(), Some(id));
+        assert_eq!(table.pick_next(), None);
+
+        let mut out = alloc::vec![0u8; PIPE_CAPACITY];
+        assert_eq!(
+            table.pipe_read(0, id, &mut out),
+            Some(PipeReadOutcome::Read(PIPE_CAPACITY))
+        );
+        assert!(table.get(0).unwrap().is_runnable());
+        assert_eq!(
+            table.pipe_write(0, id, b"x"),
+            Some(PipeWriteOutcome::Wrote(1))
+        );
+    }
+
+    // Catches pipe waiters being stranded by a peer's exit: wake_on_exit
+    // must release BlockedOnPipe processes too, since the exiting process's
+    // ends disappear and the waiter's EOF/EPIPE verdict may flip.
+    #[test]
+    fn wake_on_exit_releases_pipe_waiters() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        let mut writer = fixture.spawn("pipe-writer");
+        let id = table.pipe_alloc().expect("slot is free");
+        writer.alloc_pipe_fd(id, true).expect("write end");
+        table.insert(writer).expect("insert writer");
+
+        let mut reader = fixture.spawn("pipe-reader");
+        reader.alloc_pipe_fd(id, false).expect("read end");
+        table.insert(reader).expect("insert reader");
+
+        let mut out = [0u8; 4];
+        assert_eq!(
+            table.pipe_read(1, id, &mut out),
+            Some(PipeReadOutcome::Blocked)
+        );
+        assert_eq!(table.get(1).unwrap().waiting_on_pipe(), Some(id));
+
+        table.wake_on_exit(0);
+        assert!(table.get(1).unwrap().is_runnable());
+    }
+
+    // Catches a stale block_on_stdin clobbering a pipe wait: like the
+    // waitpid guard, the run loop's Blocked handling must leave the
+    // control-marked BlockedOnPipe state alone.
+    #[test]
+    fn pipe_block_survives_the_run_loop_stdin_fallback() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        let process = fixture.spawn("pipe-state");
+        table.insert(process).expect("insert");
+
+        let id = table.pipe_alloc().expect("slot is free");
+        table
+            .get_mut(0)
+            .unwrap()
+            .alloc_pipe_fd(id, true)
+            .expect("write end");
+
+        let mut out = [0u8; 4];
+        assert_eq!(
+            table.pipe_read(0, id, &mut out),
+            Some(PipeReadOutcome::Blocked)
+        );
+        table.get_mut(0).unwrap().block_on_stdin();
+        assert_eq!(table.get(0).unwrap().waiting_on_pipe(), Some(id));
+        assert!(!table.get(0).unwrap().is_runnable());
     }
 }

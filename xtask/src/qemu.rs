@@ -73,6 +73,8 @@ const FILE_EXEC_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-exec\n";
 const FILE_FDINHERIT_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x30\0\0\0MiniOS sched: spawned pid=0 name=file-fdinherit\n";
+const FILE_PIPE_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-pipe\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -94,6 +96,9 @@ const FILE_EXEC_DIAGNOSTIC_FRAME: &[u8] =
 /// fd継承したchildが`DOCS/NOTE.TXT`のoffset 4以降13 byteを写すstdout frame。
 const FILE_FDINHERIT_CHILD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0 inside docs\n";
 const FILE_FDINHERIT_PARENT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x14\0\0\0fd-inherit verified\n";
+/// pipeを継承したchildがfd 3から読んだ11 byteを写すstdout frame。
+const FILE_PIPE_CHILD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0b\0\0\0pipe-bytes\n";
+const FILE_PIPE_PARENT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0pipe verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -136,6 +141,7 @@ pub enum TestKind {
     FileReaddir,
     FileExec,
     FileFdinherit,
+    FilePipe,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -193,6 +199,9 @@ impl TestKind {
             }
             Self::FileFdinherit => {
                 unreachable!("the file-fdinherit test boots the normal kernel")
+            }
+            Self::FilePipe => {
+                unreachable!("the file-pipe test boots the normal kernel")
             }
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
@@ -255,6 +264,9 @@ impl TestKind {
             }
             Self::FileFdinherit => {
                 unreachable!("the file-fdinherit test verifies interleaved control frames")
+            }
+            Self::FilePipe => {
+                unreachable!("the file-pipe test verifies interleaved control frames")
             }
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
@@ -675,6 +687,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
         );
+    }
+
+    if kind == TestKind::FilePipe {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file_pipe()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_file_pipe_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::FileSeek {
@@ -1461,6 +1488,20 @@ const FILE_FDINHERIT_EXPECTED_FRAMES: [&[u8]; 7] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// file-pipe検査で期待されるcontrol frame列。parentがwaitpidでblock
+/// するため、pipe経由でbyteを受け取ったchildのstdoutとExitはparentの
+/// `pipe verified`とExitより必ず先に出る＝exact順序照合がpipe経由の
+/// 継承とblockingの両方の直接証拠になる。
+const FILE_PIPE_EXPECTED_FRAMES: [&[u8]; 7] = [
+    PAYLOAD_READY_FRAME,
+    FILE_PIPE_SPAWNED_FRAME,
+    FILE_PIPE_CHILD_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    FILE_PIPE_PARENT_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 fn verify_payload_stdin_result(
     command: &str,
     status: Option<i32>,
@@ -1812,6 +1853,31 @@ fn verify_file_fdinherit_result(
     Ok(output.to_owned())
 }
 
+/// file-pipe検証: parentが`pipe`で作った両端を継承したchildがfd 3から
+/// `pipe-bytes\n`を読んでstdoutへ写してExit(42)し、parentがEOF・
+/// EPIPE・slot再利用を確かめて`pipe verified`とExit(42)を出す。
+/// waitpidのblockによりframe順は確定的である。
+fn verify_file_pipe_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &FILE_PIPE_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
 /// Ready以降のcontrol frameを`(kind, payload)`列として集める。Readyがない、
 /// frame列が途中で切れる、またはdecode不能な場合は`None`を返す。
 fn collect_payload_frames(output: &[u8]) -> Option<Vec<(FrameKind, &[u8])>> {
@@ -2151,6 +2217,12 @@ impl PayloadBundle {
         Self::create_with(payload_file_fdinherit_bundle_bytes(&elf)?)
     }
 
+    /// file-pipe検査用bundle。
+    fn create_file_pipe() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_PIPE)?;
+        Self::create_with(payload_file_pipe_bundle_bytes(&elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -2409,6 +2481,15 @@ fn payload_file_exec_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
 /// をstdoutへ書きexit(42)する。
 fn payload_file_fdinherit_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     const MANIFEST: &[u8] = b"version=1\nname=file-fdinherit\n";
+    assemble_test_bundle(MANIFEST, elf)
+}
+
+/// file-pipe検査用bundle: file_pipe guestのELFと引数なしmanifestを
+/// 組み立てる。guestは`pipe`で両端を作り`DOCS/PIPECH.ELF`をspawnして
+/// pipe経由で11 byteを流し、waitpidで回収してからEOF/EPIPE/slot再利用を
+/// 確かめ`pipe verified`をstdoutへ書きexit(42)する。
+fn payload_file_pipe_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
+    const MANIFEST: &[u8] = b"version=1\nname=file-pipe\n";
     assemble_test_bundle(MANIFEST, elf)
 }
 
@@ -2730,6 +2811,7 @@ fn verify_shell_result(
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "        17 NOTE.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "       204 CHILD.ELF"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "       200 FDCHILD.ELF"))
+        .and_then(|()| expect_shell_line(transcript, &mut cursor, "       200 PIPECH.ELF"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat DOCS/NOTE.TXT"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "note inside docs"))
         .and_then(|()| expect_shell_line(transcript, &mut cursor, "minios> cat Long File Name.txt"))
@@ -3392,6 +3474,7 @@ mod tests {
             "        17 NOTE.TXT",
             "       204 CHILD.ELF",
             "       200 FDCHILD.ELF",
+            "       200 PIPECH.ELF",
             "minios> cat DOCS/NOTE.TXT",
             "note inside docs",
             "minios> cat Long File Name.txt",
