@@ -69,6 +69,7 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 `readdir`はdirectoryの中身をindex順の`DirEnt`（nameとkind）として返し、空pathはroot directoryを指します（`cargo xtask test file-readdir`で検証）。
 `exec`は呼び出しprocessのimageをFAT32上のELFで置き替え、pidとfd tableを引き継いだまま新imageのentryから再開します（`cargo xtask test file-exec`で検証）。
 `spawn`したchildは呼び出し側のfd tableのsnapshotを引き継ぎ、parentが開いたfileを同じfd番号とoffsetで読めます（`cargo xtask test file-fdinherit`で検証）。
+`pipe`はkernel所有の256 byte ring bufferのread/write両端をfdとして返し、継承した端経由でprocess間へbyteを流せます。空のreadと満杯のwriteは`BlockedOnPipe`で待ち、端のcloseやprocess終了がwaiterを起こします（`cargo xtask test file-pipe`で検証）。
 
 ## 次
 

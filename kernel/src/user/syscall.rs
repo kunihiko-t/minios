@@ -10,9 +10,9 @@ use crate::{
 use minios_abi::{
     control::FrameKind,
     syscall::{
-        DIRENT_LEN, DirEnt, EBADF, EFAULT, EINVAL, ENOSYS, FIRST_FILE_FD, MAX_OPEN_FILES,
-        MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, STAT_LEN, STDERR, STDIN, STDOUT, Stat,
-        SyscallNumber,
+        DIRENT_LEN, DirEnt, EAGAIN, EBADF, EFAULT, EINVAL, ENOSYS, FIRST_FILE_FD, MAX_OPEN_FILES,
+        MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, STAT_LEN, STDERR, STDIN, STDOUT,
+        Stat, SyscallNumber,
     },
 };
 
@@ -187,6 +187,13 @@ pub trait ControlSource {
         let _ = path;
         Err(ENOSYS)
     }
+
+    /// 新しいpipeを作り、`(read_fd, write_fd)`を返す。両端は呼び出し
+    /// processのfd tableへ割り当てられ、`spawn`したchildへ継承される。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn create_pipe(&mut self) -> Result<(usize, usize), isize> {
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -281,6 +288,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_readdir(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Exec as usize {
         dispatch_exec(context, space, memory, source)
+    } else if number == SyscallNumber::Pipe as usize {
+        dispatch_pipe(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -334,6 +343,13 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
             start,
             len: count.min(len),
         },
+        // `EAGAIN`はcontrol層がcallerをpipe待ちへmark済みのsignalであり、
+        // stdinの`Ok(None)`と同じくecallへ戻して再実行する。guestへ
+        // `EAGAIN`自体が返ることはない。
+        Err(EAGAIN) => {
+            context.set_sepc(context.sepc() - 4);
+            SyscallFlow::Blocked
+        }
         Err(errno) => {
             context.set_register(10, errno as usize);
             SyscallFlow::Resume
@@ -786,6 +802,37 @@ fn dispatch_pwrite<M: FrameStore, E, R: ControlSource>(
     SyscallFlow::Resume
 }
 
+/// `pipe` (`a0=out`)。`out`が指すwritableな8 byteへ`[read_fd, write_fd]`
+/// をLEで書き込む。fd割り当てのside effectより先に`EFAULT`を確定する。
+/// 成功時は`ReadComplete`経由でcopy-outされ、`a0`へ`PIPE_OUT_LEN`が返る。
+fn dispatch_pipe<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let out = context.register(10) as u64;
+    if check_user_writable_range(space, memory, out, PIPE_OUT_LEN).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.create_pipe() {
+        Ok((read_fd, write_fd)) => {
+            read_scratch[..4].copy_from_slice(&(read_fd as u32).to_le_bytes());
+            read_scratch[4..8].copy_from_slice(&(write_fd as u32).to_le_bytes());
+            SyscallFlow::ReadComplete {
+                start: out,
+                len: PIPE_OUT_LEN,
+            }
+        }
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
+}
+
 /// `close` (`a0=fd`)。標準streamのfdは`EBADF`として拒否し、file fdは
 /// sourceへ委譲する。成功時は`a0`へ0を返す。
 fn dispatch_close<E, R: ControlSource>(
@@ -934,6 +981,12 @@ fn dispatch_write<M: FrameStore, S: ControlSink, R: ControlSource>(
                 context.set_register(10, count.min(len));
                 SyscallFlow::Resume
             }
+            // `read`と同じく、pipe満杯でmark済みのcallerはecallへ戻して
+            // 再実行する。
+            Err(EAGAIN) => {
+                context.set_sepc(context.sepc() - 4);
+                SyscallFlow::Blocked
+            }
             Err(errno) => {
                 context.set_register(10, errno as usize);
                 SyscallFlow::Resume
@@ -977,6 +1030,7 @@ mod tests {
     const RMDIR_NUMBER: usize = SyscallNumber::Rmdir as usize;
     const LSEEK_NUMBER: usize = SyscallNumber::Lseek as usize;
     const PREAD_NUMBER: usize = SyscallNumber::Pread as usize;
+    const PIPE_NUMBER: usize = SyscallNumber::Pipe as usize;
     const PWRITE_NUMBER: usize = SyscallNumber::Pwrite as usize;
     const GETPID_NUMBER: usize = SyscallNumber::Getpid as usize;
     const SPAWN_NUMBER: usize = SyscallNumber::Spawn as usize;
@@ -1273,6 +1327,8 @@ mod tests {
         execs: usize,
         /// `exec`成功時に返す新contextの`(entry, sp)`。
         exec_result: Result<(u64, u64), isize>,
+        pipes: usize,
+        pipe_result: Result<(usize, usize), isize>,
     }
 
     impl FileSource {
@@ -1321,6 +1377,8 @@ mod tests {
                 readdir_result: Ok(Some(dirent_fixture())),
                 execs: 0,
                 exec_result: Ok((0x40_0000, 0x40_7000)),
+                pipes: 0,
+                pipe_result: Ok((FIRST_FILE_FD, FIRST_FILE_FD + 1)),
             }
         }
 
@@ -1467,6 +1525,11 @@ mod tests {
             self.readdir_result
         }
 
+        fn create_pipe(&mut self) -> Result<(usize, usize), isize> {
+            self.pipes += 1;
+            self.pipe_result
+        }
+
         fn exec(&mut self, path: &str) -> Result<UserContext, isize> {
             self.execs += 1;
             self.seen_path = Some(Vec::from(path.as_bytes()));
@@ -1532,6 +1595,92 @@ mod tests {
         context.set_register(13, a3);
         let flow = dispatch_syscall(&mut context, &space, &memory, sink, source, read_scratch);
         (context, flow)
+    }
+
+    // Catches pipe failing to validate the out pointer or mangling the fd
+    // pair layout: the source must run only after EFAULT is decided, and
+    // the two fds must land as LE u32s in the user buffer.
+    #[test]
+    fn pipe_writes_the_fd_pair_to_the_out_pointer() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let mut scratch_buf = scratch();
+        let (context, flow) = dispatch_fixture(
+            PIPE_NUMBER,
+            MESSAGE_PAGE,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch_buf,
+        );
+
+        assert_eq!(
+            flow,
+            SyscallFlow::ReadComplete {
+                start: MESSAGE_PAGE as u64,
+                len: 8,
+            }
+        );
+        assert_eq!(&scratch_buf[..8], &[3, 0, 0, 0, 4, 0, 0, 0]);
+        assert_eq!(source.pipes, 1);
+    }
+
+    // Catches pipe allocating fds before validating the destination: an
+    // unwritable out pointer must return EFAULT without touching the source.
+    #[test]
+    fn pipe_rejects_an_unwritable_out_pointer_before_allocating() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) =
+            dispatch_fixture(PIPE_NUMBER, 0, 0, 0, &mut sink, &mut source, &mut scratch());
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.pipes, 0);
+    }
+
+    // Catches a pipe-blocked read returning the errno instead of blocking:
+    // EAGAIN is the control layer's "caller already marked" signal and must
+    // rewind sepc to the ecall like the stdin not-ready path does.
+    #[test]
+    fn read_fd_eagain_blocks_and_rewinds_sepc() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::failing(minios_abi::syscall::EAGAIN);
+        let (context, flow) = dispatch_fixture(
+            READ_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            16,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Blocked);
+        assert_eq!(context.sepc(), 0x0010_0500 - 4);
+        assert_eq!(source.fd_reads, 1);
+    }
+
+    // Catches a pipe-blocked write returning the errno instead of blocking:
+    // write_fd's EAGAIN must take the same rewind-and-reschedule path.
+    #[test]
+    fn write_fd_eagain_blocks_and_rewinds_sepc() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::failing(minios_abi::syscall::EAGAIN);
+        let (context, flow) = dispatch_fixture(
+            WRITE_NUMBER,
+            FIRST_FILE_FD,
+            MESSAGE_PAGE,
+            MESSAGE.len(),
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Blocked);
+        assert_eq!(context.sepc(), 0x0010_0500 - 4);
+        assert_eq!(source.writes, 1);
     }
 
     // Catches missing frames, duplicated frames, wrong frame kinds, wrong

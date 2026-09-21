@@ -100,22 +100,31 @@ impl ControlSource for UartControlSource<'_> {
     }
 
     /// guestの`read`を開いたfdの現在offsetから読み、offsetを進める。
-    /// writableなfdへのreadは`EBADF`で拒否する。
+    /// writableなfdへのreadは`EBADF`で拒否する。pipeのread端は
+    /// `ProcessTable`のbuffer経由で読み、条件未達なら`EAGAIN`を返して
+    /// callerをblockへ回す。pipeのwrite端へのreadは`EBADF`。
     #[cfg(target_arch = "riscv64")]
     fn read_fd(&mut self, fd: usize, output: &mut [u8]) -> Result<usize, isize> {
         use minios_abi::syscall::EBADF;
+        use minios_kernel::process::FdEntry;
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
-        if entry.writable() {
+        let entry = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?;
+        let file = match entry {
+            FdEntry::File(file) => file,
+            FdEntry::Pipe { write: true, .. } => return Err(EBADF),
+            // Safety: 同上。table借用はこの呼び出し内で完結する。
+            FdEntry::Pipe { id, .. } => return unsafe { crate::pipe_read(*id, output) },
+        };
+        if file.writable() {
             return Err(EBADF);
         }
         // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         let count = session
-            .read_range(entry.desc(), entry.offset(), output)
+            .read_range(file.desc(), file.offset(), output)
             .map_err(fat_errno)?;
-        entry.advance(count as u64);
+        file.advance(count as u64);
         Ok(count)
     }
 
@@ -291,11 +300,19 @@ impl ControlSource for UartControlSource<'_> {
     fn fstat(&mut self, fd: usize) -> Result<minios_abi::syscall::Stat, isize> {
         use minios_abi::syscall::{EBADF, STAT_KIND_FILE, Stat};
 
+        use minios_kernel::process::FdEntry;
+
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
-        Ok(Stat {
-            size: entry.desc().size(),
-            kind: STAT_KIND_FILE,
+        let entry = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?;
+        Ok(match entry {
+            FdEntry::File(file) => Stat {
+                size: file.desc().size(),
+                kind: STAT_KIND_FILE,
+            },
+            FdEntry::Pipe { .. } => Stat {
+                size: 0,
+                kind: minios_abi::syscall::STAT_KIND_PIPE,
+            },
         })
     }
 
@@ -352,10 +369,12 @@ impl ControlSource for UartControlSource<'_> {
     /// `EINVAL`で拒否する。
     #[cfg(target_arch = "riscv64")]
     fn seek_fd(&mut self, fd: usize, offset: isize, whence: usize) -> Result<u64, isize> {
-        use minios_abi::syscall::{EBADF, EINVAL, SEEK_CUR, SEEK_END, SEEK_SET};
+        use minios_abi::syscall::{EBADF, EINVAL, ESPIPE, SEEK_CUR, SEEK_END, SEEK_SET};
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        let Some(entry) = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?.file_mut() else {
+            return Err(ESPIPE);
+        };
         let base: u64 = match whence {
             SEEK_SET => 0,
             SEEK_CUR => entry.offset(),
@@ -374,10 +393,12 @@ impl ControlSource for UartControlSource<'_> {
     /// 方向性（writable fdは`EBADF`）は`read`と同じ規約で扱う。
     #[cfg(target_arch = "riscv64")]
     fn pread_fd(&mut self, fd: usize, offset: u64, output: &mut [u8]) -> Result<usize, isize> {
-        use minios_abi::syscall::EBADF;
+        use minios_abi::syscall::{EBADF, ESPIPE};
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        let Some(entry) = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?.file_mut() else {
+            return Err(ESPIPE);
+        };
         if entry.writable() {
             return Err(EBADF);
         }
@@ -393,10 +414,12 @@ impl ControlSource for UartControlSource<'_> {
     /// FileDescのsize/first_clusterは`write_range`が更新する。
     #[cfg(target_arch = "riscv64")]
     fn pwrite_fd(&mut self, fd: usize, offset: u64, data: &[u8]) -> Result<usize, isize> {
-        use minios_abi::syscall::EBADF;
+        use minios_abi::syscall::{EBADF, ESPIPE};
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
+        let Some(entry) = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?.file_mut() else {
+            return Err(ESPIPE);
+        };
         if !entry.writable() {
             return Err(EBADF);
         }
@@ -408,24 +431,41 @@ impl ControlSource for UartControlSource<'_> {
     }
 
     /// guestの`write`をwritableなfdの現在offsetから書き、offsetを進める。
-    /// read-onlyのfdへのwriteは`EBADF`で拒否する。
+    /// read-onlyのfdへのwriteは`EBADF`で拒否する。pipeのwrite端は
+    /// `ProcessTable`のbufferへ書き、満杯なら`EAGAIN`を返してcallerを
+    /// blockへ回す。pipeのread端へのwriteは`EBADF`。
     #[cfg(target_arch = "riscv64")]
     fn write_fd(&mut self, fd: usize, data: &[u8]) -> Result<usize, isize> {
         use minios_abi::syscall::EBADF;
+        use minios_kernel::process::FdEntry;
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let entry = unsafe { crate::file_fd_mut(fd) }.ok_or(EBADF)?;
-        if !entry.writable() {
+        let entry = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?;
+        let file = match entry {
+            FdEntry::File(file) => file,
+            FdEntry::Pipe { write: false, .. } => return Err(EBADF),
+            // Safety: 同上。table借用はこの呼び出し内で完結する。
+            FdEntry::Pipe { id, .. } => return unsafe { crate::pipe_write(*id, data) },
+        };
+        if !file.writable() {
             return Err(EBADF);
         }
         // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let offset = entry.offset();
+        let offset = file.offset();
         let count = session
-            .write_range(entry.desc_mut(), offset, data)
+            .write_range(file.desc_mut(), offset, data)
             .map_err(fat_errno)?;
-        entry.advance(count as u64);
+        file.advance(count as u64);
         Ok(count)
+    }
+
+    /// guestの`pipe`をpipe tableとfd tableへ委譲する。両端のfdを
+    /// 返し、`spawn`したchildがそのまま継承できる。
+    #[cfg(target_arch = "riscv64")]
+    fn create_pipe(&mut self) -> Result<(usize, usize), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::create_pipe() }
     }
 }
 

@@ -1636,19 +1636,23 @@ unsafe fn alloc_file_fd(
     process.alloc_fd(desc, writable)
 }
 
-/// 現在processの`fd`に対応するslotを借りる。未割り当てやprocess未設定なら`None`。
+/// 現在processの`fd`に対応するentryを借りる。未割り当てやprocess未設定なら`None`。
+/// file fdとpipe端の両方を返すため、file専用の操作は`FdEntry::file_mut`で
+/// 絞り込むこと。
 ///
 /// # Safety
 ///
 /// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
-unsafe fn file_fd_mut(fd: usize) -> Option<&'static mut minios_kernel::process::FileFd> {
+unsafe fn fd_entry_mut(fd: usize) -> Option<&'static mut minios_kernel::process::FdEntry> {
     let process = unsafe { *&raw const CURRENT_PROC };
     unsafe { process.as_mut() }?.fd_mut(fd)
 }
 
 /// 現在processの`fd`を閉じる。未割り当てなら`false`を返す。
+/// pipe端を閉じた場合は同pipeのwaiterを起こし、peer側のEOF/EPIPEを
+/// 再判定させる。
 ///
 /// # Safety
 ///
@@ -1660,7 +1664,112 @@ unsafe fn close_file_fd(fd: usize) -> bool {
     let Some(process) = (unsafe { process.as_mut() }) else {
         return false;
     };
-    process.close_fd(fd)
+    let pipe_id = process
+        .fd(fd)
+        .and_then(minios_kernel::process::FdEntry::pipe_id);
+    if !process.close_fd(fd) {
+        return false;
+    }
+    if let Some(id) = pipe_id {
+        let table = unsafe { *&raw const PROC_TABLE_PTR };
+        if let Some(table) = unsafe { table.as_mut() } {
+            table.wake_pipe_waiters(id);
+        }
+    }
+    true
+}
+
+/// `pipe` syscallのfd割り当て。pipeをtableからallocし、現在processへ
+/// read/write両端を割り当てる。write端の割り当てに失敗した場合は
+/// read端をrollbackして`EMFILE`を返す。tableやprocessが未設定なら
+/// `ENOSYS`、pipe slot枯渇は`ENOMEM`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn create_pipe() -> Result<(usize, usize), isize> {
+    use minios_abi::syscall::{ENOMEM, ENOSYS};
+
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    let Some(table) = (unsafe { table.as_mut() }) else {
+        return Err(ENOSYS);
+    };
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let Some(process) = (unsafe { process.as_mut() }) else {
+        return Err(ENOSYS);
+    };
+    let Some(id) = table.pipe_alloc() else {
+        return Err(ENOMEM);
+    };
+    let read_fd = process.alloc_pipe_fd(id, false)?;
+    match process.alloc_pipe_fd(id, true) {
+        Ok(write_fd) => Ok((read_fd, write_fd)),
+        Err(error) => {
+            // 片端だけを残すと「write端0の空pipe」へreadが永遠に
+            // blockし得るため、read端を巻き戻す。死んだslotは次の
+            // `pipe_alloc`が再利用する。
+            process.close_fd(read_fd);
+            Err(error)
+        }
+    }
+}
+
+/// `read`がpipe read端へ委譲するtable側処理。`Ok(n)`は読んだbyte数、
+/// `Ok(0)`は全write端のcloseによるEOF、`Err(EAGAIN)`はcallerを
+/// `BlockedOnPipe`へmark済みのblock要求（dispatchがecallへ巻き戻す）。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn pipe_read(id: usize, output: &mut [u8]) -> Result<usize, isize> {
+    use minios_abi::syscall::{EAGAIN, EBADF, ENOSYS};
+    use minios_kernel::process::PipeReadOutcome;
+
+    let Some(caller) = (unsafe { current_pid() }) else {
+        return Err(ENOSYS);
+    };
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    let Some(table) = (unsafe { table.as_mut() }) else {
+        return Err(ENOSYS);
+    };
+    match table.pipe_read(caller, id, output) {
+        Some(PipeReadOutcome::Read(count)) => Ok(count),
+        Some(PipeReadOutcome::Blocked) => Err(EAGAIN),
+        Some(PipeReadOutcome::Eof) => Ok(0),
+        None => Err(EBADF),
+    }
+}
+
+/// `write`がpipe write端へ委譲するtable側処理。`Ok(n)`は書いたbyte数、
+/// `Err(EAGAIN)`はcallerを`BlockedOnPipe`へmark済みのblock要求、
+/// `Err(EPIPE)`はread端の全滅。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn pipe_write(id: usize, data: &[u8]) -> Result<usize, isize> {
+    use minios_abi::syscall::{EAGAIN, EBADF, ENOSYS, EPIPE};
+    use minios_kernel::process::PipeWriteOutcome;
+
+    let Some(caller) = (unsafe { current_pid() }) else {
+        return Err(ENOSYS);
+    };
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    let Some(table) = (unsafe { table.as_mut() }) else {
+        return Err(ENOSYS);
+    };
+    match table.pipe_write(caller, id, data) {
+        Some(PipeWriteOutcome::Wrote(count)) => Ok(count),
+        Some(PipeWriteOutcome::Blocked) => Err(EAGAIN),
+        Some(PipeWriteOutcome::Broken) => Err(EPIPE),
+        None => Err(EBADF),
+    }
 }
 
 /// `(dir_cluster, dir_index)`のdir entryを指すfdを全processのtableから
