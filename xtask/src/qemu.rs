@@ -81,6 +81,8 @@ const USER_SLEEP_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=user-sleep\n";
 const USER_DUP_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2a\0\0\0MiniOS sched: spawned pid=0 name=user-dup\n";
+const SPAWN_ARGS_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=spawn-args\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -114,6 +116,13 @@ const USER_SLEEP_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0f\0\0\0sleep verified\
 /// user_dup guestがpipeから読んだchildの出力を自分のstdoutへ写したframe。
 const USER_DUP_RELAYED_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0c\0\0\0spawn-child\n";
 const USER_DUP_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0dup verified\n";
+/// argc=0で起動した`DOCS/ECHO.ELF`のargv[0]。pathのbasenameである。
+const SPAWN_ARGS_BASENAME_FRAME: &[u8] = b"MCF1\x02\0\0\0\x08\0\0\0ECHO.ELF";
+/// argc=3で起動した`DOCS/ECHO.ELF`が書くargvの3 frame。
+const SPAWN_ARGS_ECHOARGS_FRAME: &[u8] = b"MCF1\x02\0\0\0\x08\0\0\0echoargs";
+const SPAWN_ARGS_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
+const SPAWN_ARGS_BETA_GAMMA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0a\0\0\0beta gamma";
+const SPAWN_ARGS_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x14\0\0\0spawn args verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -160,6 +169,7 @@ pub enum TestKind {
     UserHeap,
     UserSleep,
     UserDup,
+    SpawnArgs,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -224,6 +234,7 @@ impl TestKind {
             Self::UserHeap => unreachable!("the user-heap test boots the normal kernel"),
             Self::UserSleep => unreachable!("the user-sleep test boots the normal kernel"),
             Self::UserDup => unreachable!("the user-dup test boots the normal kernel"),
+            Self::SpawnArgs => unreachable!("the spawn-args test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
@@ -292,6 +303,7 @@ impl TestKind {
             Self::UserHeap => unreachable!("the user-heap test verifies raw control frames"),
             Self::UserSleep => unreachable!("the user-sleep test verifies raw control frames"),
             Self::UserDup => unreachable!("the user-dup test verifies raw control frames"),
+            Self::SpawnArgs => unreachable!("the spawn-args test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
                 unreachable!("the payload-stdin test verifies raw control frames")
@@ -553,6 +565,28 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
             &USER_DUP_EXPECTED_FRAMES,
+        );
+    }
+
+    if kind == TestKind::SpawnArgs {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_spawn_args()?;
+        let echo = built_bin_elf_bytes(crate::guest::GUEST_PACKAGE)?;
+        let disk =
+            crate::disk::DiskImage::create_with_echo(&echo).map_err(|error| QemuError::Bundle {
+                stage: "disk image",
+                error,
+            })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_exact_frames(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+            &SPAWN_ARGS_EXPECTED_FRAMES,
         );
     }
 
@@ -1544,6 +1578,24 @@ const USER_DUP_EXPECTED_FRAMES: [&[u8]; 7] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// spawn-args検査で期待されるcontrol frame列。誤ったargvのspawnは
+/// childを作らないためframeを出さない。argc=0のchildはbasenameだけを、
+/// argc=3のchildは渡したargvを順に書き、どちらも42で終了する。
+/// parentは各childを`waitpid`してから検証済みの旨を出す。
+const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
+    PAYLOAD_READY_FRAME,
+    SPAWN_ARGS_SPAWNED_FRAME,
+    SPAWN_ARGS_BASENAME_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    SPAWN_ARGS_ECHOARGS_FRAME,
+    SPAWN_ARGS_ALPHA_FRAME,
+    SPAWN_ARGS_BETA_GAMMA_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    SPAWN_ARGS_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 /// file-stat検査で期待されるcontrol frame列。guestがstat/fstatの
 /// metadata・errno・EFAULTの経路を通してから、検証済みの旨をstdoutへ
 /// 出力する。
@@ -2396,6 +2448,12 @@ impl PayloadBundle {
     fn create_user_dup() -> Result<Self, QemuError> {
         let elf = built_bin_elf_bytes(crate::guest::GUEST_USER_DUP)?;
         Self::create_with(assemble_test_bundle(b"version=1\nname=user-dup\n", &elf)?)
+    }
+
+    /// spawn-args検査用bundle。
+    fn create_spawn_args() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_SPAWN_ARGS)?;
+        Self::create_with(assemble_test_bundle(b"version=1\nname=spawn-args\n", &elf)?)
     }
 
     fn create_sched() -> Result<Self, QemuError> {

@@ -170,3 +170,10 @@ path = "src/bin/user_dup.rs"
 test = false
 bench = false
 doctest = false
+
+[[bin]]
+name = "minios-guest-spawn-args"
+path = "src/bin/spawn_args.rs"
+test = false
+bench = false
+doctest = false

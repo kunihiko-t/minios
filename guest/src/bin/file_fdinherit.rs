@@ -51,7 +51,8 @@ extern "C" fn guest_main() -> ! {
     }
 
     // childを起動する。FDCHILD.ELFはfd 3をreadしてstdoutへ写し42で終了する。
-    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len()) != CHILD_PID as isize {
+    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len(), core::ptr::null(), 0) != CHILD_PID as isize
+    {
         sys_exit(FAILURE_EXIT);
     }
 

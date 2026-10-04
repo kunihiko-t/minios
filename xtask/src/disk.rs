@@ -34,6 +34,8 @@ const LFN_CLUSTER: u32 = 6;
 const CHILD_CLUSTER: u32 = 7;
 const FDCHILD_CLUSTER: u32 = 8;
 const PIPECH_CLUSTER: u32 = 9;
+/// `DOCS/ECHO.ELF`の先頭cluster。fileは連続clusterのchainで置く。
+const ECHO_CLUSTER: u32 = 10;
 
 /// `DOCS/CHILD.ELF`のfile長。guestの`spawn`検査が起動する最小ELF64で、
 /// ELF header + program header + code + messageをfile offset 0から
@@ -303,7 +305,9 @@ impl minios_kernel::storage::SectorReader for SliceReader<'_> {
 
 /// 完全なdisk imageを`Vec`として組み立てる。テストでparserと直接照合する
 /// ため、sparse書き出しとは別に全byteを返す経路も用意する。
-fn image_bytes() -> Vec<u8> {
+/// `echo`を渡すと、その内容を`DOCS/ECHO.ELF`として連続clusterへ置く。
+/// spawn-args検査がbuild済みの`minios-guest` ELFを渡す。
+fn image_bytes(echo: Option<&[u8]>) -> Vec<u8> {
     let fat_sectors = fat_sectors();
     let data_start = u32::from(RESERVED_SECTORS) + FAT_COUNT as u32 * fat_sectors;
     let mut image = std::vec![0u8; VOLUME_SECTORS as usize * SECTOR];
@@ -343,6 +347,15 @@ fn image_bytes() -> Vec<u8> {
     set(&mut fat, CHILD_CLUSTER, 0x0fff_ffff);
     set(&mut fat, FDCHILD_CLUSTER, 0x0fff_ffff);
     set(&mut fat, PIPECH_CLUSTER, 0x0fff_ffff);
+    let echo_clusters = echo.map_or(0, |elf| elf.len().div_ceil(SECTOR) as u32);
+    for cluster in ECHO_CLUSTER..ECHO_CLUSTER + echo_clusters {
+        let last = cluster + 1 == ECHO_CLUSTER + echo_clusters;
+        set(
+            &mut fat,
+            cluster,
+            if last { 0x0fff_ffff } else { cluster + 1 },
+        );
+    }
     for copy in 0..FAT_COUNT {
         let start = (u32::from(RESERVED_SECTORS) + u32::from(copy) * fat_sectors) as usize * SECTOR;
         image[start..start + fat.len()].copy_from_slice(&fat);
@@ -419,6 +432,16 @@ fn image_bytes() -> Vec<u8> {
             PIPECH_CLUSTER,
             PIPECH_ELF_LEN as u32,
         );
+        if let Some(elf) = echo {
+            dir_entry(
+                docs,
+                6,
+                b"ECHO    ELF",
+                0x20,
+                ECHO_CLUSTER,
+                elf.len() as u32,
+            );
+        }
     }
 
     // --- file data (cluster 3 = HELLO.TXT, cluster 5 = NOTE.TXT) ---
@@ -434,6 +457,10 @@ fn image_bytes() -> Vec<u8> {
     image[fdchild_start..fdchild_start + FDCHILD_ELF_LEN].copy_from_slice(&fdchild_elf());
     let pipech_start = (data_start + (PIPECH_CLUSTER - 2)) as usize * SECTOR;
     image[pipech_start..pipech_start + PIPECH_ELF_LEN].copy_from_slice(&pipech_elf());
+    if let Some(elf) = echo {
+        let echo_start = (data_start + (ECHO_CLUSTER - 2)) as usize * SECTOR;
+        image[echo_start..echo_start + elf.len()].copy_from_slice(elf);
+    }
 
     image
 }
@@ -448,6 +475,15 @@ impl DiskImage {
     /// FAT32 imageを組み立て、使用sectorだけを書いたsparse fileとして
     /// temp dirへ配置する。
     pub fn create() -> Result<Self, String> {
+        Self::create_with(None)
+    }
+
+    /// `create`に加えて`echo`を`DOCS/ECHO.ELF`として置く。
+    pub fn create_with_echo(echo: &[u8]) -> Result<Self, String> {
+        Self::create_with(Some(echo))
+    }
+
+    fn create_with(echo: Option<&[u8]>) -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!(
             "minios-disk-{}-{}.img",
             std::process::id(),
@@ -456,7 +492,7 @@ impl DiskImage {
                 .expect("system clock must be after Unix epoch")
                 .as_nanos()
         ));
-        let image = image_bytes();
+        let image = image_bytes(echo);
         let mut file = std::fs::File::create(&path)
             .map_err(|error| format!("could not create {}: {error}", path.display()))?;
         // 非0 byteを含む領域だけをseek+writeし、残りはholeのままにする。
@@ -501,7 +537,7 @@ mod tests {
     // or a directory record it cannot match.
     #[test]
     fn generated_image_mounts_and_reads_hello_txt() {
-        let image = image_bytes();
+        let image = image_bytes(None);
         let reader = SliceReader { bytes: &image };
         let mut fs = Fat32::mount(reader).expect("generated image must mount");
 
@@ -532,6 +568,19 @@ mod tests {
                 .expect("LFN file must be readable");
             assert_eq!(lfn, LFN_TXT);
         }
+    }
+
+    // Catches the ECHO.ELF fixture losing bytes across its cluster chain:
+    // a multi-cluster file must read back byte for byte through the parser.
+    #[test]
+    fn echo_fixture_reads_back_across_clusters() {
+        let elf: Vec<u8> = (0..1300u32).map(|index| index as u8).collect();
+        let image = image_bytes(Some(&elf));
+        let mut fs = Fat32::mount(SliceReader { bytes: &image }).expect("image must mount");
+        let mut content = Vec::new();
+        fs.read_file("DOCS/ECHO.ELF", |chunk| content.extend_from_slice(chunk))
+            .expect("DOCS/ECHO.ELF must be readable");
+        assert_eq!(content, elf);
     }
 
     // Catches a fat_sectors estimate that leaves data_cluster_count under the

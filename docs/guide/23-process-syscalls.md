@@ -30,7 +30,8 @@ UNIXでは`fork`でaddress spaceを複製してから`exec`で置き換えます
 
 `spawn`の実装は、storage sessionの`read_file`でfile全体をheapの`Vec`へ読み込みます。
 不在pathは`ENOENT`、directoryは`EISDIR`となり、`fat_errno`がFAT32のerrorをerrnoへ写します。
-process名はpathのbasenameで、`Process.name`が`&'static str`を要求するため`String::leak`で確保します。
+process名はargvを渡せば`argv[0]`、渡さなければpathのbasenameです。
+`Process.name`が`&'static str`を要求するため、どちらも`String::leak`で確保します。
 
 ELFからprocessを組み立てるのは[`Process::spawn`](../../kernel/src/process.rs)です。
 user imageの読み込み、kernel trap stackの確保、`argv`の書き込み、初期`UserContext`の構築を順に行い、途中で失敗すれば確保済みのframeをすべて返します。
@@ -42,6 +43,22 @@ live processが`MAX_PROCS`（4）に達していると`insert`はprocessをそ�
 
 `getpid`は[`kernel/src/main.rs`](../../kernel/src/main.rs)の`current_pid`で、trap中のprocessのpidを返します。
 単一imageのmanifestでは最初のprocessがpid 0、そこから`spawn`したchildがpid 1になります。
+
+### spawnへのargv
+
+`spawn`は`a2`と`a3`でchildのargvも受け取ります。
+`a2`は`a3`個のentryの配列を指し、各entryは`SPAWN_ARG_LEN`（16）byteの`[pointer: u64, length: u64]`です。
+文字列はpathと同じくpointerと長さの組で渡すため、user memory上でNUL終端する必要はありません。
+
+`dispatch_spawn`はpathの次に`copy_spawn_argv`を呼び、entry配列と全文字列をkernelのheapへcopyしてから`ControlSource`の`spawn`へ`&[&str]`として渡します。
+上限はmanifest経路と同じ`ARG_MAX_COUNT`と`ARG_MAX_LEN`から決まり、`argc`は`SPAWN_MAX_ARGC`（17）以下、各文字列は256 byte以下です。
+上限超過、NULを含む文字列、UTF-8でない文字列は`EINVAL`、読めないentry配列や文字列は`EFAULT`です。
+検証もcopyもprocess生成より前に終えるため、失敗したspawnはframeもpidも消費しません。
+
+kernel側の`spawn`は`argv[0]`を`Process::spawn`の`name`へ、残りを`arguments`へ渡します。
+`Process::spawn`はmanifest経路と同じ`write_initial_argv`で初期スタックを組むため、childから見た`a0`と`a1`の形はmanifestで起動したprocessと区別できません。
+`a3`が0なら`a2`は読まず、childは以前と同じくpathのbasenameだけを`argv[0]`に持ちます。
+argv導入前のguestは`a2`と`a3`へ0を渡していたため、そのまま同じ結果になります。
 
 ### fd tableの継承
 
@@ -77,7 +94,7 @@ run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取�
 ## 実行と確認
 
 guestは[`guest/src/bin/file_spawn.rs`](../../guest/src/bin/file_spawn.rs)、[`file_waitpid.rs`](../../guest/src/bin/file_waitpid.rs)、[`file_exec.rs`](../../guest/src/bin/file_exec.rs)、[`file_fdinherit.rs`](../../guest/src/bin/file_fdinherit.rs)です。
-childとして起動するELFは、[`xtask/src/disk.rs`](../../xtask/src/disk.rs)がdisk imageへ書く手書きの最小ELFです。
+これらのguestがchildとして起動するELFは、[`xtask/src/disk.rs`](../../xtask/src/disk.rs)がdisk imageへ書く手書きの最小ELFです。
 `DOCS/CHILD.ELF`は`spawn-child`を書いてから`getpid`の値に41を足した値で`exit`し、`DOCS/FDCHILD.ELF`はfd 3から13 byteを読んでstdoutへ写します。
 
 `spawn`と`getpid`のend-to-end実行は次のコマンドです。
@@ -133,6 +150,23 @@ summary: PASSED all 1 phases (elapsed: ...)
 親は`DOCS/NOTE.TXT`をfd 3で開き、`lseek`でoffset 4へ進めてから`DOCS/FDCHILD.ELF`を`spawn`します。
 childはfd 3から` inside docs\n`の13 byteを読んでstdoutへ写し、harnessはこのframeが親の`fd-inherit verified`より先に出る列を完全一致で照合します。
 親は`waitpid`の後に同じfdから同じ13 byteを読み直し、childのreadが親のoffsetを動かしていないことを確かめます。
+
+argvの受け渡しは次のコマンドで確かめます。
+
+```console
+$ cargo xtask test spawn-args
+...
+MiniOS payload: ok code=42
+...
+summary: PASSED all 1 phases (elapsed: ...)
+```
+
+guestは[`guest/src/bin/spawn_args.rs`](../../guest/src/bin/spawn_args.rs)です。
+childの`DOCS/ECHO.ELF`は手書きではなく、argvを順にstdoutへ書く`minios-guest`をbuildしたELFで、harnessがdisk imageの連続clusterへ置きます。
+親はまず`argc`の上限超過と長すぎる文字列の`EINVAL`、null pointerのentry配列と読めない文字列の`EFAULT`を確かめます。
+続いて`argc`が0のspawnでchildが`ECHO.ELF`だけを書くこと、`echoargs`、`alpha`、`beta gamma`を渡したspawnでその3個が順に届くことを示します。
+失敗したspawnがpidを消費していれば2個のchildはpid 1と2にならず、親は70で終了します。
+harnessはframe列を完全一致で照合し、最後のdiagnosticで全frameの回収も確かめます。
 
 ## よくある失敗
 

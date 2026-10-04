@@ -136,9 +136,17 @@ pub fn sys_getpid() -> isize {
 }
 
 /// `spawn`を呼ぶ。childはcallerのfd tableのsnapshotを引き継ぐ。
+/// `argv`は`argc`個の`[pointer, length]`を指し、childのargvになる。
+/// `argc`=0なら`argv`は読まれず、childのargvはpathのbasenameだけになる。
 /// 戻り値はchildのpidか負のerrno。
-pub fn sys_spawn(path: *const u8, path_len: usize) -> isize {
-    ecall(SyscallNumber::Spawn, path as usize, path_len, 0, 0)
+pub fn sys_spawn(path: *const u8, path_len: usize, argv: *const [u64; 2], argc: usize) -> isize {
+    ecall(
+        SyscallNumber::Spawn,
+        path as usize,
+        path_len,
+        argv as usize,
+        argc,
+    )
 }
 
 /// `waitpid`を呼ぶ。戻り値は対象processの終了codeか負のerrno。

@@ -99,8 +99,8 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 - **`yield`**（完了）：sched_aのbusy-waitを`yield`で置き換え、schedulerの検証がtime sliceに依存しなくなりました。
 - **`dup2`と`MAX_OPEN_FILES`の引き上げ**（完了）：fd 0、1、2をconsole entryを持つ普通のslotへ変え、`dup2`でpipeやfileへ付け替えられるようにしました（`cargo xtask test user-dup`で検証）。
   open file数の上限は4から16へ上げ、`spawn`したchildは差し替えたfd 1をそのまま継承します。
-- **`spawn`への引数渡し**：現在の`spawn`はpathだけを受け取り、childは`argv`を受け取れません。
-  manifestと同じ初期stack ABIで`argv`を積む形へ拡張します。
+- **`spawn`への引数渡し**（完了）：`spawn`は`a2`と`a3`で`[pointer, length]`のentry配列を受け取り、manifestと同じ初期stack ABIでchildの`argv`を積みます（`cargo xtask test spawn-args`で検証）。
+  `argc`が0なら従来どおりpathのbasenameだけを`argv[0]`にするため、既存の呼び出し側は変わりません。
 - **user library crate**：段階0で作った`minios_guest` libraryへ、`println!`、`File`、`Process`のような薄い型を加えます。
   各sample guestはこのlibraryだけを使って書き直します。
 - **user mode shell**：FAT32上の`SH.ELF`としてuser modeのshellを書き、path指定の起動、`|`によるpipe、`<`と`>`によるredirectを実装します。
