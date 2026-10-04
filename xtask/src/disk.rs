@@ -582,9 +582,68 @@ impl Drop for DiskImage {
 
 #[cfg(test)]
 mod tests {
-    use super::{HELLO_TXT, LFN_TXT, NOTE_TXT, SliceReader, fat_sectors, image_bytes};
+    use super::{
+        FAT_COUNT, HELLO_TXT, LFN_TXT, NOTE_TXT, RESERVED_SECTORS, SECTOR, SliceReader,
+        fat_sectors, image_bytes,
+    };
     use minios_kernel::storage::fat32::Fat32;
+    use minios_kernel::storage::{SectorReader, SectorWriter};
     use std::vec::Vec;
+
+    /// write pathの検査用に、image bytesを書き換え可能なdiskとして渡す。
+    struct ImageDisk<'a> {
+        bytes: &'a mut [u8],
+    }
+
+    impl SectorReader for ImageDisk<'_> {
+        type Error = &'static str;
+
+        fn read_sector(
+            &mut self,
+            lba: u32,
+            destination: &mut [u8; 512],
+        ) -> Result<(), Self::Error> {
+            SliceReader { bytes: self.bytes }.read_sector(lba, destination)
+        }
+    }
+
+    impl SectorWriter for ImageDisk<'_> {
+        fn write_sector(&mut self, lba: u32, source: &[u8; 512]) -> Result<(), Self::Error> {
+            let start = lba as usize * SECTOR;
+            let slice = self
+                .bytes
+                .get_mut(start..start + SECTOR)
+                .ok_or("short write")?;
+            slice.copy_from_slice(source);
+            Ok(())
+        }
+    }
+
+    // Catches the kernel write path updating only the first FAT of the real
+    // two-copy test image: after create/write/mkdir/rename/unlink both FAT
+    // regions must stay byte-identical.
+    #[test]
+    fn write_paths_keep_both_fat_copies_identical() {
+        assert_eq!(FAT_COUNT, 2);
+        let mut image = image_bytes(&[]);
+        let pristine = image.clone();
+        {
+            let mut fs = Fat32::mount(ImageDisk { bytes: &mut image }).expect("image must mount");
+            let mut desc = fs.create_file("NEW.TXT").unwrap();
+            assert_eq!(fs.write_range(&mut desc, 0, &[0xab; 1300]).unwrap(), 1300);
+            fs.create_dir("DOCS/SUB").unwrap();
+            fs.rename("NEW.TXT", "HELLO.TXT").unwrap();
+            fs.unlink_file("HELLO.TXT").unwrap();
+        }
+        let fat_len = fat_sectors() as usize * SECTOR;
+        let first = usize::from(RESERVED_SECTORS) * SECTOR;
+        let (fat1, fat2) = (
+            &image[first..first + fat_len],
+            &image[first + fat_len..first + 2 * fat_len],
+        );
+        assert_ne!(fat1, &pristine[first..first + fat_len]);
+        assert!(fat1 == fat2, "FAT copies diverged");
+    }
 
     // Catches BPB fields the parser rejects, FAT links it flags as corrupt,
     // or a directory record it cannot match.

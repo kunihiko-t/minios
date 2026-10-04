@@ -60,6 +60,9 @@ pub struct Fat32<R> {
     volume_sectors: u32,
     fat_start: u32,
     fat_sectors: u32,
+    /// FATの面数（1か2）。readは第1 FATだけを使い、writeは全面へ写す。
+    #[cfg(not(target_arch = "riscv32"))]
+    fat_count: u32,
     data_start: u32,
     sectors_per_cluster: u8,
     root_cluster: u32,
@@ -153,6 +156,9 @@ struct Geometry {
     volume_sectors: u32,
     fat_start: u32,
     fat_sectors: u32,
+    /// FATの面数（1か2）。readは第1 FATだけを使い、writeは全面へ写す。
+    #[cfg(not(target_arch = "riscv32"))]
+    fat_count: u32,
     data_start: u32,
     sectors_per_cluster: u8,
     root_cluster: u32,
@@ -229,6 +235,8 @@ impl<R: SectorReader> Fat32<R> {
             volume_sectors: geometry.volume_sectors,
             fat_start: geometry.fat_start,
             fat_sectors: geometry.fat_sectors,
+            #[cfg(not(target_arch = "riscv32"))]
+            fat_count: geometry.fat_count,
             data_start: geometry.data_start,
             sectors_per_cluster: geometry.sectors_per_cluster,
             root_cluster: geometry.root_cluster,
@@ -1099,7 +1107,9 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
     }
 
     /// FATの`cluster`番目のentryへ`value`を書く。上位4 bitの予約位は
-    /// 保持する。
+    /// 保持する。第1 FATのsectorを読んで書き換え、同じsectorを全FAT面の
+    /// 同位置へ書く。第1面の書き込み後に第2面で失敗するとエラーを返すが、
+    /// 第1面は戻さないため、その時点でFAT面は食い違ったまま残る。
     fn set_fat_entry(
         &mut self,
         cluster: u32,
@@ -1129,9 +1139,16 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             byte_offset,
             (old & 0xf000_0000) | (value & 0x0fff_ffff),
         );
-        self.reader
-            .write_sector(lba, scratch)
-            .map_err(FatError::Read)
+        for copy in 0..self.fat_count {
+            let copy_lba = copy
+                .checked_mul(self.fat_sectors)
+                .and_then(|offset| lba.checked_add(offset))
+                .ok_or(FatError::InvalidFilesystem)?;
+            self.reader
+                .write_sector(copy_lba, scratch)
+                .map_err(FatError::Read)?;
+        }
+        Ok(())
     }
 
     /// clusterの全sectorをzero-fillする。新規割当てclusterの未定義byteと
@@ -2123,6 +2140,8 @@ fn parse_boot_sector(
         volume_sectors,
         fat_start,
         fat_sectors,
+        #[cfg(not(target_arch = "riscv32"))]
+        fat_count: fat_count as u32,
         data_start,
         sectors_per_cluster,
         root_cluster,
@@ -3226,6 +3245,114 @@ mod tests {
             fs.write_range(&mut desc, 0, b"x"),
             Err(FatError::NoSpace)
         ));
+    }
+
+    /// `mounted_writable_fixture`と同じ内容を`fat_count=2`で置いたvolume。
+    /// FATはlba 32と33の2面で、data領域はlba 34から始まり、cluster `n`は
+    /// lba `32 + n`。index 2がFAT第2面である。
+    fn mirrored_sectors() -> [(u32, [u8; 512]); 12] {
+        let mut boot = writable_boot_sector();
+        boot[16] = 2;
+
+        let mut root = [0; 512];
+        write_directory_entry(&mut root, 0, b"HELLO   TXT", 0x20, 4, 11);
+        write_directory_entry(&mut root, 1, b"SUBDIR     ", 0x10, 5, 0);
+        let mut hello = [0; 512];
+        hello[..11].copy_from_slice(b"hello world");
+        let mut subdir = [0; 512];
+        write_directory_entry(&mut subdir, 0, b".          ", 0x10, 5, 0);
+        write_directory_entry(&mut subdir, 1, b"..         ", 0x10, 2, 0);
+
+        let mut sectors = [(0, [0; 512]); 12];
+        sectors[0] = (0, boot);
+        sectors[1] = (32, writable_fat());
+        sectors[2] = (33, writable_fat());
+        sectors[3] = (34, root);
+        sectors[5] = (36, hello);
+        sectors[6] = (37, subdir);
+        for (index, sector) in sectors.iter_mut().enumerate().skip(4) {
+            sector.0 = 31 + index as u32;
+        }
+        sectors
+    }
+
+    fn mounted_mirrored_fixture() -> Fat32<MemoryReader<12>> {
+        Fat32::mount(MemoryReader::with_sectors(mirrored_sectors())).unwrap()
+    }
+
+    fn assert_fats_mirrored(fs: &Fat32<MemoryReader<12>>) {
+        assert_eq!(sector_of(fs, 32), sector_of(fs, 33));
+    }
+
+    // Catches set_fat_entry updating only the first FAT: allocation by
+    // create+write and freeing by unlink must reach both copies.
+    #[test]
+    fn mirrored_fats_match_after_write_and_unlink() {
+        let mut fs = mounted_mirrored_fixture();
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, &[0xab; 700]).unwrap(), 700);
+        assert_eq!(read_u32(sector_of(&fs, 32), 3 * 4) & 0x0fff_ffff, 6);
+        assert_fats_mirrored(&fs);
+
+        fs.unlink_file("NEW.TXT").unwrap();
+        assert_eq!(read_u32(sector_of(&fs, 32), 3 * 4) & 0x0fff_ffff, 0);
+        assert_eq!(sector_of(&fs, 32), &writable_fat());
+        assert_fats_mirrored(&fs);
+    }
+
+    #[test]
+    fn mirrored_fats_match_after_create_dir() {
+        let mut fs = mounted_mirrored_fixture();
+        fs.create_dir("NEWDIR").unwrap();
+        assert_eq!(
+            read_u32(sector_of(&fs, 32), 3 * 4) & 0x0fff_ffff,
+            0x0fff_ffff
+        );
+        assert_fats_mirrored(&fs);
+    }
+
+    // rename over an existing file frees the replaced chain (cluster 4).
+    #[test]
+    fn mirrored_fats_match_after_rename_replace() {
+        let mut fs = mounted_mirrored_fixture();
+        let mut desc = fs.create_file("OLD.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, b"new data").unwrap(), 8);
+        fs.rename("OLD.TXT", "HELLO.TXT").unwrap();
+        assert_eq!(read_u32(sector_of(&fs, 32), 4 * 4) & 0x0fff_ffff, 0);
+        assert_fats_mirrored(&fs);
+    }
+
+    // Catches the mirror loop writing a second copy on a fat_count=1
+    // volume: lba 33 is the root directory there and must keep its entries.
+    #[test]
+    fn single_fat_volume_does_not_write_past_its_fat() {
+        let mut fs = mounted_writable_fixture();
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, &[0xab; 700]).unwrap(), 700);
+        fs.create_dir("NEWDIR").unwrap();
+        fs.unlink_file("NEW.TXT").unwrap();
+        let root = sector_of(&fs, 33);
+        assert_eq!(&root[0..11], b"HELLO   TXT");
+        assert_eq!(&root[3 * 32..3 * 32 + 11], b"NEWDIR     ");
+        assert!(fs.open_file("HELLO.TXT").is_ok());
+    }
+
+    // Catches a failed second-copy write being swallowed: the error must
+    // reach the caller even though the first copy was already written.
+    #[test]
+    fn second_fat_write_failure_is_reported() {
+        let mut sectors = mirrored_sectors();
+        sectors[2].0 = u32::MAX; // lba 33（FAT第2面）を欠落させる
+        let mut fs = Fat32::mount(MemoryReader::with_sectors(sectors)).unwrap();
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert!(matches!(
+            fs.write_range(&mut desc, 0, b"x"),
+            Err(FatError::Read(ReadError::MissingSector(33)))
+        ));
+        assert_eq!(
+            read_u32(sector_of(&fs, 32), 3 * 4) & 0x0fff_ffff,
+            0x0fff_ffff
+        );
     }
 
     /// rootに`Long File Name.txt`（chain 4→5）を持つwritable fixture。
