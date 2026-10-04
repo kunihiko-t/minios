@@ -248,7 +248,7 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 - `xtask/src/cargo.rs`：Cargoの子プロセスと、コマンド、終了ステータス、出力の診断
 - `xtask/src/qemu.rs`：QEMUの引数、マーカーと対話の検証、制限時間、プロセスの終了と回収、対話記録
 - `xtask/src/disk.rs`：QEMU virtio検査用のFAT32 disk imageの生成
-- `xtask/src/docs.rs`：ローカルのMarkdownリンクと第1章から第17章までの必須構造
+- `xtask/src/docs.rs`：ローカルのMarkdownリンクと第1章から第23章までの必須構造
 - `kernel/src/main.rs`：テスト用機能ごとのマーカーとシェルの起動
 - `.github/workflows/ci.yml`：Linux上で同じ`setup`と`check`を呼ぶCI
 

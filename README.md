@@ -105,6 +105,12 @@ cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none
 15. [U-modeでELFを実行する](docs/guide/15-user-mode.md)
 16. [boot payloadを実行する](docs/guide/16-boot-payload.md)
 17. [Rustでユーザープログラムを書く](docs/guide/17-rust-guest.md)
+18. [Device Treeとヒープの成長](docs/guide/18-heap-and-fdt.md)
+19. [プリエンプティブscheduler](docs/guide/19-scheduler.md)
+20. [virtio-blkでディスクを読み書きする](docs/guide/20-virtio-blk.md)
+21. [FAT32の読み書き](docs/guide/21-fat32.md)
+22. [file descriptorとpipe](docs/guide/22-file-descriptors-and-pipes.md)
+23. [spawn、waitpid、exec](docs/guide/23-process-syscalls.md)
 
 ## 設計資料
 

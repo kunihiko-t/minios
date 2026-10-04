@@ -145,6 +145,6 @@ cargo xtask bundle --arg a --arg b --arg c --arg d --arg e --arg f --arg g --arg
 
 ## 次の章
 
-このガイドの実装順はここで終わります。
+[第18章「Device Treeとヒープの成長」](18-heap-and-fdt.md)では、複数のprocessとfile systemを支えるmachine記述と動的メモリー確保を追います。
 全章の索引は[学習ガイド](README.md)へ戻ります。
 実行基盤の詳細は[第15章「U-modeでELFを実行する」](15-user-mode.md)と[第16章「boot payloadを実行する」](16-boot-payload.md)を、ABIの規約は[MiniContainer Guest ABI](../reference/minicontainer-abi.md)を参照してください。

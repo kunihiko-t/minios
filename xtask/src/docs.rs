@@ -13,7 +13,7 @@ const REQUIRED_SECTIONS: [&str; 7] = [
     "次の章",
 ];
 
-const REQUIRED_CHAPTERS: [&str; 17] = [
+const REQUIRED_CHAPTERS: [&str; 23] = [
     "01-introduction.md",
     "02-setup.md",
     "03-no-std-and-linking.md",
@@ -31,6 +31,12 @@ const REQUIRED_CHAPTERS: [&str; 17] = [
     "15-user-mode.md",
     "16-boot-payload.md",
     "17-rust-guest.md",
+    "18-heap-and-fdt.md",
+    "19-scheduler.md",
+    "20-virtio-blk.md",
+    "21-fat32.md",
+    "22-file-descriptors-and-pipes.md",
+    "23-process-syscalls.md",
 ];
 
 const REQUIRED_PUBLICATION_FILES: [&str; 6] = [
