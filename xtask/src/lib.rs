@@ -235,6 +235,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::UserSleep) => "QEMU user-sleep test".to_owned(),
             Self::Qemu(qemu::TestKind::UserDup) => "QEMU user-dup test".to_owned(),
             Self::Qemu(qemu::TestKind::SpawnArgs) => "QEMU spawn-args test".to_owned(),
+            Self::Qemu(qemu::TestKind::UserShell) => "QEMU user-shell test".to_owned(),
             Self::Qemu(qemu::TestKind::Sched) => "QEMU sched test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIo) => "QEMU sched-io test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIoPartial) => "QEMU sched-io-partial test".to_owned(),
@@ -282,6 +283,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserSleep),
         Phase::Qemu(qemu::TestKind::UserDup),
         Phase::Qemu(qemu::TestKind::SpawnArgs),
+        Phase::Qemu(qemu::TestKind::UserShell),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -340,6 +342,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserSleep),
         Phase::Qemu(qemu::TestKind::UserDup),
         Phase::Qemu(qemu::TestKind::SpawnArgs),
+        Phase::Qemu(qemu::TestKind::UserShell),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -489,6 +492,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::UserSleep) => Some(vec![Phase::Qemu(qemu::TestKind::UserSleep)]),
         Command::Test(TestFilter::UserDup) => Some(vec![Phase::Qemu(qemu::TestKind::UserDup)]),
         Command::Test(TestFilter::SpawnArgs) => Some(vec![Phase::Qemu(qemu::TestKind::SpawnArgs)]),
+        Command::Test(TestFilter::UserShell) => Some(vec![Phase::Qemu(qemu::TestKind::UserShell)]),
         Command::Test(TestFilter::Sched) => Some(vec![Phase::Qemu(qemu::TestKind::Sched)]),
         Command::Test(TestFilter::SchedIo) => Some(vec![Phase::Qemu(qemu::TestKind::SchedIo)]),
         Command::Test(TestFilter::SchedIoPartial) => {
@@ -587,6 +591,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::UserSleep),
                 Phase::Qemu(qemu::TestKind::UserDup),
                 Phase::Qemu(qemu::TestKind::SpawnArgs),
+                Phase::Qemu(qemu::TestKind::UserShell),
                 Phase::Qemu(qemu::TestKind::Sched),
                 Phase::Qemu(qemu::TestKind::SchedIo),
                 Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -667,6 +672,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserSleep),
             Phase::Qemu(qemu::TestKind::UserDup),
             Phase::Qemu(qemu::TestKind::SpawnArgs),
+            Phase::Qemu(qemu::TestKind::UserShell),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -740,13 +746,14 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserSleep),
             Phase::Qemu(qemu::TestKind::UserDup),
             Phase::Qemu(qemu::TestKind::SpawnArgs),
+            Phase::Qemu(qemu::TestKind::UserShell),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 38], expected);
-        assert_eq!(plan.len(), 53);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 39], expected);
+        assert_eq!(plan.len(), 54);
     }
 
     #[test]

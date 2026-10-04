@@ -88,10 +88,10 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 - 学習ガイドへ第18章から第23章を追加し、第12章を第13章以降と本書への案内に縮めました。
 - guestのsyscall wrapperを`minios_guest` library（`guest/src/lib.rs`と`guest/src/sys.rs`）へまとめ、全guest programがそれを使うようにしました。
 
-### 段階1：user spaceを実用に届かせる
+### 段階1：user spaceを実用に届かせる（完了）
 
-次に、guestが「自分でprogramを書いて動かせる」水準へ到達させます。
-現在のsyscallはfileとprocessの操作、user heap、時刻と待機を備えていますが、fdの複製がないため、出力の切り替えはguestから使えません。
+段階1では、guestが「自分でprogramを書いて動かせる」水準へ到達させました。
+user heap、時刻と待機、fdの複製、spawnへの引数渡し、user library、user mode shellがそろい、FAT32上のprogramをpipeとredirectでつないで実行できます。
 
 - **`sbrk`**（完了）：guestは`SbrkAllocator`をglobal allocatorにして`Vec`と`String`を使えます（`cargo xtask test user-heap`で検証）。
 - **`clock`と`sleep`**（完了）：`clock`は`time.rs`の`uptime_millis`を返し、`sleep`は`BlockedUntil(tick)`で待機中のprocessにCPUを渡します（`cargo xtask test user-sleep`で検証）。
@@ -103,10 +103,11 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
   `argc`が0なら従来どおりpathのbasenameだけを`argv[0]`にするため、既存の呼び出し側は変わりません。
 - **user library crate**（完了）：`minios_guest` libraryへ`entry!`、`println!`、`File`、`spawn`のような薄い型を加え、全sample guestを書き直しました。
   `_start`と`panic_handler`は各programから消え、不正なpointer、失効したfd、型で表せない引数を渡す検査だけが生のsyscall wrapperを使います。
-- **user mode shell**：FAT32上の`SH.ELF`としてuser modeのshellを書き、path指定の起動、`|`によるpipe、`<`と`>`によるredirectを実装します。
-  kernel shellは起動と診断に残し、通常の操作はuser shellへ移します。
+- **user mode shell**（完了）：`SH.ELF`はstdinを1行ずつ読み、`BIN/NAME.ELF`へ解決したcommandを最大3個の`|`によるpipelineと`<`、`>`によるredirectで起動します（`cargo xtask test user-shell`で検証）。
+  shellは`dup2`でfd 0と1を付け替えてから`spawn`し、consoleへ戻してから起動順に`waitpid`します。
+  kernel shellは起動と診断に残し、`cargo xtask run`は引き続きkernel shellを起動します。
 
-受け入れ条件は`cargo xtask test user-heap`、`user-sleep`、`user-dup`、`user-shell`の四経路で、特に`user-shell`はQEMU上で`cat FILE.TXT | wc`相当のpipelineが動くことを観測します。
+受け入れ条件は`cargo xtask test user-heap`、`user-sleep`、`user-dup`、`user-shell`の四経路で、特に`user-shell`はQEMU上で`cat FILE.TXT | wc`相当のpipelineが動くことを観測します（完了）。
 
 ### 段階2：kernelの堅牢化と整理
 

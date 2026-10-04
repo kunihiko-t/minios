@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|sched|sched-io|sched-io-partial|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|shell]
 cargo xtask check
 ```
 
@@ -81,12 +81,13 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 34. QEMU user-sleepテスト
 35. QEMU user-dupテスト
 36. QEMU spawn-argsテスト
-37. QEMU schedテスト
-38. QEMU sched-ioテスト
-39. QEMU sched-io-partialテスト
-40. QEMUシェルテスト
+37. QEMU user-shellテスト
+38. QEMU schedテスト
+39. QEMU sched-ioテスト
+40. QEMU sched-io-partialテスト
+41. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
 ### QEMUの三つの検証モード
 
@@ -111,7 +112,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`spawn-args`、`sched`、`sched-io`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`spawn-args`、`user-shell`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -174,6 +175,13 @@ childのExit frameが写した`spawn-child`より先に来る順序のexact照�
 `argc`の上限超過と長すぎる文字列の`EINVAL`、読めないargvの`EFAULT`がchildを作らないことを確かめてから、`argc`が0のspawnと`echoargs`、`alpha`、`beta gamma`を渡したspawnを順に`waitpid`します。
 childがbasenameの`ECHO.ELF`と渡した3個の文字列をこの順で標準出力へ書き、失敗したspawnがpidを消費していないことも確かめてから、`spawn args verified`を出して終了コード42を返すことを要求します。
 frame列のexact照合と最後のdiagnosticで、argvの中身と順序、frameの回収を検査します。
+`user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`をdisk imageの`BIN`へ置きます。
+Ready frameの後にscriptをStdin frameとして送り、最後に長さ0のStdin frameでEOFを伝えます。
+scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、`echo redirected > OUT.TXT`、`cat OUT.TXT`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、存在しない`nosuch`の順です。
+1 frameに2行を詰めた送り方と、1行を2 frameへ分けた送り方も含めます。
+shellは行ごとにchildを起動順に`waitpid`し、pipelineでconsoleへ書くのは最後のcommandだけです。
+最後のcommandは前段が全員終了してからEOFを読んで出力するため、並行に走るpipelineでもframe列は確定し、exact照合できます。
+`nosuch`の標準エラー1行と、EOFで終了したshellのExit(0)と`ok code=0`の回収診断までを要求します。
 
 シェルテストは**対話モード**です。
 通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`rm Long File Name.txt`、`ls`、`cat Long File Name.txt`、`mkdir NEWDIR`、`ls`、`rmdir DOCS`、`rmdir NEWDIR`、`ls`、`mv HELLO.TXT WORLD.TXT`、`ls`、`mv WORLD.TXT HELLO.TXT`、`mv DOCS NOTESD`、`ls`、`cat NOTESD/NOTE.TXT`、`mv NOTESD DOCS`、`mv HELLO.TXT DOCS/MOVED.TXT`、`ls`、`cat DOCS/MOVED.TXT`、`mv DOCS/MOVED.TXT HELLO.TXT`、`not-a-command`、`shutdown`を標準入力へ送ります。
@@ -255,10 +263,11 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 47. QEMU user-sleep test
 48. QEMU user-dup test
 49. QEMU spawn-args test
-50. QEMU sched test
-51. QEMU sched-io test
-52. QEMU sched-io-partial test
-53. QEMU shell test
+50. QEMU user-shell test
+51. QEMU sched test
+52. QEMU sched-io test
+53. QEMU sched-io-partial test
+54. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -297,12 +306,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/53] cargo fmt --all -- --check
-phase 1/53 passed (elapsed: ...s)
+[1/54] cargo fmt --all -- --check
+phase 1/54 passed (elapsed: ...s)
 ...
-[53/53] QEMU shell test
-phase 53/53 passed (elapsed: ...s)
-summary: PASSED all 53 phases (elapsed: ...s)
+[54/54] QEMU shell test
+phase 54/54 passed (elapsed: ...s)
+summary: PASSED all 54 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

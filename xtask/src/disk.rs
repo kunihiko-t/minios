@@ -3,7 +3,8 @@
 //! kernel側`storage::fat32`が要求するgeometry制約
 //! (`bytes_per_sector=512`、`data_cluster_count >= 65525`等) を満たす
 //! superfloppy (パーティション無し) imageを組み立てる。
-//! root directoryには`HELLO.TXT` 1件だけを置き、内容は[`HELLO_TXT`]。
+//! root directoryには`HELLO.TXT`（内容は[`HELLO_TXT`]）、`DOCS`、LFN名のfileを置き、
+//! 検査によっては`BIN` directoryも足す。
 //!
 //! imageはsparse fileとして書き出す: 総サイズ約34 MiBだが、実際に書くのは
 //! boot sector・FAT 2面・root directory・file dataの数sectorだけである。
@@ -34,8 +35,12 @@ const LFN_CLUSTER: u32 = 6;
 const CHILD_CLUSTER: u32 = 7;
 const FDCHILD_CLUSTER: u32 = 8;
 const PIPECH_CLUSTER: u32 = 9;
-/// `DOCS/ECHO.ELF`の先頭cluster。fileは連続clusterのchainで置く。
-const ECHO_CLUSTER: u32 = 10;
+/// 追加file（`image_bytes`の`files`）を置き始めるcluster。`BIN`
+/// directoryが要ればその1 clusterを先に取り、各fileは連続clusterの
+/// chainで順に置く。
+const EXTRA_FIRST_CLUSTER: u32 = 10;
+/// directory 1 cluster分のrecord数。
+const DIR_RECORDS: usize = SECTOR / 32;
 
 /// `DOCS/CHILD.ELF`のfile長。guestの`spawn`検査が起動する最小ELF64で、
 /// ELF header + program header + code + messageをfile offset 0から
@@ -303,11 +308,26 @@ impl minios_kernel::storage::SectorReader for SliceReader<'_> {
     }
 }
 
+/// `NAME.EXT`を空白詰めのraw 8.3名へ変える。fixture用なので、8.3に
+/// 収まらない名前はpanicで止める。
+fn short_name(name: &str) -> [u8; 11] {
+    let (stem, extension) = name.split_once('.').unwrap_or((name, ""));
+    assert!(
+        (1..=8).contains(&stem.len()) && extension.len() <= 3,
+        "fixture name {name} must be 8.3"
+    );
+    let mut raw = [b' '; 11];
+    raw[..stem.len()].copy_from_slice(stem.as_bytes());
+    raw[8..8 + extension.len()].copy_from_slice(extension.as_bytes());
+    raw
+}
+
 /// 完全なdisk imageを`Vec`として組み立てる。テストでparserと直接照合する
 /// ため、sparse書き出しとは別に全byteを返す経路も用意する。
-/// `echo`を渡すと、その内容を`DOCS/ECHO.ELF`として連続clusterへ置く。
-/// spawn-args検査がbuild済みの`minios-guest` ELFを渡す。
-fn image_bytes(echo: Option<&[u8]>) -> Vec<u8> {
+/// `files`の各`(path, bytes)`を連続clusterへ置く。pathは`DOCS/NAME.EXT`か
+/// `BIN/NAME.EXT`で、`BIN`のfileが1個でもあればrootに`BIN` directoryを作る。
+/// spawn-args検査は`DOCS/ECHO.ELF`、user-shell検査は`BIN`配下のtoolを渡す。
+fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     let fat_sectors = fat_sectors();
     let data_start = u32::from(RESERVED_SECTORS) + FAT_COUNT as u32 * fat_sectors;
     let mut image = std::vec![0u8; VOLUME_SECTORS as usize * SECTOR];
@@ -347,14 +367,34 @@ fn image_bytes(echo: Option<&[u8]>) -> Vec<u8> {
     set(&mut fat, CHILD_CLUSTER, 0x0fff_ffff);
     set(&mut fat, FDCHILD_CLUSTER, 0x0fff_ffff);
     set(&mut fat, PIPECH_CLUSTER, 0x0fff_ffff);
-    let echo_clusters = echo.map_or(0, |elf| elf.len().div_ceil(SECTOR) as u32);
-    for cluster in ECHO_CLUSTER..ECHO_CLUSTER + echo_clusters {
-        let last = cluster + 1 == ECHO_CLUSTER + echo_clusters;
-        set(
-            &mut fat,
-            cluster,
-            if last { 0x0fff_ffff } else { cluster + 1 },
+    // 追加fileのcluster割り当て。`BIN` directoryを先に、fileを順に置く。
+    let mut next_cluster = EXTRA_FIRST_CLUSTER;
+    let bin_cluster = files
+        .iter()
+        .any(|(path, _)| path.starts_with("BIN/"))
+        .then(|| {
+            set(&mut fat, next_cluster, 0x0fff_ffff);
+            next_cluster += 1;
+            next_cluster - 1
+        });
+    let mut placed = Vec::new();
+    for (path, bytes) in files {
+        let (parent, name) = path.split_once('/').expect("fixture path needs a parent");
+        assert!(
+            matches!(parent, "DOCS" | "BIN"),
+            "fixture parent {parent} is not supported"
         );
+        let clusters = bytes.len().div_ceil(SECTOR).max(1) as u32;
+        for cluster in next_cluster..next_cluster + clusters {
+            let last = cluster + 1 == next_cluster + clusters;
+            set(
+                &mut fat,
+                cluster,
+                if last { 0x0fff_ffff } else { cluster + 1 },
+            );
+        }
+        placed.push((parent, short_name(name), next_cluster, *bytes));
+        next_cluster += clusters;
     }
     for copy in 0..FAT_COUNT {
         let start = (u32::from(RESERVED_SECTORS) + u32::from(copy) * fat_sectors) as usize * SECTOR;
@@ -392,6 +432,9 @@ fn image_bytes(echo: Option<&[u8]>) -> Vec<u8> {
             LFN_CLUSTER,
             LFN_TXT.len() as u32,
         );
+        if let Some(cluster) = bin_cluster {
+            dir_entry(root, 5, b"BIN        ", 0x10, cluster, 0);
+        }
     }
 
     // --- DOCS directory (cluster 4): `.`/`..` + NOTE.TXT + ELF fixtures ---
@@ -432,15 +475,23 @@ fn image_bytes(echo: Option<&[u8]>) -> Vec<u8> {
             PIPECH_CLUSTER,
             PIPECH_ELF_LEN as u32,
         );
-        if let Some(elf) = echo {
-            dir_entry(
-                docs,
-                6,
-                b"ECHO    ELF",
-                0x20,
-                ECHO_CLUSTER,
-                elf.len() as u32,
-            );
+        let files = placed.iter().filter(|file| file.0 == "DOCS");
+        for (index, (_, name, cluster, bytes)) in (6..).zip(files) {
+            assert!(index < DIR_RECORDS, "DOCS fixture directory is full");
+            dir_entry(docs, index, name, 0x20, *cluster, bytes.len() as u32);
+        }
+    }
+
+    // --- BIN directory: `.`/`..` + 追加file ---
+    if let Some(bin_cluster) = bin_cluster {
+        let bin_start = (data_start + (bin_cluster - 2)) as usize * SECTOR;
+        let bin = &mut image[bin_start..bin_start + SECTOR];
+        dir_entry(bin, 0, b".          ", 0x10, bin_cluster, 0);
+        dir_entry(bin, 1, b"..         ", 0x10, ROOT_CLUSTER, 0);
+        let files = placed.iter().filter(|file| file.0 == "BIN");
+        for (index, (_, name, cluster, bytes)) in (2..).zip(files) {
+            assert!(index < DIR_RECORDS, "BIN fixture directory is full");
+            dir_entry(bin, index, name, 0x20, *cluster, bytes.len() as u32);
         }
     }
 
@@ -457,9 +508,9 @@ fn image_bytes(echo: Option<&[u8]>) -> Vec<u8> {
     image[fdchild_start..fdchild_start + FDCHILD_ELF_LEN].copy_from_slice(&fdchild_elf());
     let pipech_start = (data_start + (PIPECH_CLUSTER - 2)) as usize * SECTOR;
     image[pipech_start..pipech_start + PIPECH_ELF_LEN].copy_from_slice(&pipech_elf());
-    if let Some(elf) = echo {
-        let echo_start = (data_start + (ECHO_CLUSTER - 2)) as usize * SECTOR;
-        image[echo_start..echo_start + elf.len()].copy_from_slice(elf);
+    for (_, _, cluster, bytes) in &placed {
+        let start = (data_start + (cluster - 2)) as usize * SECTOR;
+        image[start..start + bytes.len()].copy_from_slice(bytes);
     }
 
     image
@@ -475,15 +526,17 @@ impl DiskImage {
     /// FAT32 imageを組み立て、使用sectorだけを書いたsparse fileとして
     /// temp dirへ配置する。
     pub fn create() -> Result<Self, String> {
-        Self::create_with(None)
+        Self::create_with_files(&[])
     }
 
     /// `create`に加えて`echo`を`DOCS/ECHO.ELF`として置く。
     pub fn create_with_echo(echo: &[u8]) -> Result<Self, String> {
-        Self::create_with(Some(echo))
+        Self::create_with_files(&[("DOCS/ECHO.ELF", echo)])
     }
 
-    fn create_with(echo: Option<&[u8]>) -> Result<Self, String> {
+    /// `create`に加えて`files`の各`(path, bytes)`を置く。pathは
+    /// `DOCS/NAME.EXT`か`BIN/NAME.EXT`（8.3名）である。
+    pub fn create_with_files(files: &[(&str, &[u8])]) -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!(
             "minios-disk-{}-{}.img",
             std::process::id(),
@@ -492,7 +545,7 @@ impl DiskImage {
                 .expect("system clock must be after Unix epoch")
                 .as_nanos()
         ));
-        let image = image_bytes(echo);
+        let image = image_bytes(files);
         let mut file = std::fs::File::create(&path)
             .map_err(|error| format!("could not create {}: {error}", path.display()))?;
         // 非0 byteを含む領域だけをseek+writeし、残りはholeのままにする。
@@ -537,7 +590,7 @@ mod tests {
     // or a directory record it cannot match.
     #[test]
     fn generated_image_mounts_and_reads_hello_txt() {
-        let image = image_bytes(None);
+        let image = image_bytes(&[]);
         let reader = SliceReader { bytes: &image };
         let mut fs = Fat32::mount(reader).expect("generated image must mount");
 
@@ -575,12 +628,51 @@ mod tests {
     #[test]
     fn echo_fixture_reads_back_across_clusters() {
         let elf: Vec<u8> = (0..1300u32).map(|index| index as u8).collect();
-        let image = image_bytes(Some(&elf));
+        let image = image_bytes(&[("DOCS/ECHO.ELF", &elf)]);
         let mut fs = Fat32::mount(SliceReader { bytes: &image }).expect("image must mount");
         let mut content = Vec::new();
         fs.read_file("DOCS/ECHO.ELF", |chunk| content.extend_from_slice(chunk))
             .expect("DOCS/ECHO.ELF must be readable");
         assert_eq!(content, elf);
+    }
+
+    // Catches BIN files overlapping each other or the BIN directory cluster:
+    // several multi-cluster files must each read back byte for byte, and the
+    // BIN directory must list them in order next to an existing DOCS file.
+    #[test]
+    fn bin_files_read_back_across_clusters() {
+        let first: Vec<u8> = (0..1300u32).map(|index| index as u8).collect();
+        let second: Vec<u8> = (0..700u32).map(|index| (index * 7) as u8).collect();
+        let third = b"short".to_vec();
+        let image = image_bytes(&[
+            ("BIN/SH.ELF", &first),
+            ("DOCS/ECHO.ELF", &third),
+            ("BIN/CAT.ELF", &second),
+            ("BIN/WC.ELF", &third),
+        ]);
+        let mut fs = Fat32::mount(SliceReader { bytes: &image }).expect("image must mount");
+
+        let mut root = Vec::new();
+        fs.for_each_root_entry(|entry| root.push(entry.name().to_owned()))
+            .expect("root listing must succeed");
+        assert_eq!(root, ["HELLO.TXT", "DOCS", "Long File Name.txt", "BIN"]);
+        let mut bin = Vec::new();
+        fs.for_each_entry("BIN", |entry| bin.push(entry.name().to_owned()))
+            .expect("BIN listing must succeed");
+        assert_eq!(bin, ["SH.ELF", "CAT.ELF", "WC.ELF"]);
+
+        for (path, expected) in [
+            ("BIN/SH.ELF", &first),
+            ("BIN/CAT.ELF", &second),
+            ("BIN/WC.ELF", &third),
+            ("DOCS/ECHO.ELF", &third),
+            ("HELLO.TXT", &HELLO_TXT.to_vec()),
+        ] {
+            let mut content = Vec::new();
+            fs.read_file(path, |chunk| content.extend_from_slice(chunk))
+                .unwrap_or_else(|error| panic!("{path} must be readable: {error:?}"));
+            assert_eq!(&content, expected, "{path}");
+        }
     }
 
     // Catches a fat_sectors estimate that leaves data_cluster_count under the

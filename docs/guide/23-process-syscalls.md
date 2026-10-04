@@ -91,6 +91,34 @@ trap handlerの実行窓ではまだ旧imageのpage tableが`satp`に載って�
 `exec`は旧imageを`retired_image`へ退避し、`dispatch_exec`はtrap slotの`UserContext`を新imageの初期contextで上書きして`SyscallFlow::Exec`を返します。
 run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取り出して`destroy`し、processはrunnableのまま次のdispatchで新imageのELF entryから走ります。
 
+### user shellのpipeline
+
+ここまでのsystem callを組み合わせると、kernelを変えずにuser modeのshellを書けます。
+[`guest/src/bin/sh.rs`](../../guest/src/bin/sh.rs)は、FAT32 diskへ置く`SH.ELF`としてstdinを1行ずつ読みます。
+`|`で区切った最大3個のcommandをpipelineとして起動し、最初のcommandには`< file`、最後のcommandには`> file`を付けられます。
+`/`を含まないcommand名`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を含む語はそのままpathとして解決します。
+built-inは`exit [code]`だけで、cwdを持たないため`cd`はありません。
+起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)です。
+
+MiniOSには`fork`がないため、childのfd 0と1を差し替える場所はshell自身のfd tableです。
+shellは起動時にconsoleのfd 0と1を`dup2`でtable末尾の2個へ退避し、各commandを次の手順で起動します。
+
+1. 前段のpipeのread端か`< file`のfdがあれば、`dup2`でfd 0へ付け替えます。
+2. 後段があれば`pipe`を作り、write端を`dup2`でfd 1へ付け替えてから元のwrite端のfdを閉じます。
+3. 最後のcommandで`> file`があれば、そのfdを`dup2`でfd 1へ付け替えます。
+4. `spawn`し、childへこの時点のfd tableの複製を渡します。
+5. 退避しておいたconsoleでfd 0と1を戻します。この`dup2`がshellの持っていたpipeのwrite端を閉じるため、write端を持つのは書き手のchildだけになります。
+
+pipeのEOFは全processのfd tableからwrite端が消えたときに決まるため、手順2と5でshellのwrite端を残さないことが必須です。
+一つでも残っていれば、読み手のchildは書き手が終了してもEOFを得られず、shellの`waitpid`とともに止まります。
+なお、各pipeのread端はその書き手のchildにも複製されますが、読み手のEOFには影響しません。
+
+全員を起動してから、shellは起動順にpidを`waitpid`し、最後のcommandの終了codeを覚えます。
+前段が後段より先に終わるとは限りませんが、終了したprocessの記録は台帳に残るため、順に待てば全員を回収できます。
+pipelineの段数はshellを含めて`MAX_PROCS`（4）に収まる3個までです。
+`spawn`の失敗は、不在pathの`ENOENT`を`not found`、table満杯やframe不足の`ENOMEM`をprocess枠かmemoryの不足として標準エラーへ1行出し、次の行へ進みます。
+2段目以降で失敗した場合、前段は読み手のいないpipeへ書き続けてbufferが満杯になると止まるため、shellは前段のpipeをEOFまで読み捨ててから待ちます。
+
 ## 実行と確認
 
 guestは[`guest/src/bin/file_spawn.rs`](../../guest/src/bin/file_spawn.rs)、[`file_waitpid.rs`](../../guest/src/bin/file_waitpid.rs)、[`file_exec.rs`](../../guest/src/bin/file_exec.rs)、[`file_fdinherit.rs`](../../guest/src/bin/file_fdinherit.rs)です。
@@ -168,6 +196,37 @@ childの`DOCS/ECHO.ELF`は手書きではなく、argvを順にstdoutへ書く`m
 失敗したspawnがpidを消費していれば2個のchildはpid 1と2にならず、親は70で終了します。
 harnessはframe列を完全一致で照合し、最後のdiagnosticで全frameの回収も確かめます。
 
+user shellは次のコマンドで確かめます。
+
+```console
+$ cargo xtask test user-shell
+...
+MiniOS payload: ok code=0
+...
+summary: PASSED all 1 phases (elapsed: ...)
+```
+
+harnessは`SH.ELF`をboot payloadにし、build済みの`cat`、`wc`、`echo`をdisk imageの`BIN`へ置いてから、次のscriptをStdin frameで送り、最後にEOFを送ります。
+
+```text
+echo hello world
+cat HELLO.TXT
+cat HELLO.TXT | wc
+echo redirected > OUT.TXT
+cat OUT.TXT
+wc < HELLO.TXT
+echo a b c | cat | wc
+nosuch
+```
+
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`が順に届き、標準エラーには`sh: nosuch: not found (errno -2)`が届きます。
+pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
+このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。
+EOFを読んだshellは0で終了します。
+
+`cargo xtask run`は従来どおりkernel shellを起動します。
+user shellを手元で試すには、`cargo xtask test user-shell`のscriptを変えて期待frameとの差を見るのが手軽です。
+
 ## よくある失敗
 
 - `insert`の前にpidを使う：`Process::spawn`が返すprocessのpidは仮の`usize::MAX`で、実際のpidは`ProcessTable::insert`が採番します。
@@ -175,6 +234,7 @@ harnessはframe列を完全一致で照合し、最後のdiagnosticで全frame�
 - `waitpid`のblock時に`sepc`を戻し忘れる：再開後にecallの次の命令へ進み、`a0`に終了codeが入らないまま続行します。
 - 同じpidを二回`waitpid`する：台帳の記録は`take_exit`で一回だけ消費され、二回目は`ECHILD`です。
 - `exec`の中で旧imageを`destroy`する：trap窓では旧page tableが`satp`に載っているため、解放はrun loopがkernel `satp`へ戻った後に行います。
+- pipelineでshellのwrite端を残す：`spawn`の後にfd 1をconsoleへ戻さないと、shellがwrite端を持ち続けるため、読み手のchildはEOFを得られません。
 - 継承したfdのoffsetが共有されると考える：fd tableはsnapshotのcopyであり、共有されるのはpipe端のbufferだけです。
 
 ## 演習

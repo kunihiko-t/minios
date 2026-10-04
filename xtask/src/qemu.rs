@@ -170,6 +170,7 @@ pub enum TestKind {
     UserSleep,
     UserDup,
     SpawnArgs,
+    UserShell,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -235,6 +236,7 @@ impl TestKind {
             Self::UserSleep => unreachable!("the user-sleep test boots the normal kernel"),
             Self::UserDup => unreachable!("the user-dup test boots the normal kernel"),
             Self::SpawnArgs => unreachable!("the spawn-args test boots the normal kernel"),
+            Self::UserShell => unreachable!("the user-shell test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
@@ -304,6 +306,7 @@ impl TestKind {
             Self::UserSleep => unreachable!("the user-sleep test verifies raw control frames"),
             Self::UserDup => unreachable!("the user-dup test verifies raw control frames"),
             Self::SpawnArgs => unreachable!("the spawn-args test verifies raw control frames"),
+            Self::UserShell => unreachable!("the user-shell test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
                 unreachable!("the payload-stdin test verifies raw control frames")
@@ -516,7 +519,8 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let bundle = PayloadBundle::create_stdin()?;
         let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
-        let completed = run_stdin_command(command, command_line.clone(), deadline)?;
+        let completed =
+            run_stdin_command(command, command_line.clone(), STDIN_TEST_FRAMES, deadline)?;
         bundle.remove();
         return verify_payload_stdin_result(
             &command_line,
@@ -587,6 +591,37 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
             &SPAWN_ARGS_EXPECTED_FRAMES,
+        );
+    }
+
+    if kind == TestKind::UserShell {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_user_shell()?;
+        let cat = built_bin_elf_bytes(crate::guest::GUEST_CAT)?;
+        let wc = built_bin_elf_bytes(crate::guest::GUEST_WC)?;
+        let echo = built_bin_elf_bytes(crate::guest::GUEST_ECHO)?;
+        let disk = crate::disk::DiskImage::create_with_files(&[
+            ("BIN/CAT.ELF", &cat),
+            ("BIN/WC.ELF", &wc),
+            ("BIN/ECHO.ELF", &echo),
+        ])
+        .map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed =
+            run_stdin_command(command, command_line.clone(), &user_shell_stdin(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        let expected = user_shell_expected_frames();
+        let expected: Vec<&[u8]> = expected.iter().map(Vec::as_slice).collect();
+        return verify_exact_frames(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+            &expected,
         );
     }
 
@@ -955,6 +990,7 @@ fn run_shell_command(
 fn run_stdin_command(
     mut command: Command,
     command_line: String,
+    input: &[u8],
     deadline: Duration,
 ) -> Result<CompletedProcess, QemuError> {
     let mut child = command
@@ -979,7 +1015,7 @@ fn run_stdin_command(
         .stdin
         .take()
         .expect("stdin test stdin must be piped")
-        .write_all(STDIN_TEST_FRAMES);
+        .write_all(input);
     if let Err(error) = write_result {
         let cleanup = terminate_and_reap(&mut child);
         let mut output = readers.join().unwrap_or_else(|join_error| join_error);
@@ -1595,6 +1631,88 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
     PAYLOAD_EXIT_FRAME,
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
+
+/// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
+/// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
+const USER_SHELL_SCRIPT: [&[u8]; 8] = [
+    b"echo hello world\ncat HELLO.TXT\n",
+    b"cat HELLO",
+    b".TXT | wc\n",
+    b"echo redirected > OUT.TXT\n",
+    b"cat OUT.TXT\n",
+    b"wc < HELLO.TXT\n",
+    b"echo a b c | cat | wc\n",
+    b"nosuch\n",
+];
+
+fn control_frame(kind: FrameKind, payload: &[u8]) -> Vec<u8> {
+    let mut frame = FrameHeader {
+        kind,
+        payload_len: payload.len() as u32,
+    }
+    .encode()
+    .to_vec();
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// scriptのStdin frame列と、末尾のEOF（長さ0のStdin frame）。
+fn user_shell_stdin() -> Vec<u8> {
+    let mut input = Vec::new();
+    for chunk in USER_SHELL_SCRIPT.iter().chain([&&b""[..]]) {
+        input.extend(control_frame(FrameKind::Stdin, chunk));
+    }
+    input
+}
+
+/// user-shell検査で期待されるcontrol frame列。
+///
+/// shellはcommandを1行ずつ実行し、childを起動順に`waitpid`してから次の
+/// 行を読むため、行の間で出力が混ざらない。pipelineではconsoleへ書くのは
+/// 最後のcommandだけで、前段はpipeへ書く。最後のcommandはEOFを読んで
+/// から出力するが、EOFは前段が全員終了してwrite端が消えた後にしか来ない。
+/// このため前段のExitは必ず最後のcommandの出力より前に並ぶ。Exit frameは
+/// pidを含まず全員0で終わるので、前段同士の終了順はframe列に現れない。
+/// これらにより、並行に走るpipelineでもframe列はexact照合できる。
+fn user_shell_expected_frames() -> Vec<Vec<u8>> {
+    let stdout = |text: &[u8]| control_frame(FrameKind::Stdout, text);
+    let exit = || control_frame(FrameKind::Exit, &0u32.to_le_bytes());
+    vec![
+        PAYLOAD_READY_FRAME.to_vec(),
+        control_frame(
+            FrameKind::Diagnostic,
+            b"MiniOS sched: spawned pid=0 name=sh\n",
+        ),
+        // echo hello world
+        stdout(b"hello world\n"),
+        exit(),
+        // cat HELLO.TXT
+        stdout(crate::disk::HELLO_TXT),
+        exit(),
+        // cat HELLO.TXT | wc
+        exit(),
+        stdout(b"1 3 18\n"),
+        exit(),
+        // echo redirected > OUT.TXT
+        exit(),
+        // cat OUT.TXT
+        stdout(b"redirected\n"),
+        exit(),
+        // wc < HELLO.TXT
+        stdout(b"1 3 18\n"),
+        exit(),
+        // echo a b c | cat | wc
+        exit(),
+        exit(),
+        stdout(b"1 3 6\n"),
+        exit(),
+        // nosuch
+        control_frame(FrameKind::Stderr, b"sh: nosuch: not found (errno -2)\n"),
+        // EOFでshell自身が0で終了する。
+        exit(),
+        control_frame(FrameKind::Diagnostic, b"\r\nMiniOS payload: ok code=0\n"),
+    ]
+}
 
 /// file-stat検査で期待されるcontrol frame列。guestがstat/fstatの
 /// metadata・errno・EFAULTの経路を通してから、検証済みの旨をstdoutへ
@@ -2454,6 +2572,12 @@ impl PayloadBundle {
     fn create_spawn_args() -> Result<Self, QemuError> {
         let elf = built_bin_elf_bytes(crate::guest::GUEST_SPAWN_ARGS)?;
         Self::create_with(assemble_test_bundle(b"version=1\nname=spawn-args\n", &elf)?)
+    }
+
+    /// user-shell検査用bundle。shellをboot payloadにする。
+    fn create_user_shell() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_SH)?;
+        Self::create_with(assemble_test_bundle(b"version=1\nname=sh\n", &elf)?)
     }
 
     fn create_sched() -> Result<Self, QemuError> {
