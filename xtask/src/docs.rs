@@ -102,6 +102,13 @@ pub enum DocsError {
         path: PathBuf,
         expected_phase_count: usize,
     },
+    StaleHarnessPhaseList {
+        path: PathBuf,
+    },
+    HandWrittenPhaseCount {
+        path: PathBuf,
+        line: usize,
+    },
 }
 
 impl DocsError {
@@ -117,7 +124,9 @@ impl DocsError {
             | Self::ForbiddenPublicationPath { path }
             | Self::MissingPublicationText { path, .. }
             | Self::InvalidPublicationPolicy { path, .. }
-            | Self::InvalidHarnessExample { path, .. } => path,
+            | Self::InvalidHarnessExample { path, .. }
+            | Self::StaleHarnessPhaseList { path }
+            | Self::HandWrittenPhaseCount { path, .. } => path,
         }
     }
 
@@ -193,6 +202,16 @@ impl fmt::Display for DocsError {
             } => write!(
                 formatter,
                 "{}: cargo xtask check example must show {expected_phase_count} phases",
+                path.display()
+            ),
+            Self::StaleHarnessPhaseList { path } => write!(
+                formatter,
+                "{}: numbered phase list must match the cargo xtask check plan",
+                path.display()
+            ),
+            Self::HandWrittenPhaseCount { path, line } => write!(
+                formatter,
+                "{}:{line}: do not hand-write the phase count; link to docs/guide/11-test-harness.md instead",
                 path.display()
             ),
         }
@@ -303,38 +322,81 @@ pub fn check_guide_structure(root: &Path) -> Result<(), DocsError> {
     Ok(())
 }
 
-/// 教材の実行例が、`cargo xtask check`の実際の段階数と一致するか調べる。
-pub fn check_harness_example(root: &Path, expected_phase_count: usize) -> Result<(), DocsError> {
+/// 教材の実行例と段階一覧が、`cargo xtask check`の実際の検査計画と一致するか調べる。
+/// `commands`は各段階の見出しに表示するcommand文字列を計画順に並べたもの。
+pub fn check_harness_example(root: &Path, commands: &[String]) -> Result<(), DocsError> {
     let path = Path::new("docs/guide/11-test-harness.md");
     let contents = read_text(root, path)?;
+    let count = commands.len();
+    let first = commands.first().map_or("", String::as_str);
+    let last = commands.last().map_or("", String::as_str);
     let expected = [
         "$ cargo xtask check".to_owned(),
-        format!("[1/{expected_phase_count}] cargo fmt --all -- --check"),
-        format!("phase 1/{expected_phase_count} passed (elapsed: ...s)"),
+        format!("[1/{count}] {first}"),
+        format!("phase 1/{count} passed (elapsed: ...s)"),
         "...".to_owned(),
-        format!("[{expected_phase_count}/{expected_phase_count}] QEMU shell test"),
-        format!("phase {expected_phase_count}/{expected_phase_count} passed (elapsed: ...s)"),
-        format!("summary: PASSED all {expected_phase_count} phases (elapsed: ...s)"),
+        format!("[{count}/{count}] {last}"),
+        format!("phase {count}/{count} passed (elapsed: ...s)"),
+        format!("summary: PASSED all {count} phases (elapsed: ...s)"),
     ];
-
-    if console_blocks(&contents).any(|block| block == expected) {
-        return Ok(());
+    if !fenced_blocks(&contents, "console").any(|block| block == expected) {
+        return Err(DocsError::InvalidHarnessExample {
+            path: path.to_owned(),
+            expected_phase_count: count,
+        });
     }
 
-    Err(DocsError::InvalidHarnessExample {
-        path: path.to_owned(),
-        expected_phase_count,
+    let list: Vec<String> = commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| format!("{}. {command}", index + 1))
+        .collect();
+    if !fenced_blocks(&contents, "text").any(|block| block == list) {
+        return Err(DocsError::StaleHarnessPhaseList {
+            path: path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// 本文に「49段階」のような段階数を手書きしていないか調べる。
+/// 段階数は第11章の検査済み実行例だけに置き、他の文書はそこへlinkする。
+pub fn check_hand_written_phase_counts(root: &Path) -> Result<(), DocsError> {
+    for source in markdown_files(root)? {
+        let contents = read_text(root, &source)?;
+        let mut fence = None;
+        for (line_index, line) in contents.lines().enumerate() {
+            if update_fence(line, &mut fence) || fence.is_some() {
+                continue;
+            }
+            if has_digit_before(line, "段階") {
+                return Err(DocsError::HandWrittenPhaseCount {
+                    path: source,
+                    line: line_index + 1,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn has_digit_before(line: &str, word: &str) -> bool {
+    line.match_indices(word).any(|(index, _)| {
+        line[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_ascii_digit())
     })
 }
 
-fn console_blocks(contents: &str) -> impl Iterator<Item = Vec<String>> + '_ {
-    // 本文の数字ではなく、読者が実行結果として読むconsoleブロックだけを比較する。
+fn fenced_blocks<'a>(contents: &'a str, info: &str) -> impl Iterator<Item = Vec<String>> + 'a {
+    // 本文の数字ではなく、読者が実行結果や一覧として読むfenced blockだけを比較する。
     let mut blocks = Vec::new();
     let mut fence = None;
     let mut console_block = None;
 
     for line in contents.lines() {
-        let opens_console = fence.is_none() && is_console_fence(line);
+        let opens_console = fence.is_none() && is_fence_with_info(line, info);
         if update_fence(line, &mut fence) {
             if opens_console {
                 console_block = Some(Vec::new());
@@ -353,7 +415,7 @@ fn console_blocks(contents: &str) -> impl Iterator<Item = Vec<String>> + '_ {
     blocks.into_iter()
 }
 
-fn is_console_fence(line: &str) -> bool {
+fn is_fence_with_info(line: &str, info: &str) -> bool {
     let Some(content) = commonmark_content(line) else {
         return false;
     };
@@ -368,7 +430,7 @@ fn is_console_fence(line: &str) -> bool {
         .iter()
         .take_while(|candidate| **candidate == marker)
         .count();
-    marker_length >= 3 && content[marker_length..].trim() == "console"
+    marker_length >= 3 && content[marker_length..].trim() == info
 }
 
 pub fn check_publication_files(root: &Path) -> Result<(), DocsError> {
@@ -1742,16 +1804,33 @@ mod tests {
         assert_eq!(check_guide_structure(temp.path()), Ok(()));
     }
 
+    fn harness_commands(count: usize) -> Vec<String> {
+        (1..=count)
+            .map(|index| format!("phase command {index}"))
+            .collect()
+    }
+
+    fn harness_chapter(count: usize, list: &[String]) -> String {
+        let numbered: String = list
+            .iter()
+            .enumerate()
+            .map(|(index, command)| format!("{}. {command}\n", index + 1))
+            .collect();
+        format!(
+            "```text\n{numbered}```\n\n```console\n$ cargo xtask check\n[1/{count}] phase command 1\nphase 1/{count} passed (elapsed: ...s)\n...\n[{count}/{count}] phase command {count}\nphase {count}/{count} passed (elapsed: ...s)\nsummary: PASSED all {count} phases (elapsed: ...s)\n```\n"
+        )
+    }
+
     #[test]
     fn harness_example_rejects_a_phase_total_that_differs_from_the_plan() {
         let temp = TestTree::new();
         temp.write(
             "docs/guide/11-test-harness.md",
-            "```console\n$ cargo xtask check\n[1/27] cargo fmt --all -- --check\nphase 1/27 passed (elapsed: ...s)\n...\n[27/27] QEMU shell test\nphase 27/27 passed (elapsed: ...s)\nsummary: PASSED all 27 phases (elapsed: ...s)\n```\n",
+            &harness_chapter(27, &harness_commands(28)),
         );
 
         assert_eq!(
-            check_harness_example(temp.path(), 28),
+            check_harness_example(temp.path(), &harness_commands(28)),
             Err(DocsError::InvalidHarnessExample {
                 path: PathBuf::from("docs/guide/11-test-harness.md"),
                 expected_phase_count: 28,
@@ -1760,13 +1839,59 @@ mod tests {
     }
 
     #[test]
-    fn harness_example_accepts_the_plan_phase_total() {
+    fn harness_example_rejects_a_phase_list_that_differs_from_the_plan() {
+        let temp = TestTree::new();
+        let mut stale = harness_commands(28);
+        stale[3] = "renamed phase".to_owned();
+        temp.write(
+            "docs/guide/11-test-harness.md",
+            &harness_chapter(28, &stale),
+        );
+
+        assert_eq!(
+            check_harness_example(temp.path(), &harness_commands(28)),
+            Err(DocsError::StaleHarnessPhaseList {
+                path: PathBuf::from("docs/guide/11-test-harness.md"),
+            })
+        );
+    }
+
+    #[test]
+    fn harness_example_accepts_the_plan_phase_total_and_list() {
         let temp = TestTree::new();
         temp.write(
             "docs/guide/11-test-harness.md",
-            "```console\n$ cargo xtask check\n[1/28] cargo fmt --all -- --check\nphase 1/28 passed (elapsed: ...s)\n...\n[28/28] QEMU shell test\nphase 28/28 passed (elapsed: ...s)\nsummary: PASSED all 28 phases (elapsed: ...s)\n```\n",
+            &harness_chapter(28, &harness_commands(28)),
         );
 
-        assert_eq!(check_harness_example(temp.path(), 28), Ok(()));
+        assert_eq!(
+            check_harness_example(temp.path(), &harness_commands(28)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn hand_written_phase_count_in_prose_is_rejected() {
+        let temp = TestTree::new();
+        temp.write("README.md", "# MiniOS\n\n全体を33段階で検査します。\n");
+
+        assert_eq!(
+            check_hand_written_phase_counts(temp.path()),
+            Err(DocsError::HandWrittenPhaseCount {
+                path: PathBuf::from("README.md"),
+                line: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn phase_words_without_a_leading_digit_or_inside_code_are_accepted() {
+        let temp = TestTree::new();
+        temp.write(
+            "docs/reference/roadmap.md",
+            "### 段階0：整合\n\n五つの段階に分け、二段階で検証します。\n\n```text\n49段階\n```\n",
+        );
+
+        assert_eq!(check_hand_written_phase_counts(temp.path()), Ok(()));
     }
 }

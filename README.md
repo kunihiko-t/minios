@@ -117,7 +117,8 @@ cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none
 cargo xtask check
 ```
 
-このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、QEMUの16経路を31段階で検査します。
+このコマンドは、書式、Markdownリンク、ガイドの構造、公開文書、RV64とRV32のClippyおよびクロスビルド、ホストテスト、全QEMU経路を順に検査します。
+段階の一覧は[テストハーネスの章](docs/guide/11-test-harness.md)にあります。
 
 ## 現在の制約
 
