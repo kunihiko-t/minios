@@ -78,6 +78,11 @@ pub enum ProcessState {
     /// 到着・端のclose・いずれかのprocessのexitで`Runnable`へ戻る。
     /// 値は待つ対象のpipe id。
     BlockedOnPipe(usize),
+    /// `sleep`が経過待ちで中断した。値は起床するtick番号で、run loopが
+    /// `wake_sleepers`へ渡す現在tickがこれに達すると`Runnable`へ戻る。
+    /// syscallは0を書いてecallの次へ進めてあるため、早く起こすと短い
+    /// sleepになる。そのためstdin到着の`wake_all_blocked`では起こさない。
+    BlockedUntil(u64),
 }
 
 /// `open`/`create`がprocessへ割り当てたfile descriptor 1個。
@@ -545,6 +550,11 @@ impl Process {
         }
     }
 
+    /// `sleep`で`deadline` tickまでの経過待ちへ移す。trap窓からのみ呼ばれる。
+    pub fn block_until(&mut self, deadline: u64) {
+        self.state = ProcessState::BlockedUntil(deadline);
+    }
+
     /// fd tableのsnapshot。`spawn`がchildの初期tableとして引き継ぐため
     /// trap窓から呼ばれる。copyなのでcaller側tableへの影響はない。
     pub const fn file_fds_snapshot(&self) -> FileFdTable {
@@ -880,13 +890,23 @@ impl ProcessTable {
         None
     }
 
-    /// processがありながら`pick_next`が`None`＝全processがstdin待ち。
-    /// stdinへbyteが届いたら呼び、blocked processをすべてrunnableへ戻す。
+    /// stdinへbyteが届いたら呼び、blocked processをrunnableへ戻す。
     /// pid待ちのprocessも起こされるが、再dispatchで条件未達なら再び
-    /// blockする（疑似wakeは許容する）。
+    /// blockする（疑似wakeは許容する）。sleep中のprocessはecallを
+    /// やり直さないため疑似wakeが短いsleepになってしまい、対象から外す。
     pub fn wake_all_blocked(&mut self) {
         for process in self.procs.iter_mut() {
-            if !process.is_runnable() {
+            if !process.is_runnable() && !matches!(process.state, ProcessState::BlockedUntil(_)) {
+                process.wake();
+            }
+        }
+    }
+
+    /// deadlineが`now`（現在tick）以下のsleep中processを`Runnable`へ戻す。
+    /// run loopが`pick_next`の直前に毎回呼ぶ。
+    pub fn wake_sleepers(&mut self, now: u64) {
+        for process in self.procs.iter_mut() {
+            if matches!(process.state, ProcessState::BlockedUntil(deadline) if deadline <= now) {
                 process.wake();
             }
         }
@@ -1510,6 +1530,26 @@ mod tests {
         table.wake_all_blocked();
         let sequence: Vec<usize> = (0..4).map(|_| table.pick_next().unwrap()).collect();
         assert_eq!(sequence, [0, 1, 0, 1]);
+    }
+
+    // Catches a sleeper waking early: wake_sleepers must release it only
+    // once the tick reaches its deadline, and stdin's wake_all_blocked must
+    // leave it asleep because the syscall already returned 0.
+    #[test]
+    fn sleepers_wake_only_at_their_deadline() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        table.insert(fixture.spawn("p0")).expect("insert p0");
+        table.insert(fixture.spawn("p1")).expect("insert p1");
+
+        table.get_mut(0).expect("slot 0 is live").block_until(5);
+        table.wake_all_blocked();
+        table.wake_sleepers(4);
+        assert_eq!(table.pick_next(), Some(1));
+        assert_eq!(table.pick_next(), Some(1));
+
+        table.wake_sleepers(5);
+        assert_eq!(table.pick_next(), Some(0));
     }
 
     // Catches the all-blocked case collapsing into an empty-table verdict:

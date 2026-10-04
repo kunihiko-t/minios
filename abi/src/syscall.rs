@@ -46,6 +46,14 @@ pub enum SyscallNumber {
     /// 旧breakを返す。0は現在のbreakを返す。負のincrementは`EINVAL`、
     /// 上限超過やframe不足は`ENOMEM`で、どちらもbreakを動かさない。
     Sbrk = 23,
+    /// boot以降の経過時間をmillisecondで返す。分解能はtimer tickの10 ms。
+    Clock = 24,
+    /// `a0`のmillisecond以上が経過するまで呼び出しprocessをblockし、
+    /// 0を返す。待つ間は他processが走る。0はyieldと同じ扱いである。
+    Sleep = 25,
+    /// 現在のtime sliceを手放してschedulerへ戻り、0を返す。他に
+    /// runnable processがなければすぐに自分へ戻る。
+    Yield = 26,
 }
 
 pub const STDIN: usize = 0;
@@ -195,6 +203,9 @@ mod tests {
         assert_eq!(SyscallNumber::Exec as usize, 21);
         assert_eq!(SyscallNumber::Pipe as usize, 22);
         assert_eq!(SyscallNumber::Sbrk as usize, 23);
+        assert_eq!(SyscallNumber::Clock as usize, 24);
+        assert_eq!(SyscallNumber::Sleep as usize, 25);
+        assert_eq!(SyscallNumber::Yield as usize, 26);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);

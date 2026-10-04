@@ -474,6 +474,19 @@ impl ControlSource for UartControlSource<'_> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         unsafe { crate::sbrk_current_process(increment) }
     }
+
+    /// guestの`clock`へtimer tickから求めた経過millisecondを返す。
+    #[cfg(target_arch = "riscv64")]
+    fn clock(&mut self) -> isize {
+        isize::try_from(crate::time::uptime_millis()).unwrap_or(isize::MAX)
+    }
+
+    /// guestの`sleep`で現在processを起床tickまでのsleep状態へmarkする。
+    #[cfg(target_arch = "riscv64")]
+    fn sleep(&mut self, millis: usize) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::sleep_current_process(millis) }
+    }
 }
 
 /// probe/mountの失敗をguest向けerrnoへ写像する。

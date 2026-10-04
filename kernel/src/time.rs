@@ -29,6 +29,23 @@ pub fn ticks_to_millis(ticks: u64) -> u64 {
     ticks.saturating_mul(1_000) / TICKS_PER_SECOND
 }
 
+/// `sleep`の`millis`を起床tickへ変換する。tick数は切り上げ、さらに1を
+/// 足す。現在のtickは既に途中まで経過しているため、`now + 切り上げ値`
+/// だと実時間で最大1 tick早く起きてしまうからである。
+pub fn sleep_deadline(now: u64, millis: usize) -> u64 {
+    let ticks = (millis as u64)
+        .saturating_mul(TICKS_PER_SECOND)
+        .div_ceil(1_000);
+    now.saturating_add(ticks).saturating_add(1)
+}
+
+/// timer割り込みがpendingか（`sip.STIP`）。run loopのidle待ちは
+/// S-mode割り込みを遮断したまま回るため、これをpollしてtickを進める。
+#[cfg(target_arch = "riscv64")]
+pub fn interrupt_pending() -> bool {
+    crate::arch::riscv64::csr::read_sip() & (1 << 5) != 0
+}
+
 /// `timebase_hz`はFDTの`/cpus` `timebase-frequency`が示す`time` CSRの周波数。
 /// ティック周期は`timebase_hz / TICKS_PER_SECOND`サイクルへ丸める。
 #[cfg(target_arch = "riscv64")]
@@ -68,7 +85,18 @@ fn schedule_next() -> Result<(), minios_kernel::sbi::SbiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::ticks_to_millis;
+    use super::{sleep_deadline, ticks_to_millis};
+
+    // Catches sleep waking early: the tick count must round up and add one
+    // for the partially elapsed current tick.
+    #[test]
+    fn sleep_deadline_rounds_up_past_the_current_tick() {
+        assert_eq!(sleep_deadline(7, 1), 9);
+        assert_eq!(sleep_deadline(7, 10), 9);
+        assert_eq!(sleep_deadline(7, 11), 10);
+        assert_eq!(sleep_deadline(7, 50), 13);
+        assert_eq!(sleep_deadline(u64::MAX, usize::MAX), u64::MAX);
+    }
 
     #[test]
     fn converts_ticks_to_milliseconds() {

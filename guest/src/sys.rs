@@ -190,3 +190,18 @@ pub fn sys_pipe(out: *mut [u32; 2]) -> isize {
 pub fn sys_sbrk(increment: isize) -> isize {
     ecall(SyscallNumber::Sbrk, increment as usize, 0, 0, 0)
 }
+
+/// `clock`を呼ぶ。boot以降の経過millisecond（10 ms単位）を返す。
+pub fn sys_clock() -> isize {
+    ecall(SyscallNumber::Clock, 0, 0, 0, 0)
+}
+
+/// `sleep`を呼ぶ。`millis`以上経過してから0を返す。0はyieldと同じ。
+pub fn sys_sleep(millis: usize) -> isize {
+    ecall(SyscallNumber::Sleep, millis, 0, 0, 0)
+}
+
+/// `yield`を呼ぶ。残りのtime sliceを手放し、再び選ばれると0を返す。
+pub fn sys_yield() -> isize {
+    ecall(SyscallNumber::Yield, 0, 0, 0, 0)
+}

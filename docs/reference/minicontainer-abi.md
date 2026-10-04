@@ -177,6 +177,9 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 21 | `exec` | `a0=path pointer`、`a1=path length` | `path`のfileをELFとして読み込み、呼び出しprocessのimageを置き替える。pidとfd tableは引き継ぐ。成功時は戻らず新imageのentryから始まる。負のerrnoは`ENOENT`/`EISDIR`/`EINVAL`/`EFAULT`/`ENOMEM` |
 | 22 | `pipe` | `a0=out pointer` | kernel管理のbyte channelを1本作成し、read端とwrite端のfdを`a0`のuser bufferへ8 byte（2個の`u32`）で書き込む。戻り値は`PIPE_OUT_LEN`（8）か負のerrno |
 | 23 | `sbrk` | `a0=increment（符号付き）` | 呼び出しprocessのheap breakを`increment` byte進め、旧breakを返す。0は現在のbreakを返す。負のerrnoは`EINVAL`/`ENOMEM` |
+| 24 | `clock` | なし | boot以降の経過時間をmillisecondの非負整数で返す。分解能はtimer tickの10 ms |
+| 25 | `sleep` | `a0=milliseconds` | 少なくとも`a0`のmillisecondが経過してから0を返す。待つ間は他processが走る。0は`yield`と同じ |
+| 26 | `yield` | なし | 残りのtime sliceを手放して次のrunnable processへ順番を回し、再び選ばれると0を返す |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -229,6 +232,13 @@ image page数とheap page数の合計が2,048を超える要求や、breakがgua
 frameの確保が途中で尽きた場合も`ENOMEM`を返してbreakを動かしませんが、map済みのpageはprocessが所有したまま残り、次の`sbrk`が再利用します。
 縮小は未対応で、負のincrementは`EINVAL`です。
 breakはimageに属するため、`exec`は新imageの初期breakから始まり、`spawn`したchildも自身のimageの初期breakから始まります。
+
+`clock`は100 Hzのtimer tick数をmillisecondへ換算した値を返すため、値は10 ms刻みで増えます。
+`sleep`はmillisecondをtick数へ切り上げ、途中まで経過した現在のtickの分として1 tickを足した起床tickまで呼び出しprocessを`BlockedUntil`へ移します。
+そのため`sleep`の前後に読んだ`clock`の差は、必ず指定値以上になります。
+`sleep`は戻り値0を書いてecallの次へ進めてからblockするため、`read`や`waitpid`と違ってecallは再実行されず、stdinの到着でも早く起きません。
+`yield`と`sleep(0)`はprocessをblockせず、timer割り込みと同じ経路で次のprocessを選ばせます。
+runnableなprocessがほかになければ、呼び出し側がすぐに再び選ばれます。
 負のABI error値は次のとおりです。
 
 | 値 | 名前 | 条件 |
@@ -249,7 +259,7 @@ breakはimageに属するため、`exec`は新imageの初期breakから始まり
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdへの`lseek`/`pread`/`pwrite` |
 | `-32` | `EPIPE` | read端がすべて閉じたpipeへの`write` |
-| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe`/`sbrk` |
+| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe`/`sbrk`/`sleep` |
 | `-39` | `ENOTEMPTY` | `rmdir`の対象directoryに`.`と`..`以外のentryが残っている |
 
 ## 初期スタック ABI v1

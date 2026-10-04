@@ -156,3 +156,10 @@ path = "src/bin/sched_r.rs"
 test = false
 bench = false
 doctest = false
+
+[[bin]]
+name = "minios-guest-user-sleep"
+path = "src/bin/user_sleep.rs"
+test = false
+bench = false
+doctest = false

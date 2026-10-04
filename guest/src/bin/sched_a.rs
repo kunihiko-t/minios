@@ -1,35 +1,24 @@
-//! MiniOS scheduler検証用のCPU-bound guest。
+//! MiniOS scheduler検証用のguest。
 //!
-//! "a1\n" → busy-wait → "a2\n" → busy-wait → "a3\n" → exit(0) と動く。
-//! busy-waitの途中でtimerプリエンプションが効けば、同居するsched_bの出力が
-//! a1とa3の間へ挟まる。harnessはその交差をもって実際の切り替えを確認する。
+//! "a1\n" → yield → "a2\n" → yield → "a3\n" → yield → exit(0) と動く。
+//! 最初のyieldで同居するsched_bへ順番が回るため、b列の出力がa1とa3の間へ
+//! 挟まる。harnessはその交差をもって実際の切り替えを確認する。
+//! 以前はbusy-waitでtimerプリエンプションを待っていたが、それではtime slice
+//! の長さとQEMUの速度に結果が左右される。yieldなら切り替えの時点が
+//! guestの命令列で決まる。
 
 #![no_std]
 #![no_main]
 
 use core::arch::naked_asm;
 use minios_abi::syscall::STDOUT;
-use minios_guest::sys::{sys_exit, sys_write};
-
-/// 1回のbusy-waitの反復数。QEMU TCGでおおよそ数百msになり、
-/// 100 Hzのtimer tickを複数回またぐ長さにしてある。
-const SPIN_ITERATIONS: usize = 60_000_000;
-
-/// プリエンプションされても進行するbusy-wait。timer trapはuser registerを
-/// 保存・復元するため、counter値は割り込みの前後で変わらない。
-fn spin() {
-    let mut counter = 0usize;
-    while counter < SPIN_ITERATIONS {
-        counter += 1;
-        core::hint::black_box(counter);
-    }
-}
+use minios_guest::sys::{sys_exit, sys_write, sys_yield};
 
 #[unsafe(no_mangle)]
 extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     for marker in [b"a1\n", b"a2\n", b"a3\n"] {
         sys_write(STDOUT, marker.as_ptr(), marker.len());
-        spin();
+        sys_yield();
     }
     sys_exit(0);
 }

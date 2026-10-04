@@ -201,6 +201,21 @@ pub trait ControlSource {
         let _ = increment;
         Err(ENOSYS)
     }
+
+    /// boot以降の経過millisecondを返す。負の値はそのまま`a0`へ返す
+    /// errnoである。default実装は`ENOSYS`。
+    fn clock(&mut self) -> isize {
+        ENOSYS
+    }
+
+    /// 呼び出しprocessを`millis`（1以上）経過までのsleep状態へmarkする。
+    /// dispatchは`Ok`で`a0`へ0を書き`Yield`を返すため、guestは起床後に
+    /// ecallの次から再開する。`Err`はそのまま`a0`へ返すerrnoである。
+    /// default実装は`ENOSYS`。
+    fn sleep(&mut self, millis: usize) -> Result<(), isize> {
+        let _ = millis;
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -228,6 +243,11 @@ pub enum SyscallFlow<E, SE = E> {
     /// 解放する。process自体はrunnableのまま残り、次のdispatchで
     /// 新しいsatpとcontextで`__run_user`へ入る。
     Exec,
+    /// `yield`または`sleep`が残りのtime sliceを手放した。`a0`は0で、
+    /// `sepc`はecallの次を指したままである。run loopはtimer preemptと
+    /// 同じく扱い、次のprocessを選ぶ。`sleep`はcontrol層がcallerを
+    /// sleep状態へmark済みなので、deadlineまで選ばれない。
+    Yield,
 }
 
 /// `a7`のsystem call番号に従って`context`を処理する。
@@ -304,6 +324,29 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
             result.map_or_else(|errno| errno as usize, |old| old as usize),
         );
         SyscallFlow::Resume
+    } else if number == SyscallNumber::Clock as usize {
+        context.set_register(10, source.clock() as usize);
+        SyscallFlow::Resume
+    } else if number == SyscallNumber::Sleep as usize {
+        // `sleep(0)`はmarkせずyieldと同じ経路へ流す。
+        let millis = context.register(10);
+        match if millis == 0 {
+            Ok(())
+        } else {
+            source.sleep(millis)
+        } {
+            Ok(()) => {
+                context.set_register(10, 0);
+                SyscallFlow::Yield
+            }
+            Err(errno) => {
+                context.set_register(10, errno as usize);
+                SyscallFlow::Resume
+            }
+        }
+    } else if number == SyscallNumber::Yield as usize {
+        context.set_register(10, 0);
+        SyscallFlow::Yield
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -2903,6 +2946,64 @@ mod tests {
 
         let mut fake = FakeSource::scripted(b"");
         let (context, _) = dispatch_fixture(number, 0, 0, 0, &mut sink, &mut fake, &mut scratch());
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches clock/sleep/yield wiring: clock passes the source value
+    // through, sleep(0) and yield must not touch the source, sleep(n) must
+    // mark via the source and return Yield with a0=0 (not rewind to re-sleep),
+    // and a source error must come back as errno without yielding.
+    #[test]
+    fn clock_sleep_and_yield_return_the_documented_flows() {
+        struct TimeSource {
+            slept: Option<usize>,
+            result: Result<(), isize>,
+        }
+        impl ControlSource for TimeSource {
+            type Error = SinkError;
+            fn read_stdin(&mut self, _output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+                Ok(Some(0))
+            }
+            fn clock(&mut self) -> isize {
+                1234
+            }
+            fn sleep(&mut self, millis: usize) -> Result<(), isize> {
+                self.slept = Some(millis);
+                self.result
+            }
+        }
+        let mut sink = FakeSink::default();
+        let mut source = TimeSource {
+            slept: None,
+            result: Ok(()),
+        };
+        let clock = SyscallNumber::Clock as usize;
+        let sleep = SyscallNumber::Sleep as usize;
+        let yield_ = SyscallNumber::Yield as usize;
+
+        let (context, flow) =
+            dispatch_fixture(clock, 0, 0, 0, &mut sink, &mut source, &mut scratch());
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 1234);
+
+        for (number, a0) in [(yield_, 9), (sleep, 0)] {
+            let (context, flow) =
+                dispatch_fixture(number, a0, 0, 0, &mut sink, &mut source, &mut scratch());
+            assert_eq!(flow, SyscallFlow::Yield);
+            assert_eq!(context.register(10), 0);
+            assert_eq!(source.slept, None);
+        }
+
+        let (context, flow) =
+            dispatch_fixture(sleep, 50, 0, 0, &mut sink, &mut source, &mut scratch());
+        assert_eq!(flow, SyscallFlow::Yield);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.slept, Some(50));
+
+        source.result = Err(ENOSYS);
+        let (context, flow) =
+            dispatch_fixture(sleep, 50, 0, 0, &mut sink, &mut source, &mut scratch());
+        assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOSYS as usize);
     }
 

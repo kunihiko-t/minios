@@ -1980,6 +1980,24 @@ unsafe fn sbrk_current_process(increment: isize) -> Result<u64, isize> {
     result
 }
 
+/// 現在processを`millis`後の起床tickまでsleep状態へmarkする (`sleep`
+/// syscall)。dispatchは続けて`Yield`を返し、run loopは`wake_sleepers`が
+/// 起こすまでこのprocessを選ばない。process contextがなければ`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn sleep_current_process(millis: usize) -> Result<(), isize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let Some(process) = (unsafe { process.as_mut() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    process.block_until(time::sleep_deadline(time::ticks(), millis));
+    Ok(())
+}
+
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
 #[cfg(target_arch = "riscv64")]
 fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
@@ -2052,6 +2070,12 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
         }
         SyscallFlow::Exec => {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXEC, Ordering::Relaxed);
+            RunExit::ReturnToKernel
+        }
+        // `yield`/`sleep`はtimer preemptと同じoutcomeでkernelへ戻る。
+        // `sleep`のcallerはcontrol層がsleep状態へmark済みである。
+        SyscallFlow::Yield => {
+            USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_PREEMPTED, Ordering::Relaxed);
             RunExit::ReturnToKernel
         }
         SyscallFlow::Fatal(()) => {
@@ -2200,6 +2224,8 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
                 arch::riscv64::sbi::ResetReason::SystemFailure,
             )
         }
+        // probeにはschedulerがないため、自分へ戻るyieldとしてそのまま再開する。
+        SyscallFlow::Yield => RunExit::Resume,
         SyscallFlow::Fatal(()) => {
             crate::console::emergency_print(format_args!(
                 "[MINIOS_TEST] failed: user-syscall sink failure\r\n"
@@ -2270,6 +2296,8 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
                 arch::riscv64::sbi::ResetReason::SystemFailure,
             )
         }
+        // probeにはschedulerがないため、自分へ戻るyieldとしてそのまま再開する。
+        SyscallFlow::Yield => RunExit::Resume,
         SyscallFlow::Fatal(()) => {
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SINK_FAILURE, Ordering::Relaxed);
             RunExit::ReturnToKernel
@@ -2782,13 +2810,24 @@ fn run_boot_payload(
         if console::stdin_pending() {
             table.wake_all_blocked();
         }
+        // deadlineに達したsleep中processを選対象へ戻す。
+        table.wake_sleepers(time::ticks());
         let Some(pid) = table.pick_next() else {
-            // 占有slotが残るのに選べない＝全processがstdin待ち。
-            // kernelがdata-readyをpollし、到着したら全員を起こす。
-            while !console::stdin_pending() {
+            // 占有slotが残るのに選べない＝全processがstdinかsleepなどで待っている。
+            // ここはS-mode割り込みを遮断したままなので、timer割り込みは
+            // trapせず`sip.STIP`がpendingになるだけでtickは進まない。そこで
+            // stdinのdata-readyと並べてSTIPもpollし、立っていれば
+            // `handle_interrupt`でtickを進めて再アームする。trap経路を
+            // S-mode用に足す`wfi`案より変更が小さく、既存のstdin pollとも
+            // 同じ形で済む。loop先頭へ戻ると`wake_sleepers`が起床を判定する。
+            while !console::stdin_pending() && !time::interrupt_pending() {
                 core::hint::spin_loop();
             }
-            table.wake_all_blocked();
+            if time::interrupt_pending()
+                && let Err(error) = time::handle_interrupt()
+            {
+                fatal_payload_error(format_args!("MiniOS payload: timer, {error:?}\r\n"));
+            }
             continue;
         };
         let process = table.get_mut(pid).expect("picked pid is live");
