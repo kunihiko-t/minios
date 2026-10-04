@@ -1,9 +1,9 @@
 # MiniOS学習ガイド
 
 このガイドは、前の章で作った機能を次の章の土台にする実習教材です。
-初めて読むときは第1章から第17章まで順に進み、実装中は各章の「実行と確認」と「よくある失敗」を参照してください。
+初めて読むときは第1章から第23章まで順に進み、実装中は各章の「実行と確認」と「よくある失敗」を参照してください。
 
-## 全17章
+## 全23章
 
 1. [MiniOSで学ぶこと](01-introduction.md)：到達点を知り、ホストとゲストの境界を分類する。
 2. [開発環境とQEMU](02-setup.md)：RustターゲットとQEMUを、再現可能なコマンドで診断する。
@@ -16,19 +16,25 @@
 9. [物理メモリーとページ管理](09-physical-memory.md)：ビットマップの所有権と統計値の不変条件を検証する。
 10. [UART対話シェル](10-shell.md)：入力長の制限とコマンドの作用を分離する。
 11. [テストハーネスの仕組み](11-test-harness.md)：ホスト、RV32とRV64のクロスビルド、QEMU、CIを同じ検査計画で検証する。
-12. [次に作るもの](12-next-steps.md)：完了した順序変更と、その後の拡張を依存関係で説明する。
+12. [次に作るもの](12-next-steps.md)：第13章以降の実装順を依存関係で説明し、発展ロードマップへ案内する。
 13. [Sv39と単一アドレス空間](13-sv39.md)：三段page walk、PTE権限、activeなカーネル写像を検証する。
 14. [ELFを実行前アドレス空間へ配置する](14-elf-loading.md)：検証済みELFからinactiveな`LoadedImage`を構築して回収する。
 15. [U-modeでELFを実行する](15-user-mode.md)：`sret`、`sscratch`、system call、終了後の回収を追う。
 16. [boot payloadを実行する](16-boot-payload.md)：MiniBundleの検証、read-only mapping、QEMU loaderを追う。
 17. [Rustでユーザープログラムを書く](17-rust-guest.md)：`no_std`のguest、linker配置、`argc/argv`、`write`と`exit`、MiniBundle生成を追う。
+18. [Device Treeとヒープの成長](18-heap-and-fdt.md)：DTBからmachine記述を発見し、free-listヒープがframe poolから成長する流れを追う。
+19. [プリエンプティブscheduler](19-scheduler.md)：timer割り込みでprocessを切り替え、stdin待ちのprocessをblockする仕組みを追う。
+20. [virtio-blkでディスクを読み書きする](20-virtio-blk.md)：virtio-mmioのdevice初期化とvirtqueueによるsector転送を追う。
+21. [FAT32の読み書き](21-fat32.md)：cluster chain、長いfile名、pathの解決、作成と削除と改名を追う。
+22. [file descriptorとpipe](22-file-descriptors-and-pipes.md)：processごとのfd table、位置指定I/O、metadata、kernel所有のpipeを追う。
+23. [spawn、waitpid、exec](23-process-syscalls.md)：guestからのprocess生成、終了codeの回収、imageの置き換え、fdの継承を追う。
 
 ## ガイド内の移動
 
 各章末の「次の章」には、前後の章と必要な資料へのリンクがあります。
 最初は「次の章」のリンクをたどり、用語やアドレスを確認したときはブラウザーの戻る操作で同じ位置へ戻ると読み進めやすくなります。
-第1章の前と第17章の次は、この索引です。
-`01-...md`から`17-...md`までの各章は、「学習目標」「背景」「実装」「実行と確認」「よくある失敗」「演習」「次の章」の七つの節を持ちます。
+第1章の前と第23章の次は、この索引です。
+`01-...md`から`23-...md`までの各章は、「学習目標」「背景」「実装」「実行と確認」「よくある失敗」「演習」「次の章」の七つの節を持ちます。
 `cargo xtask check`は、この構造も検査します。
 
 [リポジトリのREADME](../../README.md) | [全体構成](../reference/architecture.md) | [問題の切り分け方](../reference/troubleshooting.md)

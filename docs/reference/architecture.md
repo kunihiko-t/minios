@@ -145,7 +145,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   `user-exit`、`payload`、`payload-args`、`payload-stdin`経路はstdout、必要な場合はstderr、Exit、回収をcontrol frameで観測します。
   `payload-args`経路のbundleにはbuild済みRust guestを格納します。
   `sched`経路は二つのguestを持つmanifest v2 bundleを通常カーネルへ渡し、stdoutの交差と`PROC_EXIT` frameを検査します。
-- `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第17章までの七つの必須節を検査します。
+- `docs.rs`：リポジトリ内の相対Markdown linkと、第1章から第23章までの七つの必須節を検査します。
   code fence、同じ長さのbacktickによるinline code、escapeされた区切り文字はlink解析から除きます。
 - `lib.rs`：公開commandを段階の計画へ変換し、RV64とRV32のクロスビルド、host test、user runtimeとpayloadのQEMU testを実行します。
 

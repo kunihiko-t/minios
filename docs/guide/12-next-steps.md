@@ -2,73 +2,64 @@
 
 ## 学習目標
 
-OSの実装順を、すべての将来機能に共通する一本道ではなく、今回の受け入れ条件に必要な依存関係として説明できるようになります。
-Device Treeと汎用ヒープをSv39より先に置いた旧順序と、固定容量の単一アドレス空間を先行させた現在の順序を比較します。
-実装済みのU-mode遷移、user trap context、`write`、`exit`、boot payload、Device Treeを確認し、その後の拡張を考えます。
+OSの実装順を、すべての将来機能に共通する一本道ではなく、受け入れ条件に必要な依存関係として説明できるようになります。
+Device Treeと汎用ヒープをSv39より先に置いた旧順序と、固定容量の単一アドレス空間を先行させた実際の順序を比較します。
+第13章以降で追う機能と、その後の計画を記した[発展ロードマップ](../reference/roadmap.md)の位置づけを確認します。
 
 ## 背景
 
 旧ロードマップは、Device Treeで利用可能なRAMを発見し、汎用ヒープからページテーブルの管理情報を確保した後にSv39へ進む順序でした。
 この順序は複数のmachineと可変個のアドレス空間へ広げやすい一方、ハードウェア発見、動的確保、仮想メモリーの失敗を同じ段階へ持ち込みます。
 
-MiniContainerの最初の実行単位に必要なのは、QEMU `virt`上で一つのユーザーイメージを配置できるアドレス空間です。
-そこでSv39とELF loaderの段階では、固定された128 MiB RAMとUARTの配置を維持し、2,688個までの所有フレームを静的な`AddressSpaceStorage`へ記録しました。
-この上限に収まる一つのactiveなカーネル空間と一つのinactiveなユーザー空間に対象を絞ったため、Device Treeと汎用ヒープを前提にせずSv39とELF loaderを先に検証できました。
+MiniContainerの最初の実行単位に必要なのは、QEMU `virt`上で一つのユーザーイメージを配置できるアドレス空間でした。
+そこでSv39とELF loaderの段階では、固定された128 MiB RAMとUARTの配置を維持し、所有フレームを静的な表へ記録しました。
+一つのactiveなカーネル空間と一つのinactiveなユーザー空間に対象を絞ったため、Device Treeと汎用ヒープを前提にせずSv39とELF loaderを先に検証できました。
 
 この順序変更は「Device Treeとヒープが不要になった」ことを意味しませんでした。
-Device Tree対応は完了しており、`kernel_main`はOpenSBIが`a1`へ渡すDTBからRAM範囲、UARTベース、timebaseを発見し、固定アドレスへの依存をmachine記述へ置き換えました。
-汎用ヒープも導入済みであり、managed RAM末尾からfree-listで始まり、枯渇時にはフレームアロケーターから隣接ページを得て下方向へ成長します。
-このヒープを使い、address spaceごとの所有フレーム台帳`AddressSpaceStorage`は固定容量の静的arenaから可変長の`Vec`へ置き換わりました。
+U-mode実行が動いた後にDevice Treeとヒープを導入し、所有フレームの静的な表はヒープ上の可変長な台帳へ置き換わりました。
+その上に複数processのscheduler、virtio-blkとFAT32、file descriptor、processを生成するsystem callが積み上がっています。
 
 ## 実装
 
-物理フレームアロケーター、Sv39のactiveなカーネル空間、静的RISC-V 64 ELFから作る`LoadedImage`、U-mode実行、MiniBundle payload、DTBからmachine記述を発見するDevice Tree解析、固定領域上のfree-listヒープ、最大4 processのプリエンプティブround-robinが完成しています。
-実行済みの接続は次のとおりです。
+第13章から第23章は、次の順序で機能を追います。
+各章の前提は直前までの章であり、順序そのものが依存関係を表しています。
 
-1. **U-mode遷移とuser trap context**：`LoadedImage`のentryとuser stack上端から初期registerを作り、`sscratch`を使うkernel stackへtrapを保存して`sret`します。
-2. **`write` system call**：U-modeの`ecall`はuser pointerとPTE権限を検査し、stdoutまたはstderr control frameへbyteを送ります。
-3. **`exit` system call**：終了codeをExit frame（複数imageでは`ProcExit` frame）で通知し、user address spaceとkernel trap stackの所有frameを回収します。
-4. **MiniBundle payload統合**：予約物理windowからMiniBundle内のELFを二段階で検証し、使用pageだけをS-mode read-onlyでmapします。
-5. **processとscheduler**：manifest v2の各imageを`Process`としてspawnし、U-mode中のtimer割り込みで中断したcontextを保存して、round-robinで次のprocessへ切り替えます。
+1. **アドレス空間と実行**：[第13章](13-sv39.md)のSv39、[第14章](14-elf-loading.md)のELF配置、[第15章](15-user-mode.md)のU-mode実行、[第16章](16-boot-payload.md)のboot payload、[第17章](17-rust-guest.md)のRust guest。
+2. **動的な資源管理**：[第18章](18-heap-and-fdt.md)のDevice Treeとヒープの成長、[第19章](19-scheduler.md)のプリエンプティブscheduler。
+3. **永続データとprocess間の連携**：[第20章](20-virtio-blk.md)のvirtio-blk、[第21章](21-fat32.md)のFAT32、[第22章](22-file-descriptors-and-pipes.md)のfile descriptorとpipe、[第23章](23-process-syscalls.md)の`spawn`、`waitpid`、`exec`。
 
-NEORV32向けには、RV32IMのM-mode起動、IMEMからDMEMへの`.data`コピー、UART0、SD/FAT32の読み出し、`help`、`info`、`uptime`、`memory`、`echo`、`ls`、`cat`、`clear`、`shutdown`を持つ対話シェルまでを実装しています。
-この実機経路は、QEMU側のSv39やU-modeを前提にせず、共通のコンソールと入力処理を別のハードウェアへ接続します。
+NEORV32向けには、RV32IMのM-mode起動、UART0、SD/FAT32の読み出し、対話シェルまでを実装しています。
+この実機経路はQEMU側のSv39やU-modeを前提にせず、共通のコンソール、入力処理、FAT32 parserを別のハードウェアへ接続します。
 
-Device Tree解析は、QEMU `virt`の固定値をmachine記述へ置き換える段階として導入済みです。
-汎用ヒープも固定領域上のfree-listとして導入済みであり、ヒープ領域の動的拡張は固定容量の単一アドレス空間を越える段階で進めます。
-その後にVirtIO、file system、network、multi-hart、NEORV32以外の実機対応を進めます。
-各段階の完了条件は[発展ロードマップ](../reference/roadmap.md)にあります。
+第23章より先の計画は[発展ロードマップ](../reference/roadmap.md)にあります。
+ロードマップは作業を段階に分け、各段階の受け入れ条件を`cargo xtask test`の経路として書いています。
 
 ## 実行と確認
 
-実装後の全検査には、release gateを実行します。
+全検査にはrelease gateを実行します。
 
 ```sh
 cargo xtask check
 ```
 
-U-mode遷移にはentryと特権levelを観測するQEMU markerがあり、`write`には正常なbufferと不正なuser pointer、`exit`には終了codeと全所有frameの回収を確認する経路があります。
-`vm`と`elf`経路も残し、activeなカーネル空間と実行前`LoadedImage`の前提が壊れていないことを確認します。
-同じ検査はNEORV32向けRV32IMカーネルをrelease設定でClippyとクロスビルドに通します。
+`vm`と`elf`の経路は、後続の章で機能が増えた後も残しています。
+activeなカーネル空間と実行前`LoadedImage`の前提が、ヒープやschedulerの導入で壊れていないことを毎回確認するためです。
 
 ## よくある失敗
 
-- 旧順序を現在の必須条件として残す：Sv39とELF loaderは汎用ヒープを使わず、固定容量の所有権表で動いています。
+- 旧順序を必須条件として読む：Sv39とELF loaderは汎用ヒープを使わずに動き始め、ヒープは後から所有フレームの台帳を引き取りました。
   Device Treeはmachine記述を発見するだけであり、動的確保の前提ではありません。
-- `LoadedImage`を常に実行中と記述する：ELF loaderが返した直後はinactiveであり、`UserRun`がkernel mappingとtrap stackを加えた後だけ`sret`します。
-- U-mode実行をLinux互換と記述する：実装するsystem callは`write`と`exit`だけであり、Linux ABI全体は提供しません。
-- payload統合でELF loaderを作り直す：MiniBundleから得たELF byte sliceを既存の検証とmaterializeへ渡し、所有権とrollbackの規約を一つに保ちます。
-- 固定容量を暗黙の無制限構造として扱う：`PT_LOAD`は8個、user imageは2,048ページ、所有フレームは2,688個という拒否境界を維持します。
+- `LoadedImage`を常に実行中と記述する：ELF loaderが返した直後はinactiveであり、kernel mappingとtrap stackを加えた後だけ`sret`します。
+- U-mode実行をLinux互換と記述する：system callはMiniOS独自のABIであり、番号も引数の規約もLinuxとは異なります。
+- 固定容量を暗黙の無制限構造として扱う：`PT_LOAD`の個数、user imageのページ数、process数、open file数には拒否境界があります。
 
 ## 演習
 
 U-mode遷移、`write`、`exit`の三項目について、直接の前提、hostで検査できる純粋ロジック、QEMUでしか観測できない状態、失敗時に回収する所有物を四列の表へ整理してください。
 次に、汎用ヒープを先行させた場合に各列がどう増えるかを書き足してください。
-追加した依存が最初の`write`と`exit`の受け入れ条件に必要かを調べ、不要なら後続段階へ戻します。
+追加した依存が最初の`write`と`exit`の受け入れ条件に必要かを調べ、不要なら後続の章へ戻します。
 
 ## 次の章
 
 [第13章「Sv39と単一アドレス空間」](13-sv39.md)では、先行実装したactiveなカーネル空間のpage walkと権限を追います。
-[第14章「ELFを実行前アドレス空間へ配置する」](14-elf-loading.md)では、固定容量の所有権表が実行前の`LoadedImage`を構築して回収する流れを追います。
-[第15章「U-modeでELFを実行する」](15-user-mode.md)と[第16章「boot payloadを実行する」](16-boot-payload.md)では、実行、回収、payload rangeを追います。
 [全体構成](../reference/architecture.md)、[メモリーマップ](../reference/memory-map.md)、[発展ロードマップ](../reference/roadmap.md)も実装順の根拠として参照してください。
