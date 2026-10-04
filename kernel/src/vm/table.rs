@@ -385,6 +385,40 @@ impl AddressSpace {
         ))
     }
 
+    /// identity写像のsupervisor leaf（借用したkernel mapping）を1page外す。
+    /// kernel trap stackのguard pageを、そのstackで動くaddress spaceから消すために使う。
+    /// 未写像のpage、identityでないleaf、`U=1`のleafには触れず`false`を返す。
+    /// 借用leafは台帳に載らないため、所有frameは変わらない。
+    /// inactiveなspaceへ使う前提であり、activeなspaceでは呼び出し側が`sfence.vma`する。
+    pub fn unmap_identity<M: FrameStore>(
+        &mut self,
+        memory: &mut M,
+        page: VirtPage,
+    ) -> Result<bool, VmError<M::Error>> {
+        let address = page.start();
+        let (physical, flags) = match self.translate(memory, address) {
+            Ok(found) => found,
+            Err(VmError::NotMapped) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if physical.as_u64() != address.as_u64() || flags.user() {
+            return Ok(false);
+        }
+        // `translate`が成功したので、途中のbranchはすべて有効である。
+        let vpn = address.vpn();
+        let mut table = self.root;
+        for level in [2, 1] {
+            table = read_entry(memory, table, vpn[level])?
+                .ppn()
+                .map_err(VmError::Pte)?
+                .start();
+        }
+        memory
+            .write_u64(table.as_u64() as usize, vpn[0], 0)
+            .map_err(VmError::Store)?;
+        Ok(true)
+    }
+
     /// `finish`後のspaceへzero済みの新しいuser frameを1page追加でmapする
     /// （`sbrk`のheap成長）。所有権はbuilderと同じく台帳へ記録し、
     /// 途中で確保した中間page tableも含める。失敗時はこの呼び出しで
@@ -735,6 +769,45 @@ mod tests {
             (physical, flags)
         );
         assert!(!space.translate(&store, page.start()).unwrap().1.user());
+    }
+
+    // Catches clearing a user leaf or a non-identity leaf at the guard address,
+    // or leaving the identity kernel leaf reachable after the call.
+    #[test]
+    fn unmap_identity_clears_only_the_borrowed_identity_leaf() {
+        let mut allocator = test_allocator::<16>(0x1000, 0x41_000);
+        let mut store = TestFrameStore::default();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
+        let kernel = VirtPage::from_start(0x8020_0000).unwrap();
+        let neighbour = VirtPage::from_start(0x8020_1000).unwrap();
+        let aliased = VirtPage::from_start(0x8020_2000).unwrap();
+        let user = VirtPage::from_start(0x0010_0000).unwrap();
+        let rw = PageFlags::supervisor_rw();
+        for page in [kernel, neighbour] {
+            let physical = PhysAddr::try_new(page.start().as_u64()).unwrap();
+            builder.map_borrowed(page, physical, rw).unwrap();
+        }
+        builder
+            .map_borrowed(aliased, PhysAddr::try_new(0x8030_0000).unwrap(), rw)
+            .unwrap();
+        builder
+            .map_new_zeroed(user, PageFlags::new(true, true, false, true).unwrap())
+            .unwrap();
+        let mut space = builder.finish();
+        let owned = space.owned_frames();
+
+        assert_eq!(space.unmap_identity(&mut store, kernel), Ok(true));
+        assert_eq!(
+            space.translate(&store, kernel.start()),
+            Err(VmError::NotMapped)
+        );
+        assert!(space.translate(&store, neighbour.start()).is_ok());
+        assert_eq!(space.unmap_identity(&mut store, kernel), Ok(false));
+        assert_eq!(space.unmap_identity(&mut store, aliased), Ok(false));
+        assert!(space.translate(&store, aliased.start()).is_ok());
+        assert_eq!(space.unmap_identity(&mut store, user), Ok(false));
+        assert!(space.translate(&store, user.start()).is_ok());
+        assert_eq!(space.owned_frames(), owned);
     }
 
     // Catches the ledger silently capping ownership at a fixed capacity:
