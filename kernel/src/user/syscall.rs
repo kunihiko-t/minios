@@ -194,6 +194,13 @@ pub trait ControlSource {
     fn create_pipe(&mut self) -> Result<(usize, usize), isize> {
         Err(ENOSYS)
     }
+
+    /// 呼び出しprocessのbreakを`increment` byte動かし、旧breakを返す。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn sbrk(&mut self, increment: isize) -> Result<u64, isize> {
+        let _ = increment;
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -290,6 +297,13 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_exec(context, space, memory, source)
     } else if number == SyscallNumber::Pipe as usize {
         dispatch_pipe(context, space, memory, source, read_scratch)
+    } else if number == SyscallNumber::Sbrk as usize {
+        let result = source.sbrk(context.register(10) as isize);
+        context.set_register(
+            10,
+            result.map_or_else(|errno| errno as usize, |old| old as usize),
+        );
+        SyscallFlow::Resume
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -2840,6 +2854,56 @@ mod tests {
             assert_eq!(flow, SyscallFlow::Resume);
             assert_eq!(context.register(10), ENOSYS as usize);
         }
+    }
+
+    // Catches sbrk losing the increment's sign on the way to the source or
+    // writing anything but the old break / errno into a0, and the default
+    // source leaking success outside a process context.
+    #[test]
+    fn sbrk_passes_a_signed_increment_and_returns_the_source_result() {
+        struct SbrkSource {
+            seen: Option<isize>,
+            result: Result<u64, isize>,
+        }
+        impl ControlSource for SbrkSource {
+            type Error = SinkError;
+            fn read_stdin(&mut self, _output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+                Ok(Some(0))
+            }
+            fn sbrk(&mut self, increment: isize) -> Result<u64, isize> {
+                self.seen = Some(increment);
+                self.result
+            }
+        }
+
+        let number = SyscallNumber::Sbrk as usize;
+        let mut sink = FakeSink::default();
+        let mut source = SbrkSource {
+            seen: None,
+            result: Ok(0x20_1000),
+        };
+        let (context, flow) =
+            dispatch_fixture(number, 4096, 0, 0, &mut sink, &mut source, &mut scratch());
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(source.seen, Some(4096));
+        assert_eq!(context.register(10), 0x20_1000);
+
+        source.result = Err(EINVAL);
+        let (context, _) = dispatch_fixture(
+            number,
+            -1isize as usize,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(source.seen, Some(-1));
+        assert_eq!(context.register(10), EINVAL as usize);
+
+        let mut fake = FakeSource::scripted(b"");
+        let (context, _) = dispatch_fixture(number, 0, 0, 0, &mut sink, &mut fake, &mut scratch());
+        assert_eq!(context.register(10), ENOSYS as usize);
     }
 
     // Catches getpid writing anything other than the source's pid into a0.

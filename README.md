@@ -146,13 +146,13 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 - **network**：virtio-netとprotocol stackはありません。
 - **マルチハート**：1ハートだけを起動し、kernel内の共有状態はlockを前提にしていません。
 - **割り込み駆動のI/O**：UART入力とvirtio-blkの完了はpollingで待ちます。
-- **user heap**：guestが実行中にメモリーを追加で確保するsystem callはありません。
 - **NEORV32以外の実機driver**：実機経路はNEORV32のUARTとSDカードだけです。
 
 実装済みの機能にも、教材として小さく保つための上限があります。
 
 - 同時に動かせるprocessは4個までで、各processが開けるfileも4個までです。
 - pipeのbufferは256 byteで、満杯のときは書き込み側が待ちます。
+- guestのheapは`sbrk`で伸ばせますが、縮めることはできません。
 - FAT32へ新しく作れるfile名とdirectory名は、8.3形式へ正規化できる名前だけです。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。
 - ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長しますが、取り込んだpageは返しません。
