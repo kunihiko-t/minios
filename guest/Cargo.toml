@@ -177,3 +177,31 @@ path = "src/bin/spawn_args.rs"
 test = false
 bench = false
 doctest = false
+
+[[bin]]
+name = "minios-guest-sh"
+path = "src/bin/sh.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-cat"
+path = "src/bin/cat.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-wc"
+path = "src/bin/wc.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-echo"
+path = "src/bin/echo.rs"
+test = false
+bench = false
+doctest = false

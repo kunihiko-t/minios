@@ -7,6 +7,7 @@ OpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイ
 virtio-blk上のFAT32 volumeを読み書きでき、user programはfile descriptor、process生成、pipeなどのsystem callを使えます。
 system callの一覧は[MiniContainer Guest ABI](docs/reference/minicontainer-abi.md#syscall-abi-v1)にあります。
 最初のuser programはMiniBundle boot payloadとしてQEMU loaderから渡し、そのprogramが`spawn`でFAT32上のELFを別のprocessとして起動できます。
+user modeのshell `SH.ELF`は、`cat HELLO.TXT | wc`のようなpipelineと`<`、`>`のredirectで、FAT32の`BIN`に置いたtoolを起動します。
 NEORV32向けには、RISC-V 32のM-modeで起動してUARTシェルを動かす小さな実機経路があります。
 日本語の学習ガイドと、同じ結果を繰り返し確認できるテストハーネスも用意しています。
 
@@ -54,6 +55,8 @@ shutting down
 `uptime`の数値は実行時点で変わりますが、`uptime: <n> ms`の直後に`ticks: <n>`が1行ずつ表示されます。
 シングルハート構成の`info`は、バナーに続けて`hart id: 0`を表示します。
 `cargo xtask run`は起動ごとに検査用のFAT32 disk imageを生成して接続するため、`ls`や`cat`でその中身を確かめられます。
+`cargo xtask run`が起動するのは起動と診断のためのkernel shellです。
+user shellは`cargo xtask test user-shell`がscriptを流して動かし、その仕組みは[第23章](docs/guide/23-process-syscalls.md)で説明しています。
 
 ## 対応環境
 
@@ -152,6 +155,7 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 
 - 同時に動かせるprocessは4個までで、各processが開けるfileはfd 0、1、2とは別に16個までです。
 - pipeのbufferは256 byteで、満杯のときは書き込み側が待ちます。
+- user shellのpipelineはshellと合わせてprocess上限に収まる3個のcommandまでで、1行は256 byteまでです。
 - guestのheapは`sbrk`で伸ばせますが、縮めることはできません。
 - FAT32へ新しく作れるfile名とdirectory名は、8.3形式へ正規化できる名前だけです。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。

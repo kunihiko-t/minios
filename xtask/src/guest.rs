@@ -42,6 +42,11 @@ pub const GUEST_USER_SLEEP: &str = "minios-guest-user-sleep";
 pub const GUEST_USER_DUP: &str = "minios-guest-user-dup";
 /// `spawn`のargv受け渡しとerrno経路を検証するguest bin名。
 pub const GUEST_SPAWN_ARGS: &str = "minios-guest-spawn-args";
+/// user shellと、shellが`BIN/`から起動するtoolのbin名。
+pub const GUEST_SH: &str = "minios-guest-sh";
+pub const GUEST_CAT: &str = "minios-guest-cat";
+pub const GUEST_WC: &str = "minios-guest-wc";
+pub const GUEST_ECHO: &str = "minios-guest-echo";
 /// scheduler検証のCPU-bound側bin名。
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 /// scheduler検証の短命側bin名。
