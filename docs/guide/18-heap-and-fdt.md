@@ -122,7 +122,8 @@ summary: PASSED all 1 phases (elapsed: ...)
 ```
 
 kernel側の`run_heap_test`は、`Vec`の成長と`Box`の再利用を確かめた後、`KERNEL_HEAP_LEN + PAGE_SIZE`の`try_reserve_exact`で初期領域を超える割り当てを要求します。
-heapの`total`とframe poolの`allocated`がともに増え、解放後に`allocated`が元へ戻った場合だけ`heap: ok`を出力します。
+heapの`total`とframe poolの`allocated`がともに増え、解放後にheap側の`allocated`が元へ戻った場合だけ`heap: ok`を出力します。
+frame poolの`allocated`は、取り込んだpageを返さないため減りません。
 host harnessが検査するのは`heap: ok`の行で、`grew`と`total`の行は値を読むための診断です。
 
 ## よくある失敗

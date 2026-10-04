@@ -87,7 +87,7 @@ closeやexitでfdが消えれば走査結果も減るため、incrementとdecrem
 blockは`EAGAIN`を内部signalとして実装します。
 control層が`Err(EAGAIN)`を返すと、`dispatch_read`と`dispatch_write`は`sepc`を4 byte戻して`SyscallFlow::Blocked`を返します。
 processが起こされると同じ`ecall`がやり直されるため、guestに`EAGAIN`が返ることはありません。
-起床の契機は、同じpipeへのdata到着と空き発生、端のclose（`close_file_fd`）、いずれかのprocessのexit（`wake_on_exit`）です。
+起床の契機は、同じpipeへのdata到着と空き発生、端のclose（`close_file_fd`）、いずれかのprocessのexit（`wake_on_exit`）、stdinへのbyte到着（`wake_all_blocked`）です。
 無関係な起床で条件を満たさないprocessは、再実行で再びblockします。
 
 pipe端はseekできないため、`lseek`、`pread`、`pwrite`は`file_mut`が`None`を返した時点で`ESPIPE`になります。

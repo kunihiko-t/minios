@@ -89,7 +89,8 @@ blockが見つかると[`Fat32::mount`](../../kernel/src/storage/fat32.rs)へ渡
 
 host側の[`xtask/src/disk.rs`](../../xtask/src/disk.rs)は、`DiskImage::create`で決定的なFAT32 imageを組み立てます。
 partitionを持たないsuperfloppyで、`VOLUME_SECTORS`は70,000、1 cluster 1 sector、reserved sector 32、FAT 2面です。
-`fat_sectors`はdata cluster数がFAT32の下限65,525以上になり、かつFATが1 sector余らない大きさへ収束させます。
+`fat_sectors`は、全data clusterのFAT entryを収めつつ1 sectorも余らない最小のFAT sector数へ収束させます。
+data cluster数がFAT32の下限65,525以上になることは`VOLUME_SECTORS`の選び方で保証し、host testで確かめます。
 rootには`HELLO.TXT`、`DOCS` directory、LFN付きの`Long File Name.txt`を置き、`DOCS`にはshellやspawn検査用のfileを置きます。
 fileへは非0 byteを含むsectorだけをseekして書き、末尾を`set_len`で宣言するsparse fileにします。
 
