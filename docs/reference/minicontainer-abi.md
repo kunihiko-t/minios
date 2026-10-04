@@ -154,12 +154,12 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 
 | 番号 | 呼び出し | 引数 | 規約 |
 | ---: | --- | --- | --- |
-| 1 | `write` | `a0=fd`、`a1=pointer`、`a2=length` | `fd=1`は標準出力、`fd=2`は標準エラー出力、`fd>=3`は`create`したfile。出力は一回につき4 KiB以下 |
+| 1 | `write` | `a0=fd`、`a1=pointer`、`a2=length` | fdが指すentryへ書く。console出力（新processのfd 1は標準出力、fd 2は標準エラー出力）、`create`したfile、pipeのwrite端を受理する。出力は一回につき4 KiB以下 |
 | 2 | `exit` | `a0=code` | 下位8ビットをアプリケーション終了コードとしてホストへ渡し、アプリケーションへ戻らない |
-| 3 | `read` | `a0=fd`、`a1=pointer`、`a2=length` | `fd=0`は標準入力、`fd>=3`は`open`したfile。入力は一回につき4 KiB以下。戻り値はbyte数、EOFは0 |
+| 3 | `read` | `a0=fd`、`a1=pointer`、`a2=length` | fdが指すentryから読む。console入力（新processのfd 0）、`open`したfile、pipeのread端を受理する。入力は一回につき4 KiB以下。戻り値はbyte数、EOFは0 |
 | 4 | `read_file` | `a0=path pointer`、`a1=path length`、`a2=buffer pointer`、`a3=buffer length` | `path`はUTF-8のFAT32パスで256 byte以下。戻り値は読んだbyte数。fileがbufferより長い場合は先頭で打ち切る |
-| 5 | `open` | `a0=path pointer`、`a1=path length` | `path`はUTF-8のFAT32パスで256 byte以下。戻り値は3以上のread-only file descriptorか負のerrno。processごとに最大4個まで開ける |
-| 6 | `close` | `a0=fd` | 戻り値は0か負のerrno |
+| 5 | `open` | `a0=path pointer`、`a1=path length` | `path`はUTF-8のFAT32パスで256 byte以下。戻り値は3以上のread-only file descriptorか負のerrno。processごとにfd 0、1、2とは別に最大16個まで開ける |
+| 6 | `close` | `a0=fd` | fd 0、1、2を含むfdのslotを空ける。戻り値は0か負のerrno |
 | 7 | `create` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、fileが無ければ作成し、writableなfile descriptorを返す。最終要素は8.3名へ正規化できる名前のみ受理する |
 | 8 | `unlink` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、fileを削除する。戻り値は0か負のerrno |
 | 9 | `lseek` | `a0=fd`、`a1=offset（符号付き）`、`a2=whence` | fdのoffsetを`whence`（0=file先頭、1=現在offset、2=file末尾）基準の`offset`へ更新する。戻り値は新しいoffsetか負のerrno |
@@ -180,23 +180,34 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 24 | `clock` | なし | boot以降の経過時間をmillisecondの非負整数で返す。分解能はtimer tickの10 ms |
 | 25 | `sleep` | `a0=milliseconds` | 少なくとも`a0`のmillisecondが経過してから0を返す。待つ間は他processが走る。0は`yield`と同じ |
 | 26 | `yield` | なし | 残りのtime sliceを手放して次のrunnable processへ順番を回し、再び選ばれると0を返す |
+| 27 | `dup2` | `a0=oldfd`、`a1=newfd` | `newfd`を閉じてから`oldfd`と同じentryを指させ、`newfd`を返す。`oldfd == newfd`は何も変えずに`newfd`を返す。負のerrnoは`EBADF` |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
 長さ0の`read`は入力へ触れず0を返します。
 `read_file`は、path範囲が読み取り可能でbuffer範囲が書き込み可能であることを要求し、両方の検証を通ってからstorageへ触れます。
 長さ0の`read_file`は0を返します。`read_file`は呼び出しのたびにfile全体を先頭から読む1回限りの操作であり、offsetやopen中のhandleは持ちません。
+processごとのfd tableはfd 0から18までの19個のslotを持ちます（`FIRST_FILE_FD + MAX_OPEN_FILES`個）。
+新processはfd 0にconsole入力、fd 1に標準出力、fd 2に標準エラー出力を指すconsole entryを持って始まり、残りは空です。
+fd 0、1、2は特別扱いではなく普通のslotであり、`read`と`write`はfd番号ではなくslotが指すentryの種類で経路を選びます。
+そのため`dup2`でfd 1をpipeのwrite端へ差し替えれば、以後のfd 1への`write`はpipeへ流れます。
+console入力のentryへの`write`とconsole出力のentryへの`read`は、pipeの方向規約と同じく`EBADF`です。
 `open`は`read_file`と同じpath規約で、成功するとfileをread-onlyの`fd`へ結び付けます。
+`open`、`create`、`pipe`は、fd 0、1、2が空いていても使わず、`FIRST_FILE_FD`（3）以上で最小の空きslotを割り当てます。
 `create`はfileが存在しなければ8.3名のentryを親directoryへ追加し、存在すればそのfileをwritableに開きます。作成名は小文字を大文字化した8.3形だけを受理し、長い名前や8.3へ写像できない要素は`EINVAL`です。
 file fdへの`read`と`write`は現在のoffsetから行い、処理した分だけoffsetを進めます。
 fdはread専用（`open`由来）またはwrite専用（`create`由来）のどちらかであり、writable fdへの`read`とread-only fdへの`write`は`EBADF`を返します。
 `write`のoffsetがfile sizeを越える場合は穴あき書き込みになるため`EINVAL`を返します。size以内なら上書きと末尾への追記ができます。
 `lseek`はfile末尾を越えるoffsetも受理します。その位置からの`read`はEOFとして0を返し、`write`は`EINVAL`です。
-新しいoffsetが負になる指定、0..=2以外のwhence、標準stream（0、1、2）への`lseek`はerrnoを返します。
+新しいoffsetが負になる指定と0..=2以外のwhenceは`EINVAL`、console entryへの`lseek`/`pread`/`pwrite`はpipe端と同じく`ESPIPE`を返します。
 `pread`と`pwrite`は呼び出しごとに明示したoffsetだけを使い、fdが保持するoffsetを読みも書きもしません。
 方向性の規約は`read`/`write`と同じで、writable fdへの`pread`とread-only fdへの`pwrite`は`EBADF`を返します。
 `pwrite`のoffsetがfile sizeを越える場合も`write`と同じく`EINVAL`です。
-`close`はfdを解放します。標準stream（0、1、2）は閉じられず、processは終了時に残ったfdを自動的に閉じます。
+`close`はfdのslotを空けます。fd 0、1、2も閉じられ、閉じた後の`read`/`write`は`EBADF`です。以前の版は標準streamへの`close`を`EBADF`で拒否していましたが、fd 1をpipeやfileへ差し替える用途のため普通のslotと同じ扱いへ変えました。processは終了時に残ったfdを自動的に閉じます。
+`dup2`は`oldfd`のentryを`newfd`へ複製します。`oldfd`が空いている場合と、どちらかがfd table（0から`FD_TABLE_LEN - 1`、現在は18）の範囲外の場合は`EBADF`で、何も変えません。`oldfd == newfd`は開いていれば何もせず`newfd`を返します。
+それ以外では、まず`newfd`を`close`と同じく閉じます。閉じたのがpipe端なら、そのpipeを待つprocessをwakeしてEOFや`EPIPE`を再判定させます。
+複製したpipe端は独立したlive端として数えるため、EOFと`EPIPE`は同じpipeを指す端がすべて閉じてから起きます。
+file entryは位置記述子とoffsetごとcopyするため、POSIXと異なり`dup2`後の2個のfdはoffsetを共有しません。片方の`read`/`write`/`lseek`はもう片方のoffsetを動かしません。`unlink`による失効と`rename`による追従は、複製したfdにも同じく働きます。
 `unlink`はdir entryとそれに続く長い名前のrecord列を削除し、fileのcluster chainを解放します。directoryには使えず、`EISDIR`を返します。
 POSIXと異なり、削除したentryを指すfdはどのprocessのものも即座に失効し、以後の`read`/`write`/`close`は`EBADF`を返します。これはclusterを即座に解放するために必要な規約です。
 `rename`はfileまたはdirectoryを別のpathへ移します。同一directory内では名前の変更、別directoryを指定した場合は移動になります。新しい名前は`create`と同じく8.3へ正規化できる名前のみ受理します。
@@ -209,12 +220,12 @@ directoryを自身またはその子孫directoryの中へ移す指定は`EINVAL`
 directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdはありません。
 `getpid`は呼び出したprocessのpidを返します。pidはprocess tableが採番する単調な識別子で、manifest宣言順のimageは0から始まり、`spawn`で起動したprocessは以後の番号を受け取ります。
 `spawn`は`path`のfileをELF executableとして読み込み、新しいprocessを生成してschedulerへ登録し、childのpidを返します。childは呼び出し側と独立してscheduleされ、親が終了しても残り続けます。
-childは呼び出し側のfd tableのsnapshotを引き継ぎます。同じfd番号が同じfileを指し、spawn時点のoffsetを引き継ぎますが、継承はcopyなのでその後のseekやcloseは互いに影響しません。manifestから起動するprocessは空のtableで開始します。
+childは呼び出し側のfd tableのsnapshotをfd 0、1、2も含めて引き継ぎます。同じfd番号が同じfileを指し、spawn時点のoffsetを引き継ぎますが、継承はcopyなのでその後のseekやcloseは互いに影響しません。`dup2`でfd 1をpipeへ向けてから`spawn`すれば、childの標準出力はそのpipeへ流れます。manifestから起動するprocessはconsole entryだけを持つtableで開始します。
 `spawn`が失敗した場合、途中まで確保したframe・address space・imageはすべて解放され、新しいprocessは登録されません。pathがfileを指さない（`ENOENT`）、directoryを指す（`EISDIR`）、ELFとして受理できない（`EINVAL`）、process tableが満杯または資源が足りない（`ENOMEM`）場合がerrnoです。
 `waitpid`は`a0`のpidを持つprocessの終了codeを返します。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
 対象が自分自身・存在しない・既にreap済み・異常終了でstatusを持たない場合は`ECHILD`、wait連鎖が呼び出し側へ戻るcycleは`EINVAL`を返します。複数のprocessが同じpidを待つこともでき、終了時に全員がwakeしますが、codeを回収できるのは先に再実行された1つだけで、残りは`ECHILD`を受け取ります。kernelは終了codeをprocess数上限分だけ台帳へ保持し、超過分は最古からdropします。
 
-`stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの8 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、残り4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1、`STAT_KIND_PIPE` = 2）です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile fdとpipe fdを受理して標準streamや未割り当てfdに`EBADF`を返します。pipe fdの`size`は常に0です。
+`stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの8 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、残り4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1、`STAT_KIND_PIPE` = 2、`STAT_KIND_CONSOLE` = 3）です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile、pipe、consoleのentryを受理して未割り当てfdに`EBADF`を返します。pipeとconsoleのentryの`size`は常に0です。
 どちらも`read`と同じく、out pointerが指す8 byteがユーザー空間の書き込み可能ページにすべて含まれることを要求し、検証を通ってからstorageやfd tableへ触れます。成功時の戻り値は`read`系のbyte数規約に従う`STAT_LEN`（8）です。
 
 `readdir`はdirectoryの中身をindex順に1件ずつ返します。`DirEnt`は263 byteで、先頭4 byteが`name_len`、次の4 byteが`kind`（`STAT_KIND_*`と同じ値）、残り255 byteがゼロ詰めの`name`です。`readdir`は呼び出しごとにdirectoryを先頭から走査して`index`番目のentryを返すため、一覧はindex 0からの連続呼び出しで得ます。`.`と`..`は列挙に含まれず、末尾を越えたindexは0を返します。空path（`a1`=0）はroot directoryを指し、fileへの指定は`ENOTDIR`を返します。out pointerの検証は`stat`と同じく、走査より先に`EFAULT`を確定します。
@@ -245,7 +256,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | ---: | --- | --- |
 | `-2` | `ENOENT` | fileが存在しない |
 | `-5` | `EIO` | storageの読み取りまたはfilesystem構造の失敗 |
-| `-9` | `EBADF` | 未知のfile descriptor、標準streamへの`close`/`lseek`/`fstat`、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作 |
+| `-9` | `EBADF` | fd tableの範囲外のfile descriptor、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`/`dup2`、範囲外の`newfd`への`dup2`、console入力への`write`とconsole出力への`read`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作 |
 | `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない |
 | `-11` | `EAGAIN` | pipeの`read`/`write`が条件未達でcallerをblockへ移したことを示すkernel内部のsignal。dispatchがecallを巻き戻して再実行するためguestへは返らない |
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足、同時にliveなpipe本数（4本）の枯渇、`sbrk`の上限超過やframe不足 |
@@ -255,11 +266,11 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
 | `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement |
-| `-24` | `EMFILE` | processの同時open数（4個）を超えた。pipeの両端もこのtableのslotを使う |
+| `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
-| `-29` | `ESPIPE` | pipe fdへの`lseek`/`pread`/`pwrite` |
+| `-29` | `ESPIPE` | pipe fdとconsole entryへの`lseek`/`pread`/`pwrite` |
 | `-32` | `EPIPE` | read端がすべて閉じたpipeへの`write` |
-| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe`/`sbrk`/`sleep` |
+| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe`/`sbrk`/`sleep`/`dup2` |
 | `-39` | `ENOTEMPTY` | `rmdir`の対象directoryに`.`と`..`以外のentryが残っている |
 
 ## 初期スタック ABI v1

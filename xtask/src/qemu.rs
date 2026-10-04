@@ -79,6 +79,8 @@ const USER_HEAP_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=user-heap\n";
 const USER_SLEEP_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=user-sleep\n";
+const USER_DUP_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2a\0\0\0MiniOS sched: spawned pid=0 name=user-dup\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -109,6 +111,9 @@ const USER_HEAP_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0heap verified\n"
 /// user_sleep guestが経過時間の検査を通した後のstdout frame。測った差は
 /// 実行ごとに揺れるため、guestは出力しない。
 const USER_SLEEP_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0f\0\0\0sleep verified\n";
+/// user_dup guestがpipeから読んだchildの出力を自分のstdoutへ写したframe。
+const USER_DUP_RELAYED_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0c\0\0\0spawn-child\n";
+const USER_DUP_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0dup verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -154,6 +159,7 @@ pub enum TestKind {
     FilePipe,
     UserHeap,
     UserSleep,
+    UserDup,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -217,6 +223,7 @@ impl TestKind {
             }
             Self::UserHeap => unreachable!("the user-heap test boots the normal kernel"),
             Self::UserSleep => unreachable!("the user-sleep test boots the normal kernel"),
+            Self::UserDup => unreachable!("the user-dup test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
@@ -284,6 +291,7 @@ impl TestKind {
             }
             Self::UserHeap => unreachable!("the user-heap test verifies raw control frames"),
             Self::UserSleep => unreachable!("the user-sleep test verifies raw control frames"),
+            Self::UserDup => unreachable!("the user-dup test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
                 unreachable!("the payload-stdin test verifies raw control frames")
@@ -525,6 +533,26 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
             &USER_SLEEP_EXPECTED_FRAMES,
+        );
+    }
+
+    if kind == TestKind::UserDup {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_user_dup()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_exact_frames(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+            &USER_DUP_EXPECTED_FRAMES,
         );
     }
 
@@ -1502,6 +1530,20 @@ const USER_SLEEP_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// user-dup検査で期待されるcontrol frame列。childのstdoutは`dup2`で
+/// pipeへ向いているためconsoleへ出ず、childのExitの後にparentが
+/// pipeから読んで写した`spawn-child`が来る。childが直接consoleへ
+/// 書いていればこの順序にはならない。
+const USER_DUP_EXPECTED_FRAMES: [&[u8]; 7] = [
+    PAYLOAD_READY_FRAME,
+    USER_DUP_SPAWNED_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    USER_DUP_RELAYED_FRAME,
+    USER_DUP_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 /// file-stat検査で期待されるcontrol frame列。guestがstat/fstatの
 /// metadata・errno・EFAULTの経路を通してから、検証済みの旨をstdoutへ
 /// 出力する。
@@ -2348,6 +2390,12 @@ impl PayloadBundle {
     fn create_user_sleep() -> Result<Self, QemuError> {
         let elf = built_bin_elf_bytes(crate::guest::GUEST_USER_SLEEP)?;
         Self::create_with(assemble_test_bundle(b"version=1\nname=user-sleep\n", &elf)?)
+    }
+
+    /// user-dup検査用bundle。
+    fn create_user_dup() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_USER_DUP)?;
+        Self::create_with(assemble_test_bundle(b"version=1\nname=user-dup\n", &elf)?)
     }
 
     fn create_sched() -> Result<Self, QemuError> {

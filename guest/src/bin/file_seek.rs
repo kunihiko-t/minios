@@ -2,6 +2,7 @@
 //!
 //! `pread`/`pwrite`がfd保持のoffsetを動かさないこと、`lseek`の
 //! SET/CUR/ENDとbeyond-EOF、方向性fdと未割当fdへの`EBADF`、
+//! consoleを指すfdへの`ESPIPE`、
 //! `pwrite`の`offset>size`に対する`EINVAL`を確かめ、最後に書き換えた
 //! fileを読み戻して内容をstdoutへ出してから42で終了する。
 //! 失敗時は70で終了する。E2Eのfile-seek検査が使う。
@@ -11,7 +12,7 @@
 
 use core::arch::naked_asm;
 use minios_abi::syscall::{
-    EBADF, EINVAL, FIRST_FILE_FD, SEEK_CUR, SEEK_END, SEEK_SET, STDIN, STDOUT,
+    EBADF, EINVAL, ESPIPE, FIRST_FILE_FD, SEEK_CUR, SEEK_END, SEEK_SET, STDIN, STDOUT,
 };
 use minios_guest::sys::{
     sys_close, sys_create, sys_exit, sys_lseek, sys_open, sys_pread, sys_pwrite, sys_read,
@@ -115,7 +116,8 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     if sys_lseek(rfd, 0, 99) != EINVAL {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_lseek(STDIN, 0, SEEK_SET) != EBADF {
+    // consoleはpipe端と同じく位置を持たない。
+    if sys_lseek(STDIN, 0, SEEK_SET) != ESPIPE {
         sys_exit(FAILURE_EXIT);
     }
     // read-only fdへのpwriteと未割当fdへのpreadはEBADF。

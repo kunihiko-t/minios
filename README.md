@@ -150,7 +150,7 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 
 実装済みの機能にも、教材として小さく保つための上限があります。
 
-- 同時に動かせるprocessは4個までで、各processが開けるfileも4個までです。
+- 同時に動かせるprocessは4個までで、各processが開けるfileはfd 0、1、2とは別に16個までです。
 - pipeのbufferは256 byteで、満杯のときは書き込み側が待ちます。
 - guestのheapは`sbrk`で伸ばせますが、縮めることはできません。
 - FAT32へ新しく作れるfile名とdirectory名は、8.3形式へ正規化できる名前だけです。

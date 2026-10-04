@@ -46,7 +46,8 @@ live processが`MAX_PROCS`（4）に達していると`insert`はprocessをそ�
 ### fd tableの継承
 
 `spawn_process`は、呼び出し側processの`file_fds_snapshot`を取り、childの初期fd tableとして`Process::spawn`へ渡します。
-`FileFdTable`は`Copy`な固定長配列（`MAX_OPEN_FILES`は4）であり、snapshot後のoffsetやcloseは親子で独立します。
+`FileFdTable`はfd 0、1、2のconsole entryを含む`Copy`な固定長配列（slotは19個）であり、snapshot後のoffsetやcloseは親子で独立します。
+親が`dup2`でfd 1をpipeへ差し替えてから`spawn`すれば、childの標準出力もそのpipeを指します。
 pipe端だけはcopy先も同じpipe idを指すため、bufferは親子で共有されます。
 
 ### waitpidと終了台帳

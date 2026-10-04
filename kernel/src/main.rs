@@ -1679,6 +1679,33 @@ unsafe fn close_file_fd(fd: usize) -> bool {
     true
 }
 
+/// 現在processの`oldfd`を`newfd`へ複製し`newfd`を返す (`dup2` syscall)。
+/// `newfd`が閉じたpipe端だった場合は`close`と同じく同pipeのwaiterを
+/// 起こし、peer側のEOF/EPIPEを再判定させる。process未設定なら`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn dup2_fd(oldfd: usize, newfd: usize) -> Result<usize, isize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let Some(process) = (unsafe { process.as_mut() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    let replaced = process.dup2(oldfd, newfd)?;
+    if let Some(id) = replaced
+        .as_ref()
+        .and_then(minios_kernel::process::FdEntry::pipe_id)
+    {
+        let table = unsafe { *&raw const PROC_TABLE_PTR };
+        if let Some(table) = unsafe { table.as_mut() } {
+            table.wake_pipe_waiters(id);
+        }
+    }
+    Ok(newfd)
+}
+
 /// `pipe` syscallのfd割り当て。pipeをtableからallocし、現在processへ
 /// read/write両端を割り当てる。write端の割り当てに失敗した場合は
 /// read端をrollbackして`EMFILE`を返す。tableやprocessが未設定なら

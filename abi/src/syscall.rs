@@ -54,6 +54,10 @@ pub enum SyscallNumber {
     /// 現在のtime sliceを手放してschedulerへ戻り、0を返す。他に
     /// runnable processがなければすぐに自分へ戻る。
     Yield = 26,
+    /// `a1`のfdを閉じてから`a0`のfdと同じentryを指させ、`a1`を返す。
+    /// `a0`が未割当、またはどちらかがfd tableの範囲外なら`EBADF`。
+    /// `a0 == a1`は何も変えずに`a1`を返す。fd 0/1/2も対象になる。
+    Dup2 = 27,
 }
 
 pub const STDIN: usize = 0;
@@ -63,7 +67,11 @@ pub const MAX_WRITE_LEN: usize = 4096;
 pub const MAX_READ_LEN: usize = 4096;
 pub const MAX_PATH_LEN: usize = 256;
 pub const FIRST_FILE_FD: usize = 3;
-pub const MAX_OPEN_FILES: usize = 4;
+pub const MAX_OPEN_FILES: usize = 16;
+/// processごとのfd tableの長さ。fd 0〜2のconsole entryと、
+/// `FIRST_FILE_FD`から始まる`MAX_OPEN_FILES`個のslotを合わせた数。
+/// `dup2`の`newfd`はこの値未満でなければならない。
+pub const FD_TABLE_LEN: usize = FIRST_FILE_FD + MAX_OPEN_FILES;
 
 /// `lseek`の`a2`が取る基準位置。file先頭からの絶対offset。
 pub const SEEK_SET: usize = 0;
@@ -78,6 +86,8 @@ pub const STAT_KIND_FILE: u32 = 0;
 pub const STAT_KIND_DIR: u32 = 1;
 /// `Stat::kind`の値。`pipe`が生成したfdの端。`size`は常に0。
 pub const STAT_KIND_PIPE: u32 = 2;
+/// `Stat::kind`の値。consoleのstdin/stdout/stderrを指すfd。`size`は常に0。
+pub const STAT_KIND_CONSOLE: u32 = 3;
 /// `stat`/`fstat`が`out` pointerへ書き込む`Stat`のbyte長。
 pub const STAT_LEN: usize = 8;
 
@@ -206,6 +216,7 @@ mod tests {
         assert_eq!(SyscallNumber::Clock as usize, 24);
         assert_eq!(SyscallNumber::Sleep as usize, 25);
         assert_eq!(SyscallNumber::Yield as usize, 26);
+        assert_eq!(SyscallNumber::Dup2 as usize, 27);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
@@ -216,7 +227,8 @@ mod tests {
         assert_eq!(MAX_READ_LEN, 4096);
         assert_eq!(MAX_PATH_LEN, 256);
         assert_eq!(FIRST_FILE_FD, 3);
-        assert_eq!(MAX_OPEN_FILES, 4);
+        assert_eq!(MAX_OPEN_FILES, 16);
+        assert_eq!(FD_TABLE_LEN, 19);
         assert_eq!(ENOENT, -2);
         assert_eq!(EIO, -5);
         assert_eq!(EBADF, -9);
@@ -238,6 +250,7 @@ mod tests {
         assert_eq!(STAT_KIND_FILE, 0);
         assert_eq!(STAT_KIND_DIR, 1);
         assert_eq!(STAT_KIND_PIPE, 2);
+        assert_eq!(STAT_KIND_CONSOLE, 3);
         assert_eq!(STAT_LEN, 8);
         assert_eq!(PIPE_OUT_LEN, 8);
     }

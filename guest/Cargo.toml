@@ -163,3 +163,10 @@ path = "src/bin/user_sleep.rs"
 test = false
 bench = false
 doctest = false
+
+[[bin]]
+name = "minios-guest-user-dup"
+path = "src/bin/user_dup.rs"
+test = false
+bench = false
+doctest = false

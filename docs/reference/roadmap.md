@@ -97,8 +97,8 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 - **`clock`と`sleep`**（完了）：`clock`は`time.rs`の`uptime_millis`を返し、`sleep`は`BlockedUntil(tick)`で待機中のprocessにCPUを渡します（`cargo xtask test user-sleep`で検証）。
   `sleep`は戻り値0を書いてecallの次へ進めてからblockするため、起床後にsyscallをやり直しません。
 - **`yield`**（完了）：sched_aのbusy-waitを`yield`で置き換え、schedulerの検証がtime sliceに依存しなくなりました。
-- **`dup2`と`MAX_OPEN_FILES`の引き上げ**：`pipe`の端をstdin/stdoutへ付け替える手段がなく、open file数4では`spawn`したchildへpipeを継承させると残りが足りません。
-  `dup2`を追加し、上限を16へ上げます。
+- **`dup2`と`MAX_OPEN_FILES`の引き上げ**（完了）：fd 0、1、2をconsole entryを持つ普通のslotへ変え、`dup2`でpipeやfileへ付け替えられるようにしました（`cargo xtask test user-dup`で検証）。
+  open file数の上限は4から16へ上げ、`spawn`したchildは差し替えたfd 1をそのまま継承します。
 - **`spawn`への引数渡し**：現在の`spawn`はpathだけを受け取り、childは`argv`を受け取れません。
   manifestと同じ初期stack ABIで`argv`を積む形へ拡張します。
 - **user library crate**：段階0で作った`minios_guest` libraryへ、`println!`、`File`、`Process`のような薄い型を加えます。

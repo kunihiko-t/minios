@@ -4,7 +4,8 @@
 //! 204 byte）、`DOCS`（directory, size 0）のmetadataを確認し、不在pathの
 //! `ENOENT`・file途中要素の`ENOTDIR`・書けないout pointerの`EFAULT`を
 //! 確かめる。`open`したfdへの`fstat`が`stat`と同じmetadataを返すことと、
-//! stdoutへの`fstat`が`EBADF`を返すことも確認して42で終了する。
+//! stdoutへの`fstat`がsize 0の`STAT_KIND_CONSOLE`を返すことも確認して
+//! 42で終了する。
 //! 失敗時は70で終了する。E2Eのfile-stat検査が使う。
 
 #![no_std]
@@ -12,8 +13,8 @@
 
 use core::arch::naked_asm;
 use minios_abi::syscall::{
-    EBADF, EFAULT, ENOENT, ENOTDIR, FIRST_FILE_FD, STAT_KIND_DIR, STAT_KIND_FILE, STAT_LEN, STDOUT,
-    Stat,
+    EFAULT, ENOENT, ENOTDIR, FIRST_FILE_FD, STAT_KIND_CONSOLE, STAT_KIND_DIR, STAT_KIND_FILE,
+    STAT_LEN, STDOUT, Stat,
 };
 use minios_guest::sys::{sys_exit, sys_fstat, sys_open, sys_stat, sys_write};
 
@@ -84,7 +85,7 @@ extern "C" fn guest_main() -> ! {
         sys_exit(FAILURE_EXIT);
     }
 
-    // open済みfdへのfstatはstatと同じmetadataを返す。stdoutはEBADF。
+    // open済みfdへのfstatはstatと同じmetadataを返す。stdoutはconsole。
     let fd = sys_open(NOTE_PATH.as_ptr(), NOTE_PATH.len());
     if fd < FIRST_FILE_FD as isize {
         sys_exit(FAILURE_EXIT);
@@ -97,7 +98,11 @@ extern "C" fn guest_main() -> ! {
     if opened.size != 17 || opened.kind != STAT_KIND_FILE {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_fstat(STDOUT, out.as_mut_ptr()) != EBADF {
+    if sys_fstat(STDOUT, out.as_mut_ptr()) != STAT_LEN as isize {
+        sys_exit(FAILURE_EXIT);
+    }
+    let console = Stat::from_le_bytes(out);
+    if console.size != 0 || console.kind != STAT_KIND_CONSOLE {
         sys_exit(FAILURE_EXIT);
     }
 
