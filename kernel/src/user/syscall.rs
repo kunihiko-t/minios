@@ -10,11 +10,37 @@ use crate::{
 use minios_abi::{
     control::FrameKind,
     syscall::{
-        DIRENT_LEN, DirEnt, EAGAIN, EBADF, EFAULT, EINVAL, ENOSYS, FIRST_FILE_FD, MAX_OPEN_FILES,
-        MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, STAT_LEN, STDERR, STDIN, STDOUT,
-        Stat, SyscallNumber,
+        DIRENT_LEN, DirEnt, EAGAIN, EBADF, EFAULT, EINVAL, ENOSYS, ESPIPE, MAX_PATH_LEN,
+        MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, STAT_KIND_CONSOLE, STAT_LEN, STDERR, STDIN,
+        STDOUT, Stat, SyscallNumber,
     },
 };
+
+/// processごとのfd tableの長さ。fd 0から`FIRST_FILE_FD + MAX_OPEN_FILES - 1`
+/// までが有効な番号で、これ以上は常に`EBADF`である。
+pub use minios_abi::syscall::FD_TABLE_LEN;
+
+/// consoleを指すfd entryの向き。新processはfd 0/1/2にこの3個を持つが、
+/// `dup2`や`close`で他のfdへ移したり空けたりできる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleFd {
+    /// Stdin frameを読む入力。`write`は`EBADF`。
+    Stdin,
+    /// Stdout frameへ書く出力。`read`は`EBADF`。
+    Stdout,
+    /// Stderr frameへ書く出力。`read`は`EBADF`。
+    Stderr,
+}
+
+/// fd tableを持たない経路の`console_fd`。fd 0/1/2を常にconsoleとみなす。
+pub const fn fixed_console_fd(fd: usize) -> Option<ConsoleFd> {
+    match fd {
+        STDIN => Some(ConsoleFd::Stdin),
+        STDOUT => Some(ConsoleFd::Stdout),
+        STDERR => Some(ConsoleFd::Stderr),
+        _ => None,
+    }
+}
 
 /// syscall結果の受け先。kernelはUARTへframeを載せ、host testは記録する。
 pub trait ControlSink {
@@ -26,6 +52,13 @@ pub trait ControlSink {
 /// stdin byteの供給元。kernelはUARTのStdin frameから引き、host testは用意した列を返す。
 pub trait ControlSource {
     type Error;
+
+    /// `fd`がconsoleを指すならその向きを返す。dispatchは`read`/`write`の
+    /// 経路をfd番号でなくこの結果で選ぶ。default実装はfd tableを持たない
+    /// source向けの`fixed_console_fd`である。
+    fn console_fd(&mut self, fd: usize) -> Option<ConsoleFd> {
+        fixed_console_fd(fd)
+    }
 
     /// 次の入力を`output`へ移す。`Ok(Some(n))`は受信byte数であり、0はEOF。
     /// `Ok(None)`は現時点で入力がないことを意味し、呼び出し側はprocessを
@@ -216,6 +249,14 @@ pub trait ControlSource {
         let _ = millis;
         Err(ENOSYS)
     }
+
+    /// `newfd`を閉じてから`oldfd`と同じentryを指させ、`newfd`を返す。
+    /// 範囲と同一fdの検査はdispatch済みである。`Err`はそのまま`a0`へ
+    /// 返すerrnoである。default実装は`ENOSYS`。
+    fn dup2(&mut self, oldfd: usize, newfd: usize) -> Result<usize, isize> {
+        let _ = (oldfd, newfd);
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -253,9 +294,10 @@ pub enum SyscallFlow<E, SE = E> {
 /// `a7`のsystem call番号に従って`context`を処理する。
 ///
 /// guest pointerをRust参照として解することなく、`write`は1回の検証付きcopyと
-/// 1回の`sink.frame`で処理し、戻り値を`a0`へ書き込む。descriptorは1と2だけを
-/// 許可し、4,096 byteを超える長さは拒否する。`read`はdescriptor 0だけを許可し、
+/// 1回の`sink.frame`で処理し、戻り値を`a0`へ書き込む。console出力を指すfdだけを
+/// sinkへ流し、4,096 byteを超える長さは拒否する。`read`はconsole入力を指すfdなら
 /// 書き込み検証を通してから1回の`source.read_stdin`で`read_scratch`へ受信する。
+/// どのfdがconsoleを指すかは`source.console_fd`が決め、fd番号では決めない。
 /// sourceが`Ok(None)`を返す未到着では`Blocked`を返し、`sepc`をecallへ戻して
 /// 再開時の再実行に委ねる。
 /// userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは呼び出し側が
@@ -347,6 +389,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
     } else if number == SyscallNumber::Yield as usize {
         context.set_register(10, 0);
         SyscallFlow::Yield
+    } else if number == SyscallNumber::Dup2 as usize {
+        dispatch_dup2(context, source)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -363,8 +407,13 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
     read_scratch: &mut [u8; MAX_READ_LEN],
 ) -> SyscallFlow<E, R::Error> {
     let fd = context.register(10);
-    let is_file_fd = (FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd);
-    if fd != STDIN && !is_file_fd {
+    let console = source.console_fd(fd);
+    let readable = match console {
+        Some(ConsoleFd::Stdin) => true,
+        Some(ConsoleFd::Stdout | ConsoleFd::Stderr) => false,
+        None => fd < FD_TABLE_LEN,
+    };
+    if !readable {
         context.set_register(10, EBADF as usize);
         return SyscallFlow::Resume;
     }
@@ -383,7 +432,7 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
         context.set_register(10, EFAULT as usize);
         return SyscallFlow::Resume;
     }
-    if fd == STDIN {
+    if console.is_some() {
         // `Ok(None)`は入力未到着である。`sepc`はclassifyがecallの次へ進めて
         // あるため、4 byte戻して再開時に同じecallをやり直す。
         return match source.read_stdin(&mut read_scratch[..len]) {
@@ -673,8 +722,9 @@ fn dispatch_stat<M: FrameStore, E, R: ControlSource>(
     }
 }
 
-/// `fstat` (`a0=fd, a1=out_ptr`)。file fdのみが対象で、標準streamや
-/// 未割当fdは`EBADF`を返す。copy-outは`stat`と同じReadComplete経路。
+/// `fstat` (`a0=fd, a1=out_ptr`)。console entryは`size`=0の
+/// `STAT_KIND_CONSOLE`、それ以外はsourceへ委譲し、未割当fdは`EBADF`。
+/// copy-outは`stat`と同じReadComplete経路。
 fn dispatch_fstat<M: FrameStore, E, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace,
@@ -683,7 +733,8 @@ fn dispatch_fstat<M: FrameStore, E, R: ControlSource>(
     read_scratch: &mut [u8; MAX_READ_LEN],
 ) -> SyscallFlow<E, R::Error> {
     let fd = context.register(10);
-    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
+    let console = source.console_fd(fd);
+    if console.is_none() && fd >= FD_TABLE_LEN {
         context.set_register(10, EBADF as usize);
         return SyscallFlow::Resume;
     }
@@ -692,7 +743,14 @@ fn dispatch_fstat<M: FrameStore, E, R: ControlSource>(
         context.set_register(10, EFAULT as usize);
         return SyscallFlow::Resume;
     }
-    match source.fstat(fd) {
+    let result = match console {
+        Some(_) => Ok(Stat {
+            size: 0,
+            kind: STAT_KIND_CONSOLE,
+        }),
+        None => source.fstat(fd),
+    };
+    match result {
         Ok(stat) => {
             read_scratch[..STAT_LEN].copy_from_slice(&stat.to_le_bytes());
             SyscallFlow::ReadComplete {
@@ -758,15 +816,27 @@ fn dispatch_readdir<M: FrameStore, E, R: ControlSource>(
     }
 }
 
+/// `lseek`/`pread`/`pwrite`の前検査。範囲外のfdは`EBADF`、console
+/// entryはpipe端と同じく位置を持たないため`ESPIPE`を返す。
+fn unseekable_fd<R: ControlSource>(source: &mut R, fd: usize) -> Option<isize> {
+    if fd >= FD_TABLE_LEN {
+        Some(EBADF)
+    } else if source.console_fd(fd).is_some() {
+        Some(ESPIPE)
+    } else {
+        None
+    }
+}
+
 /// `lseek` (`a0=fd, a1=offset(isize), a2=whence`)。file fdのみが対象で、
-/// 標準streamや未割当fdは`EBADF`を返す。新offsetを`a0`へ返す。
+/// console entryは`ESPIPE`、未割当fdは`EBADF`を返す。新offsetを`a0`へ返す。
 fn dispatch_lseek<E, R: ControlSource>(
     context: &mut UserContext,
     source: &mut R,
 ) -> SyscallFlow<E, R::Error> {
     let fd = context.register(10);
-    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
-        context.set_register(10, EBADF as usize);
+    if let Some(errno) = unseekable_fd(source, fd) {
+        context.set_register(10, errno as usize);
         return SyscallFlow::Resume;
     }
     match source.seek_fd(fd, context.register(11) as isize, context.register(12)) {
@@ -786,8 +856,8 @@ fn dispatch_pread<M: FrameStore, E, R: ControlSource>(
     read_scratch: &mut [u8; MAX_READ_LEN],
 ) -> SyscallFlow<E, R::Error> {
     let fd = context.register(10);
-    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
-        context.set_register(10, EBADF as usize);
+    if let Some(errno) = unseekable_fd(source, fd) {
+        context.set_register(10, errno as usize);
         return SyscallFlow::Resume;
     }
     let len = context.register(12);
@@ -826,8 +896,8 @@ fn dispatch_pwrite<M: FrameStore, E, R: ControlSource>(
     source: &mut R,
 ) -> SyscallFlow<E, R::Error> {
     let fd = context.register(10);
-    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
-        context.set_register(10, EBADF as usize);
+    if let Some(errno) = unseekable_fd(source, fd) {
+        context.set_register(10, errno as usize);
         return SyscallFlow::Resume;
     }
     let len = context.register(12);
@@ -890,14 +960,14 @@ fn dispatch_pipe<M: FrameStore, E, R: ControlSource>(
     }
 }
 
-/// `close` (`a0=fd`)。標準streamのfdは`EBADF`として拒否し、file fdは
-/// sourceへ委譲する。成功時は`a0`へ0を返す。
+/// `close` (`a0=fd`)。fd 0/1/2も含めてsourceへ委譲し、slotを空ける。
+/// 範囲外と未割当は`EBADF`。成功時は`a0`へ0を返す。
 fn dispatch_close<E, R: ControlSource>(
     context: &mut UserContext,
     source: &mut R,
 ) -> SyscallFlow<E, R::Error> {
     let fd = context.register(10);
-    if !(FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd) {
+    if fd >= FD_TABLE_LEN {
         context.set_register(10, EBADF as usize);
         return SyscallFlow::Resume;
     }
@@ -905,6 +975,24 @@ fn dispatch_close<E, R: ControlSource>(
         Ok(()) => context.set_register(10, 0),
         Err(errno) => context.set_register(10, errno as usize),
     }
+    SyscallFlow::Resume
+}
+
+/// `dup2` (`a0=oldfd, a1=newfd`)。範囲外の`newfd`は`EBADF`、
+/// `oldfd == newfd`は開いていれば変更せず`newfd`を返す。それ以外は
+/// sourceが`newfd`を閉じてから`oldfd`のentryを複製する。
+fn dispatch_dup2<E, R: ControlSource>(
+    context: &mut UserContext,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let oldfd = context.register(10);
+    let newfd = context.register(11);
+    let result = if oldfd >= FD_TABLE_LEN || newfd >= FD_TABLE_LEN {
+        Err(EBADF)
+    } else {
+        source.dup2(oldfd, newfd)
+    };
+    context.set_register(10, result.unwrap_or_else(|errno| errno as usize));
     SyscallFlow::Resume
 }
 
@@ -982,8 +1070,8 @@ fn dispatch_read_file<M: FrameStore, E, R: ControlSource>(
     }
 }
 
-/// `write` (`a0=fd, a1=ptr, a2=len`)。fd 1/2はframe sinkへ、file fd
-/// （3以上）は`source.write_fd`へ委譲する。どちらの経路でも、副作用の
+/// `write` (`a0=fd, a1=ptr, a2=len`)。console出力のentryはframe sinkへ、
+/// fileとpipeのentryは`source.write_fd`へ委譲する。どちらの経路でも、副作用の
 /// 前にuser buffer全体の`EFAULT`を確定する規約は同じである。
 fn dispatch_write<M: FrameStore, S: ControlSink, R: ControlSource>(
     context: &mut UserContext,
@@ -993,11 +1081,10 @@ fn dispatch_write<M: FrameStore, S: ControlSink, R: ControlSource>(
     source: &mut R,
 ) -> SyscallFlow<S::Error, R::Error> {
     let fd = context.register(10);
-    let is_file_fd = (FIRST_FILE_FD..FIRST_FILE_FD + MAX_OPEN_FILES).contains(&fd);
-    let kind = match fd {
-        STDOUT => Some(FrameKind::Stdout),
-        STDERR => Some(FrameKind::Stderr),
-        _ if is_file_fd => None,
+    let kind = match source.console_fd(fd) {
+        Some(ConsoleFd::Stdout) => Some(FrameKind::Stdout),
+        Some(ConsoleFd::Stderr) => Some(FrameKind::Stderr),
+        None if fd < FD_TABLE_LEN => None,
         _ => {
             context.set_register(10, EBADF as usize);
             return SyscallFlow::Resume;
@@ -1068,8 +1155,9 @@ mod tests {
         control::FrameKind,
         syscall::{
             DIRENT_LEN, DIRENT_NAME_LEN, DirEnt, EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT,
-            ENOSYS, ENOTDIR, ENOTEMPTY, FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN, MAX_READ_LEN,
-            MAX_WRITE_LEN, STAT_KIND_FILE, STAT_LEN, STDERR, STDIN, STDOUT, Stat, SyscallNumber,
+            ENOSYS, ENOTDIR, ENOTEMPTY, ESPIPE, FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN,
+            MAX_READ_LEN, MAX_WRITE_LEN, STAT_KIND_FILE, STAT_LEN, STDERR, STDIN, STDOUT, Stat,
+            SyscallNumber,
         },
     };
 
@@ -2022,11 +2110,12 @@ mod tests {
         assert_eq!(source.reads, 1);
     }
 
-    // Catches accepting a descriptor other than 0 or consuming input on EBADF.
+    // Catches reading a console output entry or an out-of-range fd, or
+    // consuming input on EBADF.
     #[test]
     fn read_reports_unknown_descriptors_with_ebadf() {
-        // 1,2は標準streamの書き込み側、7以降はfd範囲外で`EBADF`。
-        for descriptor in [1, 2, 7, 100] {
+        // 1,2はconsole出力のentry、FD_TABLE_LEN以降はfd範囲外で`EBADF`。
+        for descriptor in [1, 2, super::FD_TABLE_LEN, 100] {
             let mut sink = FakeSink::default();
             let mut source = FakeSource::scripted(b"hello");
             let (context, flow) = dispatch_fixture(
@@ -2518,12 +2607,31 @@ mod tests {
         assert_eq!(context.register(10), EBADF as usize);
     }
 
-    // Catches close rejecting standard descriptors and forwarding file fds,
-    // including the source's EBADF for unallocated slots.
+    // Catches close rejecting fds outside the table before the source, and
+    // forwarding every in-range fd (0..2 included, since they are ordinary
+    // slots now), including the source's EBADF for unallocated slots.
     #[test]
-    fn close_rejects_standard_fds_and_closes_file_fds() {
+    fn close_rejects_out_of_range_fds_and_forwards_the_rest() {
         let mut sink = FakeSink::default();
-        for fd in [0, 1, 2, 7] {
+        for fd in [STDIN, STDOUT, STDERR] {
+            let mut source = FileSource::serving(b"");
+            let (context, flow) = dispatch_numbered_file_fixture(
+                CLOSE_NUMBER,
+                fd,
+                0,
+                0,
+                0,
+                b"",
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(flow, SyscallFlow::Resume);
+            // FileSourceはFIRST_FILE_FD以外を未割当として扱う。
+            assert_eq!(context.register(10), EBADF as usize);
+            assert_eq!(source.closes, 1);
+        }
+        for fd in [super::FD_TABLE_LEN, 100] {
             let mut source = FileSource::serving(b"");
             let (context, flow) = dispatch_numbered_file_fixture(
                 CLOSE_NUMBER,
@@ -2571,6 +2679,71 @@ mod tests {
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), EBADF as usize);
         assert_eq!(source.closes, 2);
+    }
+
+    // Catches write/read routing by fd number instead of by the entry:
+    // fd 1 redirected away from the console must reach write_fd, a console
+    // entry moved to fd 5 must still reach the sink, and dup2 must reject
+    // out-of-range fds before the source.
+    #[test]
+    fn console_routing_follows_the_entry_and_dup2_checks_the_range() {
+        struct Redirected {
+            writes: usize,
+            dups: usize,
+        }
+        impl ControlSource for Redirected {
+            type Error = SinkError;
+            fn read_stdin(&mut self, _: &mut [u8]) -> Result<Option<usize>, SinkError> {
+                Ok(None)
+            }
+            fn console_fd(&mut self, fd: usize) -> Option<super::ConsoleFd> {
+                (fd == 5).then_some(super::ConsoleFd::Stdout)
+            }
+            fn write_fd(&mut self, _: usize, data: &[u8]) -> Result<usize, isize> {
+                self.writes += 1;
+                Ok(data.len())
+            }
+            fn dup2(&mut self, _: usize, newfd: usize) -> Result<usize, isize> {
+                self.dups += 1;
+                Ok(newfd)
+            }
+        }
+
+        let mut sink = FakeSink::default();
+        let mut source = Redirected { writes: 0, dups: 0 };
+        for fd in [STDOUT, 5] {
+            let (context, _) = dispatch_fixture(
+                WRITE_NUMBER,
+                fd,
+                MESSAGE_PAGE,
+                MESSAGE.len(),
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(context.register(10), MESSAGE.len());
+        }
+        assert_eq!(source.writes, 1);
+        assert_eq!(sink.frames.len(), 1);
+
+        let dup2 = SyscallNumber::Dup2 as usize;
+        for (oldfd, newfd, expected) in [
+            (super::FD_TABLE_LEN, 1, EBADF as usize),
+            (1, super::FD_TABLE_LEN, EBADF as usize),
+            (3, 1, 1),
+        ] {
+            let (context, _) = dispatch_fixture(
+                dup2,
+                oldfd,
+                newfd,
+                0,
+                &mut sink,
+                &mut source,
+                &mut scratch(),
+            );
+            assert_eq!(context.register(10), expected);
+        }
+        assert_eq!(source.dups, 1);
     }
 
     // Catches create routing to create_file rather than open_file, so a
@@ -3331,15 +3504,15 @@ mod tests {
         let _ = context;
     }
 
-    // Catches fstat accepting a standard stream or unallocated fd, and an
-    // unwritable out pointer reaching the source.
+    // Catches fstat accepting an out-of-range fd, and an unwritable out
+    // pointer reaching the source.
     #[test]
     fn fstat_rejects_bad_fds_and_unwritable_out_pointers() {
         let mut sink = FakeSink::default();
         let mut source = FileSource::serving(b"");
         let (context, _) = dispatch_fixture(
             FSTAT_NUMBER,
-            STDOUT,
+            super::FD_TABLE_LEN,
             MESSAGE_PAGE,
             0,
             &mut sink,
@@ -3689,8 +3862,13 @@ mod tests {
         assert_eq!(source.seeks, 1);
         assert_eq!(source.seen_seek, Some((-3, 1)));
 
-        // 標準streamと未割当fdはEBADFで、sourceへ届かない。
-        for fd in [0usize, STDOUT, STDERR, FIRST_FILE_FD + MAX_OPEN_FILES] {
+        // console entryはESPIPE、範囲外fdはEBADFで、sourceへ届かない。
+        for (fd, expected) in [
+            (STDIN, ESPIPE),
+            (STDOUT, ESPIPE),
+            (STDERR, ESPIPE),
+            (FIRST_FILE_FD + MAX_OPEN_FILES, EBADF),
+        ] {
             let mut source = FileSource::serving(b"");
             let (context, flow) = dispatch_fixture(
                 LSEEK_NUMBER,
@@ -3702,7 +3880,7 @@ mod tests {
                 &mut scratch(),
             );
             assert_eq!(flow, SyscallFlow::Resume);
-            assert_eq!(context.register(10), EBADF as usize);
+            assert_eq!(context.register(10), expected as usize);
             assert_eq!(source.seeks, 0);
         }
 
@@ -3782,7 +3960,7 @@ mod tests {
 
         // fd検証・len検証・buf検証をそれぞれ個別に確認する。
         for (fd, len, buf, expected) in [
-            (STDIN, 8usize, MESSAGE_PAGE, EBADF),
+            (STDIN, 8usize, MESSAGE_PAGE, ESPIPE),
             (FIRST_FILE_FD + MAX_OPEN_FILES, 8, MESSAGE_PAGE, EBADF),
             (FIRST_FILE_FD, MAX_READ_LEN + 1, MESSAGE_PAGE, EINVAL),
             (FIRST_FILE_FD, 8, 0x40_000usize, EFAULT),
@@ -3876,7 +4054,7 @@ mod tests {
         let mut sink = FakeSink::default();
 
         for (fd, len, buf, expected) in [
-            (STDIN, 3usize, MESSAGE_PAGE, EBADF),
+            (STDIN, 3usize, MESSAGE_PAGE, ESPIPE),
             (FIRST_FILE_FD + MAX_OPEN_FILES, 3, MESSAGE_PAGE, EBADF),
             (FIRST_FILE_FD, MAX_WRITE_LEN + 1, MESSAGE_PAGE, EINVAL),
             (FIRST_FILE_FD, 3, 0x40_000usize, EFAULT),

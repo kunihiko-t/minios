@@ -2,11 +2,12 @@
 
 ## 学習目標
 
-processごとのfd tableが、file fdとpipe端を同じslot配列で管理する構造を説明できるようになります。
+processごとのfd tableが、console、file fd、pipe端を同じslot配列で管理する構造を説明できるようになります。
 `open`、`read`、`close`、`create`、`write`、`lseek`、`pread`、`pwrite`が、fdのoffsetと方向をどう扱うかを追います。
 `stat`、`fstat`、`readdir`がmetadataを固定layoutでuser bufferへ返す規約を確認します。
 `unlink`と`rename`が全processのfdを失効または追従させる理由を確認します。
 kernel所有のring bufferであるpipeについて、block、EOF、`EPIPE`、`ESPIPE`の規約を確認します。
+`dup2`でfd 1をpipeへ差し替え、childの標準出力を受け取る仕組みを説明できるようになります。
 
 ## 背景
 
@@ -26,15 +27,19 @@ pipeは容量が有限のため、空のpipeからの`read`と満杯のpipeへ�
 ### fd table
 
 fd tableは[`kernel/src/process.rs`](../../kernel/src/process.rs)の`FileFdTable`です。
-slot数は[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`MAX_OPEN_FILES`（4）で、fd番号はslot index + `FIRST_FILE_FD`（3）です。
-各slotは`Option<FdEntry>`であり、`FdEntry::File(FileFd)`か`FdEntry::Pipe { id, write }`のどちらかを持ちます。
+slot数は[`kernel/src/user/syscall.rs`](../../kernel/src/user/syscall.rs)の`FD_TABLE_LEN`（19）で、[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`FIRST_FILE_FD`（3）と`MAX_OPEN_FILES`（16）の和です。
+fd番号はslot indexそのものです。
+各slotは`Option<FdEntry>`であり、`FdEntry::Console(ConsoleFd)`、`FdEntry::File(FileFd)`、`FdEntry::Pipe { id, write }`のいずれかを持ちます。
+`FileFdTable::new`はfd 0、1、2へconsoleの`Stdin`、`Stdout`、`Stderr`を置き、残りを空にします。
+fd 0、1、2は特別な番号ではなく、閉じることも別のentryへ差し替えることもできる普通のslotです。
 
 `FileFd`はFAT32の`FileDesc`、次に読み書きする`offset`、`writable`の3つを持ちます。
 `open`はread専用、`create`はwrite専用のfdを作り、両方向のfdは作りません。
-`alloc_fd`は先頭から空きslotを探し、空きがなければ`EMFILE`を返します。
+`alloc_fd`は`FIRST_FILE_FD`以上で最小の空きslotを探し、空きがなければ`EMFILE`を返します。
+fd 0、1、2が空いていても使わないため、`open`、`create`、`pipe`の戻り値は常に3以上です。
 `close`したslotは次の`alloc_fd`で再利用されるため、同じfd番号が別のfileを指すことがあります。
 
-`spawn`は`file_fds_snapshot`でcallerのtableをcopyしてchildへ渡します。
+`spawn`は`file_fds_snapshot`でcallerのtableをfd 0、1、2も含めてcopyしてchildへ渡します。
 copyのため、spawn後のoffset変更やcloseは互いに影響しません。
 pipe端だけは同じpipe idを指すため、bufferはparentとchildで共有されます。
 
@@ -42,7 +47,10 @@ pipe端だけは同じpipe idを指すため、bufferはparentとchildで共有�
 
 番号とerrnoは[`abi/src/syscall.rs`](../../abi/src/syscall.rs)にあり、受け口は[`kernel/src/user/syscall.rs`](../../kernel/src/user/syscall.rs)の`dispatch_syscall`です。
 dispatch層はfd範囲、長さ、user pointerを先に検証し、storageへ触れる処理は`ControlSource`の実装である[`kernel/src/control.rs`](../../kernel/src/control.rs)へ委譲します。
-`dispatch_read`はstdinかfile fd範囲でなければ`EBADF`、`MAX_READ_LEN`（4096）超過なら`EINVAL`、書けないbufferなら`EFAULT`を返してから`read_fd`を呼びます。
+`read`と`write`の経路はfd番号ではなくslotの中身で決まります。
+dispatch層は`ControlSource::console_fd`でslotがconsoleを指すかを尋ね、consoleの出力ならframe sinkへ、入力なら`read_stdin`へ、それ以外は`read_fd`や`write_fd`へ流します。
+console入力への`write`とconsole出力への`read`は、pipeの方向規約と同じく`EBADF`です。
+`dispatch_read`はconsole入力でもtable範囲内のfdでもなければ`EBADF`、`MAX_READ_LEN`（4096）超過なら`EINVAL`、書けないbufferなら`EFAULT`を返してから`read_fd`を呼びます。
 `read_fd`は`FileFd`の`offset`から`read_range`で読み、読んだ分だけ`advance`します。
 writableなfdへの`read`とread専用fdへの`write`は`EBADF`です。
 
@@ -52,7 +60,7 @@ file末尾を越えるoffsetは受理され、その位置からの`read`は0を
 `pread`と`pwrite`は`a3`の明示offsetで読み書きし、fdが保持するoffsetを動かしません。
 
 `stat`は`a0/a1`のpath、`fstat`は`a0`のfdを受け、8 byteの`Stat`（`size: u32`、`kind: u32`のLE）を書きます。
-`kind`は`STAT_KIND_FILE`、`STAT_KIND_DIR`、`STAT_KIND_PIPE`のいずれかで、directoryとpipeの`size`は0です。
+`kind`は`STAT_KIND_FILE`、`STAT_KIND_DIR`、`STAT_KIND_PIPE`、`STAT_KIND_CONSOLE`のいずれかで、directory、pipe、consoleの`size`は0です。
 `readdir`は`a0/a1`のdirectory、`a2`のindex、`a3`のbufferを受け、`DIRENT_LEN`（263）byteの`DirEnt`を書きます。
 `a1`=0はroot directoryを指す`readdir`固有の規約で、indexが末尾を越えると0を返します。
 どの経路もout bufferの`EFAULT`をsourceの呼び出しより先に確定し、成功時は`ReadComplete`経由でscratchからuser memoryへcopyします。
@@ -91,7 +99,26 @@ processが起こされると同じ`ecall`がやり直されるため、guestに`
 無関係な起床で条件を満たさないprocessは、再実行で再びblockします。
 
 pipe端はseekできないため、`lseek`、`pread`、`pwrite`は`file_mut`が`None`を返した時点で`ESPIPE`になります。
+consoleのentryも位置を持たないため、dispatch層が同じ`ESPIPE`を返します。
 read端への`write`とwrite端への`read`は`EBADF`です。
+
+### dup2
+
+`dup2`（`a0=oldfd`、`a1=newfd`）は、`oldfd`のslotの中身を`newfd`のslotへcopyして`newfd`を返します。
+`oldfd`が空いている場合と、どちらかが`FD_TABLE_LEN`以上の場合は`EBADF`で、何も変えません。
+`oldfd`と`newfd`が等しければ、何もせずに`newfd`を返します。
+`FileFdTable::dup2`は`newfd`に元々あったentryを返し、[`kernel/src/main.rs`](../../kernel/src/main.rs)の`dup2_fd`はそれがpipe端なら`close`と同じく`wake_pipe_waiters`を呼びます。
+
+複製したpipe端はslotが一つ増えるだけなので、`pipe_ends`の走査はそれを独立したlive端として数えます。
+そのため同じpipeを指す端がすべて閉じるまで、EOFも`EPIPE`も起きません。
+file entryは`FileFd`ごとcopyするため、POSIXと違って複製後の2個のfdはoffsetを共有しません。
+offsetを共有するには、`FileFd`をprocess横断のopen file tableへ移し、slotはその参照を持つ形へ変える必要があります。
+`unlink`と`rename`の走査は全slotを見るため、複製したfile fdも同じく失効し、追従します。
+
+shellがchildの標準出力をpipeへ向けるときは、次の順で呼びます。
+まず`dup2(1, 退避先)`でconsoleを退避し、`dup2(write端, 1)`でfd 1をpipeへ差し替えてから`spawn`します。
+childはfd 1にpipeのwrite端を持った状態で始まるため、自分の`write(1, ...)`がpipeへ流れます。
+parentは`dup2(退避先, 1)`で自分のfd 1をconsoleへ戻し、退避先と自分のwrite端を閉じてからread端を読みます。
 
 ## 実行と確認
 
@@ -136,6 +163,20 @@ summary: PASSED all 1 phases (elapsed: 0.943s)
 期待frame列は、Ready、spawn通知、childのstdout `pipe-bytes`、childのExit、parentのstdout `pipe verified`、parentのExit、回収diagnosticです。
 parentは`waitpid`でblockするため、childのframeは必ずparentより先に出ます。
 
+[`user_dup.rs`](../../guest/src/bin/user_dup.rs)は上の順で`DOCS/CHILD.ELF`の標準出力をpipeへ向け、読んだ`spawn-child`を自分の標準出力へ写します。
+複製したwrite端がすべて閉じるまでEOFにならないこと、fd 2の`close`、`dup2`の`EBADF`、16個目までの`open`と17個目の`EMFILE`も確かめます。
+
+```console
+$ cargo xtask test user-dup
+...
+MiniOS payload: ok code=42
+phase 1/1 passed (elapsed: 1.465s)
+summary: PASSED all 1 phases (elapsed: 1.465s)
+```
+
+期待frame列は、Ready、spawn通知、childのExit、parentが写した`spawn-child`、`dup verified`、parentのExit、回収diagnosticです。
+childのExitが`spawn-child`より先に来るのは、childの出力がconsoleではなくpipeへ入ったからです。
+
 ## よくある失敗
 
 - 同じfdで読みと書きを混ぜる：`open`のfdはread専用、`create`のfdはwrite専用であり、逆方向の操作は`EBADF`です。
@@ -143,6 +184,7 @@ parentは`waitpid`でblockするため、childのframeは必ずparentより先�
 - `unlink`後もfdが使えると考える：削除したentryを指すfdは全processで失効し、呼び出し側自身の`read`や`close`も`EBADF`になります。
 - pipeの`write`が常に全量を書くと考える：空きが`PIPE_CAPACITY`未満なら書けた分だけを返すため、guestは戻り値を見て残りを書き直します。
 - write端を閉じ忘れたまま`read`でEOFを待つ：childへ継承したwrite端も数えるため、全processのwrite端が0になるまで`read`はblockし続けます。
+- `dup2`の後に元のwrite端を閉じ忘れる：fd 1へ複製したwrite端と元のwrite端は別々に数えるため、両方を閉じないとreaderはEOFを受け取れません。
 - callerを`BlockedOnPipe`へ移さずに`EAGAIN`を返す：run loopの`block_on_stdin`がprocessを`BlockedOnStdin`へ移すため、`wake_pipe_waiters`では起きなくなります。
 
 ## 演習
@@ -151,7 +193,8 @@ parentは`waitpid`でblockするため、childのframeは必ずparentより先�
 parentが書く`pipe-bytes\n`は11 byteであり、`Pipe::write`は`free()`を上限にpartial writeを返す点が手がかりです。
 予想をtestで確かめ、guestの終了codeとframe列の差を読んだ後、256へ戻します。
 
-[`guest/src/bin/file_fd.rs`](../../guest/src/bin/file_fd.rs)を参考に、`open`を5回続けて呼ぶguestを書き、5回目が`EMFILE`を返すことを`MAX_OPEN_FILES`から説明してください。
+[`guest/src/bin/file_fd.rs`](../../guest/src/bin/file_fd.rs)を参考に、`open`を17回続けて呼ぶguestを書き、17回目が`EMFILE`を返すことを`MAX_OPEN_FILES`から説明してください。
+続けて`close(0)`でfd 0を空けてから`open`し、戻り値が0ではなく空いている3以上の番号になる理由を`alloc_fd`から説明してください。
 
 ## 次の章
 

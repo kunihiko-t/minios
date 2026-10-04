@@ -136,7 +136,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ## `xtask`のモジュール境界
 
 - `xtask/src/main.rs`：process引数、読みやすいerror、終了statusだけを担当します。
-- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、file-spawn、file-waitpid、file-stat、file-readdir、file-exec、file-fdinherit、file-pipe、user-heap、user-sleep、schedを含む引数構文を定義します。
+- `cli.rs`：`setup`、`build`、`run`、`bundle`、`test`、`check`と、user-entry、user-trap、user-syscall、user-exit、payload、payload-args、payload-stdin、file、file-fd、file-write、file-unlink、file-seek、file-rename、file-mkdir、file-spawn、file-waitpid、file-stat、file-readdir、file-exec、file-fdinherit、file-pipe、user-heap、user-sleep、user-dup、schedを含む引数構文を定義します。
 - `tools.rs`：rustc、rustup target、QEMUの検出、version解析、環境別の修正commandを担当します。
 - `cargo.rs`：Cargoの子process、cross build、ELFのpath、commandと出力の診断を担当します。
 - `guest.rs`：Rust guestのrelease buildと、kernelのELF parserによる配置契約のhost検査を担当します。

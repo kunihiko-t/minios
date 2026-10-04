@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|sched|sched-io|sched-io-partial|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|sched|sched-io|sched-io-partial|shell]
 cargo xtask check
 ```
 
@@ -79,12 +79,13 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 32. QEMU file-pipeテスト
 33. QEMU user-heapテスト
 34. QEMU user-sleepテスト
-35. QEMU schedテスト
-36. QEMU sched-ioテスト
-37. QEMU sched-io-partialテスト
-38. QEMUシェルテスト
+35. QEMU user-dupテスト
+36. QEMU schedテスト
+37. QEMU sched-ioテスト
+38. QEMU sched-io-partialテスト
+39. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
 ### QEMUの三つの検証モード
 
@@ -109,7 +110,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`sched`、`sched-io`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -125,7 +126,7 @@ MiniContainer control protocolのframeを解析し、Ready、標準出力、標�
 writable fdへの`read`とread-only fdへの`write`の`EBADF`、directoryへの`create`の`EISDIR`も確かめてから、書いた内容を標準出力へ出し終了コード42を返すことを要求します。
 `file-unlink`ではfile_unlink guestが`UNLINK.TXT`を作成して`unlink`し、削除したentryを指すfdが`EBADF`で失効すること、再`open`と再`unlink`が`ENOENT`、directoryへの`unlink`が`EISDIR`を返すことを確かめます。
 その後、同名で作り直して新しい内容を読み戻し、標準出力へ出して終了コード42を返すことを要求します。
-`file-seek`ではfile_seek guestが`pread`/`pwrite`がfdのoffsetを動かさないこと、`lseek`のSET/CUR/ENDとEOF越えseek、負になる結果や未知のwhenceの`EINVAL`、方向性fdへの`pread`/`pwrite`と標準streamへの`lseek`の`EBADF`を確かめます。
+`file-seek`ではfile_seek guestが`pread`/`pwrite`がfdのoffsetを動かさないこと、`lseek`のSET/CUR/ENDとEOF越えseek、負になる結果や未知のwhenceの`EINVAL`、方向性fdへの`pread`/`pwrite`の`EBADF`、consoleを指すfdへの`lseek`の`ESPIPE`を確かめます。
 最後に`lseek`で先頭へ戻して上書きしたfileを読み戻して照合し、標準出力へ出して終了コード42を返すことを要求します。
 `file-rename`ではfile_rename guestが`rename`後も開いているfdが有効なまま内容を読めること、旧名の`open`が`ENOENT`、同名へのrenameが成功、既存fileへのrenameが置き換えとなり置き換えられたfileを指すfdが`EBADF`で失効することを確かめます。
 不在のsourceが`ENOENT`、dir→fileが`ENOTDIR`、file→dirが`EISDIR`、8.3へ正規化できない名前が`EINVAL`であることも確かめます。
@@ -142,7 +143,7 @@ reap済みpid・自分自身・存在しないpidへの`waitpid`が`ECHILD`を�
 親が`waitpid`でblockするため、childの`spawn-child`とExit(42) frameは必ず親の`waitpid verified`とExit(42)より先に出ます。
 この確定的な順序をexact照合で検査することが、親が本当にblockしていたことの直接証拠です。
 `file-stat`ではfile_stat guestが`stat`で`DOCS/NOTE.TXT`と`DOCS/CHILD.ELF`のsizeとfile kind、`DOCS`のdirectory kindを確かめます。
-不在pathの`ENOENT`、fileを途中要素に持つpathの`ENOTDIR`、書き込めないout pointerの`EFAULT`、`open`したfdへの`fstat`が`stat`と同じmetadataを返すこと、標準streamへの`fstat`の`EBADF`も確かめてから、標準出力へ出して終了コード42を返すことを要求します。
+不在pathの`ENOENT`、fileを途中要素に持つpathの`ENOTDIR`、書き込めないout pointerの`EFAULT`、`open`したfdへの`fstat`が`stat`と同じmetadataを返すこと、stdoutへの`fstat`がsize 0の`STAT_KIND_CONSOLE`を返すことも確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 `file-readdir`ではfile_readdir guestが`readdir`でrootの3件（HELLO.TXT、DOCS、`Long File Name.txt`）と`DOCS`の4件（NOTE.TXT、CHILD.ELF、FDCHILD.ELF、PIPECH.ELF）をindex順に確かめ、`.`/`..`が列挙に含まれないこととkindが`STAT_KIND_*`と一致することを確認します。
 index超過の0、fileへの指定の`ENOTDIR`、不在pathの`ENOENT`、書き込めないout pointerの`EFAULT`も確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 `file-exec`ではfile_exec guestが`exec`のerrno経路（不在pathの`ENOENT`、directoryの`EISDIR`、非ELFの`EINVAL`、読めないpath pointerの`EFAULT`）を確かめてから`DOCS/CHILD.ELF`へexecします。
@@ -164,6 +165,10 @@ diskを使わない単一processの経路なので、exact照合で検査しま�
 `yield`と`sleep(0)`がどちらも0を返すことも確かめてから、`sleep verified`を出して終了コード42を返すことを要求します。
 測った差は実行ごとに変わるため標準出力へは出さず、frame列のexact照合で検査します。
 processが一つだけなので、sleep中はrun loopのidle待ちがtimer tickを進めて起こす経路も通ります。
+`user-dup`ではuser_dup guestが`pipe`のwrite端を`dup2`でfd 1へ移してから`DOCS/CHILD.ELF`を`spawn`し、退避しておいたconsoleでfd 1を戻します。
+childの`spawn-child`はpipeへ入るため、parentは`waitpid`の後にread端から読んで照合し、自分の標準出力へ写します。
+複製したwrite端がすべて閉じるまでEOFにならないこと、fd 2の`close`、範囲外や未割り当てのfdへの`dup2`の`EBADF`、同じfdへの`dup2`、16個目までの`open`と17個目の`EMFILE`も確かめてから、`dup verified`を出して終了コード42を返すことを要求します。
+childのExit frameが写した`spawn-child`より先に来る順序のexact照合が、childの出力がconsoleを通らなかったことの直接証拠です。
 
 シェルテストは**対話モード**です。
 通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`rm Long File Name.txt`、`ls`、`cat Long File Name.txt`、`mkdir NEWDIR`、`ls`、`rmdir DOCS`、`rmdir NEWDIR`、`ls`、`mv HELLO.TXT WORLD.TXT`、`ls`、`mv WORLD.TXT HELLO.TXT`、`mv DOCS NOTESD`、`ls`、`cat NOTESD/NOTE.TXT`、`mv NOTESD DOCS`、`mv HELLO.TXT DOCS/MOVED.TXT`、`ls`、`cat DOCS/MOVED.TXT`、`mv DOCS/MOVED.TXT HELLO.TXT`、`not-a-command`、`shutdown`を標準入力へ送ります。
@@ -243,10 +248,11 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 45. QEMU file-pipe test
 46. QEMU user-heap test
 47. QEMU user-sleep test
-48. QEMU sched test
-49. QEMU sched-io test
-50. QEMU sched-io-partial test
-51. QEMU shell test
+48. QEMU user-dup test
+49. QEMU sched test
+50. QEMU sched-io test
+51. QEMU sched-io-partial test
+52. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -285,12 +291,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/51] cargo fmt --all -- --check
-phase 1/51 passed (elapsed: ...s)
+[1/52] cargo fmt --all -- --check
+phase 1/52 passed (elapsed: ...s)
 ...
-[51/51] QEMU shell test
-phase 51/51 passed (elapsed: ...s)
-summary: PASSED all 51 phases (elapsed: ...s)
+[52/52] QEMU shell test
+phase 52/52 passed (elapsed: ...s)
+summary: PASSED all 52 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

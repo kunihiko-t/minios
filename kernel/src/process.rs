@@ -11,6 +11,8 @@ use core::fmt;
 use crate::pipe::{MAX_PIPES, PipeTable};
 #[cfg(not(target_arch = "riscv32"))]
 use crate::storage::fat32::FileDesc;
+#[cfg(not(target_arch = "riscv32"))]
+use crate::user::syscall::{ConsoleFd, FD_TABLE_LEN};
 use crate::{
     elf::{LoadError, LoadedImage, load_image_with_kernel_mappings},
     memory::frame::{FrameError, FrameSource, PAGE_SIZE, PhysFrame},
@@ -132,10 +134,12 @@ impl FileFd {
 
 /// fd tableのslotの中身。file fdはFAT32位置記述子とoffsetを持ち、
 /// pipe fdは`PipeTable`内のpipe idと方向だけを持つ（pipe本体は
-/// `ProcessTable`が所有する）。
+/// `ProcessTable`が所有する）。console entryは向きだけを持つ。
 #[cfg(not(target_arch = "riscv32"))]
 #[derive(Debug, Clone, Copy)]
 pub enum FdEntry {
+    /// 新processのfd 0/1/2が最初に持つconsole entry。
+    Console(ConsoleFd),
     /// `open`/`create`が割り当てたfile fd。
     File(FileFd),
     /// `pipe`が割り当てたpipe端。`write`は書き込み端を示す。
@@ -149,7 +153,7 @@ impl FdEntry {
     pub fn file_mut(&mut self) -> Option<&mut FileFd> {
         match self {
             Self::File(file) => Some(file),
-            Self::Pipe { .. } => None,
+            Self::Console(_) | Self::Pipe { .. } => None,
         }
     }
 
@@ -157,21 +161,30 @@ impl FdEntry {
     pub const fn pipe_id(&self) -> Option<usize> {
         match self {
             Self::Pipe { id, .. } => Some(*id),
-            Self::File(_) => None,
+            Self::Console(_) | Self::File(_) => None,
+        }
+    }
+
+    /// console entryならその向きを返す。dispatchの経路選択に使う。
+    pub const fn console(&self) -> Option<ConsoleFd> {
+        match self {
+            Self::Console(console) => Some(*console),
+            Self::File(_) | Self::Pipe { .. } => None,
         }
     }
 }
 
-/// processごとのfile descriptor table。fd番号はslot index +
-/// `FIRST_FILE_FD`であり、tableはprocess内に閉じるため他processのfdを
-/// 構造的に参照できない。`spawn`はこのtableのsnapshotをchildへ渡すため、
-/// 継承はcopyでありspawn後のoffsetやcloseは互いに影響しない。
-/// ただしpipe端はcopy先が同じpipe idを指すためbufferは共有される。
+/// processごとのfile descriptor table。fd番号はslot indexそのもので、
+/// fd 0/1/2もconsole entryを持つ普通のslotである。tableはprocess内に
+/// 閉じるため他processのfdを構造的に参照できない。`spawn`はこのtableの
+/// snapshotをchildへ渡すため、継承はcopyでありspawn後のoffsetやcloseは
+/// 互いに影響しない。ただしpipe端はcopy先が同じpipe idを指すため
+/// bufferは共有される。`dup2`も同じくslotのcopyである。
 /// RV32はfdを持たないためZSTでコスト0にする。
 #[cfg(not(target_arch = "riscv32"))]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct FileFdTable {
-    slots: [Option<FdEntry>; minios_abi::syscall::MAX_OPEN_FILES],
+    slots: [Option<FdEntry>; FD_TABLE_LEN],
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -179,60 +192,83 @@ pub struct FileFdTable {
 pub struct FileFdTable;
 
 #[cfg(not(target_arch = "riscv32"))]
+impl Default for FileFdTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(target_arch = "riscv32"))]
 impl FileFdTable {
-    /// 空のfd table。manifestから起動する初期processやfd非継承の
-    /// spawnに使う。
+    /// 新processのfd table。fd 0/1/2がconsoleのstdin/stdout/stderrを指し、
+    /// 残りは空である。manifestから起動する初期processに使う。
     pub const fn new() -> Self {
-        Self {
-            slots: [const { None }; minios_abi::syscall::MAX_OPEN_FILES],
-        }
+        let mut slots = [const { None }; FD_TABLE_LEN];
+        slots[minios_abi::syscall::STDIN] = Some(FdEntry::Console(ConsoleFd::Stdin));
+        slots[minios_abi::syscall::STDOUT] = Some(FdEntry::Console(ConsoleFd::Stdout));
+        slots[minios_abi::syscall::STDERR] = Some(FdEntry::Console(ConsoleFd::Stderr));
+        Self { slots }
     }
 
     fn fd_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {
-        let slot = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD)?;
-        self.slots.get_mut(slot)?.as_mut()
+        self.slots.get_mut(fd)?.as_mut()
     }
 
     /// `fd`のslotを読む。closeする前にentryの種別をpeekするために使う。
     fn fd(&self, fd: usize) -> Option<&FdEntry> {
-        let slot = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD)?;
-        self.slots.get(slot)?.as_ref()
+        self.slots.get(fd)?.as_ref()
+    }
+
+    /// `FIRST_FILE_FD`以上で最小の空きslotへ`entry`を置きfd番号を返す。
+    /// fd 0/1/2が空いていても使わないため、`open`/`create`/`pipe`の
+    /// 戻り値は常に`FIRST_FILE_FD`以上である。空きがなければ`EMFILE`。
+    fn alloc_entry(&mut self, entry: FdEntry) -> Result<usize, isize> {
+        let first = minios_abi::syscall::FIRST_FILE_FD;
+        let fd = first
+            + self.slots[first..]
+                .iter()
+                .position(Option::is_none)
+                .ok_or(minios_abi::syscall::EMFILE)?;
+        self.slots[fd] = Some(entry);
+        Ok(fd)
     }
 
     fn alloc_fd(&mut self, desc: FileDesc, writable: bool) -> Result<usize, isize> {
-        let slot = self
-            .slots
-            .iter()
-            .position(Option::is_none)
-            .ok_or(minios_abi::syscall::EMFILE)?;
-        self.slots[slot] = Some(FdEntry::File(FileFd {
+        self.alloc_entry(FdEntry::File(FileFd {
             desc,
             offset: 0,
             writable,
-        }));
-        Ok(minios_abi::syscall::FIRST_FILE_FD + slot)
+        }))
     }
 
     /// `id`のpipeの端を`write`方向で割り当てfd番号を返す。
     /// 空きslotがなければ`EMFILE`。
     fn alloc_pipe_fd(&mut self, id: usize, write: bool) -> Result<usize, isize> {
-        let slot = self
-            .slots
-            .iter()
-            .position(Option::is_none)
-            .ok_or(minios_abi::syscall::EMFILE)?;
-        self.slots[slot] = Some(FdEntry::Pipe { id, write });
-        Ok(minios_abi::syscall::FIRST_FILE_FD + slot)
+        self.alloc_entry(FdEntry::Pipe { id, write })
     }
 
     fn close_fd(&mut self, fd: usize) -> bool {
-        let Some(slot) = fd.checked_sub(minios_abi::syscall::FIRST_FILE_FD) else {
-            return false;
-        };
-        match self.slots.get_mut(slot) {
-            Some(slot) => slot.take().is_some(),
-            None => false,
+        self.slots
+            .get_mut(fd)
+            .is_some_and(|slot| slot.take().is_some())
+    }
+
+    /// `oldfd`のentryを`newfd`へcopyし、`newfd`に元々あったentryを返す。
+    /// 呼び出し側は返ったentryがpipe端ならwaiterを起こす。`oldfd`が
+    /// 未割当か、どちらかが範囲外なら`EBADF`。`oldfd == newfd`は何も
+    /// 変えずに`None`を返す。
+    // ponytail: file entryはoffsetごとcopyするため、POSIXと違いdup2後の
+    // 2個のfdはoffsetを共有しない。共有するにはFileFdをprocess横断の
+    // open file tableへ移し、slotはその参照を持つ形にする。
+    fn dup2(&mut self, oldfd: usize, newfd: usize) -> Result<Option<FdEntry>, isize> {
+        use minios_abi::syscall::EBADF;
+
+        let entry = *self.fd(oldfd).ok_or(EBADF)?;
+        let slot = self.slots.get_mut(newfd).ok_or(EBADF)?;
+        if oldfd == newfd {
+            return Ok(None);
         }
+        Ok(slot.replace(entry))
     }
 
     /// `id`のpipeを指すこのtable内の端を`(read側, write側)`で数える。
@@ -592,6 +628,13 @@ impl Process {
     #[cfg(not(target_arch = "riscv32"))]
     pub fn close_fd(&mut self, fd: usize) -> bool {
         self.file_fds.close_fd(fd)
+    }
+
+    /// `oldfd`のentryを`newfd`へ複製し、`newfd`が元々持っていたentryを
+    /// 返す。規約は`FileFdTable::dup2`と同じである。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn dup2(&mut self, oldfd: usize, newfd: usize) -> Result<Option<FdEntry>, isize> {
+        self.file_fds.dup2(oldfd, newfd)
     }
 
     /// `(dir_cluster, dir_index)`のdir entryを指すfdを閉じる。
@@ -1793,8 +1836,11 @@ mod tests {
         assert!(process.close_fd(fd));
         assert!(!process.close_fd(fd));
         assert!(process.fd_mut(fd).is_none());
-        assert!(!process.close_fd(0));
         assert!(!process.close_fd(FIRST_FILE_FD + 100));
+
+        // fd 0..2は普通のslotなので閉じられ、二度目は未割当になる。
+        assert!(process.close_fd(0));
+        assert!(!process.close_fd(0));
 
         let again = process
             .alloc_fd(FileDesc::for_test(9, 1), false)
@@ -2057,6 +2103,43 @@ mod tests {
             Some(PipeReadOutcome::Read(4))
         );
         assert_eq!(&out[..4], b"ping");
+    }
+
+    // Catches dup2 losing an end or the console: a fresh table must hold
+    // console entries at 0..2, a duplicated pipe end must count as a live
+    // end until every copy closes, and bad fds must fail before any change.
+    #[test]
+    fn dup2_copies_entries_and_duplicated_pipe_ends_stay_live() {
+        use minios_abi::syscall::{EBADF, STDIN, STDOUT};
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        table.insert(fixture.spawn("dup")).expect("insert");
+        let id = table.pipe_alloc().expect("slot is free");
+        let process = table.get_mut(0).unwrap();
+        assert_eq!(
+            process.fd(STDIN).and_then(FdEntry::console),
+            Some(ConsoleFd::Stdin)
+        );
+        let read_fd = process.alloc_pipe_fd(id, false).expect("read end");
+        let write_fd = process.alloc_pipe_fd(id, true).expect("write end");
+
+        let replaced = process.dup2(write_fd, STDOUT).expect("dup2 succeeds");
+        assert_eq!(
+            replaced.as_ref().and_then(FdEntry::console),
+            Some(ConsoleFd::Stdout)
+        );
+        assert!(matches!(process.dup2(read_fd, read_fd), Ok(None)));
+        assert_eq!(process.dup2(write_fd + 1, STDOUT).err(), Some(EBADF));
+        assert_eq!(process.dup2(write_fd, FD_TABLE_LEN).err(), Some(EBADF));
+        assert_eq!(table.pipe_ends(id), (1, 2));
+
+        // 片方を閉じてもwrite端は残り、両方を閉じて初めて0になる。
+        let process = table.get_mut(0).unwrap();
+        assert!(process.close_fd(write_fd));
+        assert_eq!(table.pipe_ends(id), (1, 1));
+        assert!(table.get_mut(0).unwrap().close_fd(STDOUT));
+        assert_eq!(table.pipe_ends(id), (1, 0));
     }
 
     // Catches EOF and broken-pipe polarity flipping: reads must block only

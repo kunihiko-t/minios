@@ -201,6 +201,12 @@ pub fn sys_sleep(millis: usize) -> isize {
     ecall(SyscallNumber::Sleep, millis, 0, 0, 0)
 }
 
+/// `dup2`を呼ぶ。`newfd`を閉じてから`oldfd`と同じentryを指させる。
+/// 戻り値は`newfd`か負のerrno。
+pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
+    ecall(SyscallNumber::Dup2, oldfd, newfd, 0, 0)
+}
+
 /// `yield`を呼ぶ。残りのtime sliceを手放し、再び選ばれると0を返す。
 pub fn sys_yield() -> isize {
     ecall(SyscallNumber::Yield, 0, 0, 0, 0)

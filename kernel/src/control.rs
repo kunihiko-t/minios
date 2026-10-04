@@ -60,6 +60,27 @@ impl ControlSource for UartControlSource<'_> {
         }
     }
 
+    /// 現在processのfd tableを引き、consoleを指すentryならその向きを返す。
+    /// fd番号ではなくentryで判定するため、`dup2`で移したconsoleも
+    /// pipeやfileへ差し替えたfd 1も正しい経路へ流れる。process tableを
+    /// 持たないuser-syscall probeでは、fd 0/1/2を固定のconsoleとみなす。
+    #[cfg(target_arch = "riscv64")]
+    fn console_fd(&mut self, fd: usize) -> Option<minios_kernel::user::syscall::ConsoleFd> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        if unsafe { crate::current_pid() }.is_none() {
+            return minios_kernel::user::syscall::fixed_console_fd(fd);
+        }
+        // Safety: 同上。借用はこの呼び出し内で完結する。
+        unsafe { crate::fd_entry_mut(fd) }?.console()
+    }
+
+    /// guestの`dup2`を現在processのfd tableへ委譲する。
+    #[cfg(target_arch = "riscv64")]
+    fn dup2(&mut self, oldfd: usize, newfd: usize) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::dup2_fd(oldfd, newfd) }
+    }
+
     /// guestの`read_file`を遅延mount済みのstorage sessionへ委譲する。
     /// `output`より長いfileは先頭`output.len()` byteで打ち切る。
     #[cfg(target_arch = "riscv64")]
@@ -112,7 +133,8 @@ impl ControlSource for UartControlSource<'_> {
         let entry = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?;
         let file = match entry {
             FdEntry::File(file) => file,
-            FdEntry::Pipe { write: true, .. } => return Err(EBADF),
+            // consoleはdispatchが`console_fd`で先に振り分ける。
+            FdEntry::Console(_) | FdEntry::Pipe { write: true, .. } => return Err(EBADF),
             // Safety: 同上。table借用はこの呼び出し内で完結する。
             FdEntry::Pipe { id, .. } => return unsafe { crate::pipe_read(*id, output) },
         };
@@ -295,7 +317,7 @@ impl ControlSource for UartControlSource<'_> {
 
     /// guestの`fstat`をfdのFileDescから返す。`FileDesc`はopen時のsizeを
     /// 保持し`write_range`が更新するため、sessionへ触れずに済む。
-    /// standard streamや未割当fdは`EBADF`。
+    /// 未割当fdは`EBADF`。
     #[cfg(target_arch = "riscv64")]
     fn fstat(&mut self, fd: usize) -> Result<minios_abi::syscall::Stat, isize> {
         use minios_abi::syscall::{EBADF, STAT_KIND_FILE, Stat};
@@ -312,6 +334,10 @@ impl ControlSource for UartControlSource<'_> {
             FdEntry::Pipe { .. } => Stat {
                 size: 0,
                 kind: minios_abi::syscall::STAT_KIND_PIPE,
+            },
+            FdEntry::Console(_) => Stat {
+                size: 0,
+                kind: minios_abi::syscall::STAT_KIND_CONSOLE,
             },
         })
     }
@@ -443,7 +469,8 @@ impl ControlSource for UartControlSource<'_> {
         let entry = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?;
         let file = match entry {
             FdEntry::File(file) => file,
-            FdEntry::Pipe { write: false, .. } => return Err(EBADF),
+            // consoleはdispatchが`console_fd`で先に振り分ける。
+            FdEntry::Console(_) | FdEntry::Pipe { write: false, .. } => return Err(EBADF),
             // Safety: 同上。table借用はこの呼び出し内で完結する。
             FdEntry::Pipe { id, .. } => return unsafe { crate::pipe_write(*id, data) },
         };
