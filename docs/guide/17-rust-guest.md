@@ -26,6 +26,7 @@ NEORV32向けのRV32IM実機経路はM-modeで動作するkernel shell専用で�
 
 guest本体は[`guest/src/main.rs`](../../guest/src/main.rs)にあります。
 `#![no_std]`と`#![no_main]`により、Rust runtimeと`main`の起動時処理を使わず、`_start`を唯一の入口にします。
+全guest programが共有するuser libraryは[`guest/src/lib.rs`](../../guest/src/lib.rs)の`minios_guest`です。
 
 [`guest/linker.ld`](../../guest/linker.ld)はloaderとの配置契約を作ります。
 `ENTRY(_start)`と`KEEP(*(.text.entry))`で入口を先頭に固定し、`.text`と`.rodata`を`0x0010_0000`（`USER_START`）からのR+X segmentへ置きます。
@@ -34,20 +35,32 @@ guest本体は[`guest/src/main.rs`](../../guest/src/main.rs)にあります。
 program headerの2個目は`PT_RISCV_ATTRIBUTES`であり、loaderは`PT_LOAD`以外を読み飛ばします。
 [`guest/build.rs`](../../guest/build.rs)はこのscriptを呼び出しcwdに依存しない絶対pathでlinkerへ渡します。
 
-[`_start`](../../guest/src/main.rs)は`.text.entry`へ置いたnaked関数です。
-初期`sp`はkernelが16 byte整列済みで用意し、`a0=argc`と`a1=argv`は第一・第二引数としてそのまま[`guest_main`](../../guest/src/main.rs)へ流れるため、register操作は不要です。
-`guest_main`は`argv[0]`から`argv[argc - 1]`までのNUL終端文字列を順に`write`し、終了code42で`exit`します。
+各programは`minios_guest::entry!(main)`を1行書き、[`entry!`](../../guest/src/lib.rs)が`_start`と`panic_handler`を生成します。
+`_start`は`.text.entry`へ置いたnaked関数です。
+初期`sp`はkernelが16 byte整列済みで用意し、`a0=argc`と`a1=argv`は第一・第二引数としてそのままlibrary内部の入口関数へ流れるため、register操作は不要です。
+入口関数は`argc`と`argv`から`Args`を作って`main(args: Args) -> i32`を呼び、戻り値を終了codeとして`exit`へ渡します。
+`Args`はNUL終端を除いた各引数を`&'static [u8]`として順に返すiteratorです。
+[`guest/src/main.rs`](../../guest/src/main.rs)の`main`は`argv[0]`から`argv[argc - 1]`までを引数1個につき1回の`write`で書き、42を返します。
 `argv[0]`はmanifestの`name`、`argv[1]`以降は`arg=`行の順序どおりの文字列です。
 
 system callは[`minios_abi::syscall`](../../abi/src/syscall.rs)の番号に従います。
-syscall wrapperは全guest programが共有する[`guest/src/sys.rs`](../../guest/src/sys.rs)にあり、各programは`minios_guest::sys`から使います。
+生のsyscall wrapperは[`guest/src/sys.rs`](../../guest/src/sys.rs)にあり、pointerと長さをそのままkernelへ渡します。
 `sys_write`は`a0=fd`（引数兼戻り値）、`a1=pointer`、`a2=len`、`a7=1`で`ecall`し、書いたbyte数か負のerrnoを受けます。
 `sys_exit`は`a0=code`、`a7=2`で`ecall`し、kernelがguestへ戻らない契約のため`noreturn`です。
-panic handlerと`write`失敗時は終了code70で`exit`し、沈黙した停止や未定義の継続を作りません。
+不正なpointer、失効したfd、型で表せない引数を渡す検査は、この生のwrapperを使います。
+
+libraryは生のwrapperの上に、syscall 1回を1 methodへ包む薄い型を置きます。
+[`io`](../../guest/src/io.rs)は`read`、`write_all`と、`print!`、`println!`、`eprint!`、`eprintln!`を提供します。
+kernelは`write` 1回を1 frameとしてhostへ送りますが、`core::fmt`は1回の書式化を何度もの`write_str`へ分けます。
+そこで`print!`は1回分を256 byteのstack bufferへ溜めてから`write`し、bufferに収まる出力を1 frameにします。
+[`fs`](../../guest/src/fs.rs)の`File`は`open`、`create`、`read`、`write`、`seek`、`pread`、`pwrite`、`stat`を持ち、dropで`close`します。
+[`process`](../../guest/src/process.rs)は`spawn`、`wait`、`exec`、`exit`、`pipe`、`dup2`などを提供します。
+失敗は負のerrnoを包んだ`Errno`として`Result`で返ります。
+panic handlerは終了code70で`exit`するため、`unwrap`や`assert!`の失敗も70になり、沈黙した停止や未定義の継続を作りません。
 
 第二のguestは[`guest/src/bin/stdin_cat.rs`](../../guest/src/bin/stdin_cat.rs)にあります。
 `sys_read`は`a0=0`（`STDIN`）、`a1=pointer`、`a2=len`、`a7=3`で`ecall`し、読んだbyte数、EOFの0、負のerrnoを受けます。
-`guest_main`はstack上の512 byte bufferへ`read`し、読んだ分だけ`write`するloopをEOFまで繰り返してから終了code42で`exit`します。
+`main`はstack上の512 byte bufferへ`read`し、読んだ分だけ`write`するloopをEOFまで繰り返してから42を返します。
 frame境界と要求長は一致しなくてよく、kernelがframe内の残りを次の`read`へ繰り越します。
 `read`失敗時も終了code70で`exit`します。
 
@@ -118,9 +131,12 @@ cargo test -p xtask --locked bundle
 
 ## よくある失敗
 
-- `fn main`を残す：`#![no_main]`のguestは`_start`が唯一の入口であり、`main`を使うとstdの起動時処理を要求します。
+- `entry!`を書き忘れる：`_start`と`panic_handler`が生成されず、linkが失敗します。
+- `#![no_main]`を外す：`main`がstdの起動時処理を要求する入口として扱われ、`no_std`のguestではbuildできません。
 - linker scriptを渡さない：entryが`USER_START`に来ず、R+X配置にもならないため、kernel loaderが受理しません。
 - `.text.entry`の`KEEP`を外す：最適化で`_start`が消えるか先頭に来なくなり、entry契約が壊れます。
+- 1回の`print!`で256 byteを超えて書く：bufferが満杯になるたびに`write`するため、出力が複数のframeに分かれます。
+- kernelが失効させたfdを`File`のままdropする：dropの`close`が、同じ番号を再利用した別のfdを閉じることがあります。
 - 初期stackの上位を書き換える：argv文字列は`sp`より上位の読み取り専用初期データであり、以降のstack使用は`sp`より下位へ行います。
 - manifestの`name`に空白を入れる：文字種違反のため、`InvalidName`を報告してbundle生成が失敗します。
 - guestにstderr出力を期待する：guestはstdoutだけを書き、stderr frame経路はMK6 payload testが担います。

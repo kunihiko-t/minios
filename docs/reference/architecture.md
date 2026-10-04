@@ -151,7 +151,8 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 ## Rustユーザープログラム
 
-- `guest/src/main.rs`：`no_std`と`no_main`のguest本体であり、`_start`、`guest_main(argc, argv)`、`write`と`exit`の`ecall`、panic時の終了code70を提供します。
+- `guest/src/lib.rs`：全guest programが共有する`minios_guest` libraryであり、`_start`とpanic時の終了code70を生成する`entry!`、`print!`、`File`、`spawn`などの薄い型、生のsyscall wrapperを提供します。
+- `guest/src/main.rs`：`no_std`と`no_main`の最小guestであり、`argv`を順に`write`して42で終了します。
 - `guest/linker.ld`：`_start`を先頭に固定し、`.text`と`.rodata`を`0x0010_0000`からのR+X segmentへ置く配置契約を定義します。
 - `guest/build.rs`：linker scriptを呼び出しcwdに依存しない絶対pathで渡します。
 

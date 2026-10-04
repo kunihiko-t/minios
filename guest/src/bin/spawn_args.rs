@@ -6,37 +6,30 @@
 //! `EFAULT`で、どれもchildを作らない。続いてargc=0で起動してargvが
 //! basenameの`ECHO.ELF`だけであることを、argc=3で
 //! `echoargs`、`alpha`、`beta gamma`がそのまま届くことを示す。
-//! 失敗したspawnがpidを消費していればchildのpidがずれて70で終了する。
+//! 失敗したspawnがpidを消費していればchildのpidがずれ、panicして70で終了する。
 //! 最後に`spawn args verified`を出して42で終了する。E2Eのspawn-args検査が使う。
 
 #![no_std]
 #![no_main]
 
-use core::arch::naked_asm;
 use minios_abi::{
     manifest::ARG_MAX_LEN,
-    syscall::{EFAULT, EINVAL, SPAWN_MAX_ARGC, STDOUT},
+    syscall::{EFAULT, EINVAL, SPAWN_MAX_ARGC},
 };
-use minios_guest::sys::{sys_exit, sys_spawn, sys_waitpid, sys_write};
+use minios_guest::{
+    Args, Errno, println,
+    process::{spawn, wait},
+    sys::sys_spawn,
+};
 
-const FAILURE_EXIT: u32 = 70;
-const SUCCESS_EXIT: u32 = 42;
+const SUCCESS_EXIT: i32 = 42;
 const ECHO_PATH: &[u8] = b"DOCS/ECHO.ELF";
-const MESSAGE: &[u8] = b"spawn args verified\n";
 /// 上限を1 byte超える文字列。
 static LONG: [u8; ARG_MAX_LEN + 1] = [b'a'; ARG_MAX_LEN + 1];
 
-fn check(condition: bool) {
-    if !condition {
-        sys_exit(FAILURE_EXIT);
-    }
-}
-
-fn arg(text: &[u8]) -> [u64; 2] {
-    [text.as_ptr() as u64, text.len() as u64]
-}
-
-fn spawn(argv: &[[u64; 2]]) -> isize {
+/// argv entry列を生のまま`spawn`へ渡す。libraryの`spawn`はargc超過を
+/// syscall前に拒否するため、kernel側の検査は生のsyscallで確かめる。
+fn spawn_raw(argv: &[[u64; 2]]) -> isize {
     sys_spawn(
         ECHO_PATH.as_ptr(),
         ECHO_PATH.len(),
@@ -45,40 +38,30 @@ fn spawn(argv: &[[u64; 2]]) -> isize {
     )
 }
 
-extern "C" fn guest_main() -> ! {
+minios_guest::entry!(main);
+
+fn main(_args: Args) -> i32 {
     // どの誤りもchildを作らず、pidも消費しない。
-    let many = [arg(b"x"); SPAWN_MAX_ARGC + 1];
-    check(spawn(&many) == EINVAL);
-    check(spawn(&[arg(b"echoargs"), arg(&LONG)]) == EINVAL);
-    check(sys_spawn(ECHO_PATH.as_ptr(), ECHO_PATH.len(), core::ptr::null(), 1) == EFAULT);
-    check(spawn(&[arg(b"echoargs"), [0, 1]]) == EFAULT);
+    let x = [b"x".as_ptr() as u64, 1];
+    assert_eq!(spawn_raw(&[x; SPAWN_MAX_ARGC + 1]), EINVAL);
+    assert_eq!(spawn(ECHO_PATH, &[b"echoargs", &LONG]), Err(Errno(EINVAL)));
+    assert_eq!(
+        sys_spawn(ECHO_PATH.as_ptr(), ECHO_PATH.len(), core::ptr::null(), 1),
+        EFAULT
+    );
+    let echoargs = [b"echoargs".as_ptr() as u64, 8];
+    assert_eq!(spawn_raw(&[echoargs, [0, 1]]), EFAULT);
 
     // argc=0は従来どおりbasenameだけがargv[0]になる。
-    check(spawn(&[]) == 1);
-    check(sys_waitpid(1) == SUCCESS_EXIT as isize);
+    assert_eq!(spawn(ECHO_PATH, &[]), Ok(1));
+    assert_eq!(wait(1), Ok(SUCCESS_EXIT));
 
-    let argv = [arg(b"echoargs"), arg(b"alpha"), arg(b"beta gamma")];
-    check(spawn(&argv) == 2);
-    check(sys_waitpid(2) == SUCCESS_EXIT as isize);
+    assert_eq!(
+        spawn(ECHO_PATH, &[b"echoargs", b"alpha", b"beta gamma"]),
+        Ok(2)
+    );
+    assert_eq!(wait(2), Ok(SUCCESS_EXIT));
 
-    check(sys_write(STDOUT, MESSAGE.as_ptr(), MESSAGE.len()) == MESSAGE.len() as isize);
-    sys_exit(SUCCESS_EXIT);
-}
-
-/// 初期`sp`はkernelが16 byte整列済み。`a0/a1`は第一・第二引数として
-/// そのまま`guest_main`へ流れるため、register操作は不要である。
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
-#[unsafe(naked)]
-unsafe extern "C" fn _start() -> ! {
-    naked_asm!(
-        "call {entry}",
-        "j .",
-        entry = sym guest_main,
-    )
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    sys_exit(FAILURE_EXIT);
+    println!("spawn args verified");
+    SUCCESS_EXIT
 }
