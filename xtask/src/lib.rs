@@ -398,7 +398,9 @@ fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
         }
         Phase::DocsGuideStructure => {
             docs::check_guide_structure(&workspace)?;
-            docs::check_harness_example(&workspace, check_phases().len())?;
+            let commands: Vec<String> = check_phases().into_iter().map(Phase::command).collect();
+            docs::check_harness_example(&workspace, &commands)?;
+            docs::check_hand_written_phase_counts(&workspace)?;
             return Ok(String::new());
         }
         Phase::DocsPublicationFiles => {
