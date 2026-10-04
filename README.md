@@ -6,7 +6,7 @@ OpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイ
 静的なRISC-V 64 ELFを検証してU-modeで実行するloaderと、複数のprocessをタイマー割り込みで切り替えるround-robin schedulerを備えています。
 virtio-blk上のFAT32 volumeを読み書きでき、user programはfile descriptor、process生成、pipeなどのsystem callを使えます。
 system callの一覧は[MiniContainer Guest ABI](docs/reference/minicontainer-abi.md#syscall-abi-v1)にあります。
-user programはMiniBundle boot payloadとしてQEMU loaderから渡すか、FAT32上のELFとして`spawn`で起動します。
+最初のuser programはMiniBundle boot payloadとしてQEMU loaderから渡し、そのprogramが`spawn`でFAT32上のELFを別のprocessとして起動できます。
 NEORV32向けには、RISC-V 32のM-modeで起動してUARTシェルを動かす小さな実機経路があります。
 日本語の学習ガイドと、同じ結果を繰り返し確認できるテストハーネスも用意しています。
 
@@ -147,7 +147,7 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 
 - 同時に動かせるprocessは4個までで、各processが開けるfileも4個までです。
 - pipeのbufferは256 byteで、満杯のときは書き込み側が待ちます。
-- FAT32へ新しく作れるfile名は、8.3形式へ正規化できる名前だけです。
+- FAT32へ新しく作れるfile名とdirectory名は、8.3形式へ正規化できる名前だけです。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。
 - ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長しますが、取り込んだpageは返しません。
 - ハードウェアアドレス、タイムベース、RAMの上端はOpenSBIが渡すDevice Treeから発見しますが、対象machineはQEMU `virt`の配置契約に限定しています。
