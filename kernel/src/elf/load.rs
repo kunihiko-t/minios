@@ -1,7 +1,10 @@
 use core::{cmp, fmt};
 
 use crate::{
-    elf::{ElfError, ElfImage, LoadPlan, LoadSegment, USER_STACK_BOTTOM, USER_STACK_TOP},
+    elf::{
+        ElfError, ElfImage, LoadPlan, LoadSegment, MAX_USER_IMAGE_PAGES, USER_GUARD_BOTTOM,
+        USER_STACK_BOTTOM, USER_STACK_TOP,
+    },
     memory::frame::{FrameError, FrameSource, PAGE_SIZE},
     vm::{
         AddressSpace, AddressSpaceBuilder, FrameKind, FrameStore, KernelMapping, PageFlags,
@@ -27,6 +30,19 @@ pub struct LoadedImage {
     address_space: AddressSpace,
     entry: VirtAddr,
     user_stack_top: VirtAddr,
+    heap: UserHeap,
+}
+
+/// `sbrk`のheap状態。heapはimage末尾（最上位PT_LOADのpage境界）から
+/// `USER_GUARD_BOTTOM`へ向けて上へ伸びる。`brk`はguestへ見せるbyte単位の
+/// break、`mapped_end`は既にmap済みのpage境界であり、frame確保が途中で
+/// 失敗した場合は`brk <= mapped_end`のまま後者だけが進む。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UserHeap {
+    image_pages: usize,
+    start: u64,
+    brk: u64,
+    mapped_end: u64,
 }
 
 /// A failed destruction that retains the complete image for a safe retry.
@@ -76,12 +92,61 @@ impl LoadedImage {
         self.address_space.allocator_id()
     }
 
+    /// Returns the current `sbrk` break.
+    pub const fn brk(&self) -> u64 {
+        self.heap.brk
+    }
+
+    /// `sbrk`: breakを`increment` byte進め、旧breakを返す。0は現在値を
+    /// 返すだけである。新しいpageはzero済みのU+R+W（Xなし）でmapする。
+    /// image page数とheap page数の合計が`MAX_USER_IMAGE_PAGES`を超える、
+    /// またはbreakが`USER_GUARD_BOTTOM`を越える要求は何も変えず`ENOMEM`。
+    /// frame確保が途中で尽きた場合はmap済みpageを残し（address spaceが
+    /// 所有しexit時に回収する）、breakは動かさず`ENOMEM`を返す。
+    pub fn sbrk<M: FrameStore>(
+        &mut self,
+        increment: isize,
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+    ) -> Result<u64, isize> {
+        use minios_abi::syscall::{EINVAL, ENOMEM};
+
+        // ponytail: 縮小は未対応で負のincrementはEINVAL。heap pageの返却が
+        // 要る時点でunmapと台帳からの除去を追加する。
+        let Ok(increment) = u64::try_from(increment) else {
+            return Err(EINVAL);
+        };
+        let old = self.heap.brk;
+        let new_brk = old
+            .checked_add(increment)
+            .filter(|end| *end <= USER_GUARD_BOTTOM)
+            .ok_or(ENOMEM)?;
+        let page = PAGE_SIZE as u64;
+        let new_end = new_brk.next_multiple_of(page);
+        let heap_pages = usize::try_from((new_end - self.heap.start) / page).map_err(|_| ENOMEM)?;
+        if self.heap.image_pages + heap_pages > MAX_USER_IMAGE_PAGES {
+            return Err(ENOMEM);
+        }
+
+        let flags = PageFlags::new(true, true, false, true).map_err(|_| ENOMEM)?;
+        while self.heap.mapped_end < new_end {
+            let next = VirtPage::from_start(self.heap.mapped_end).map_err(|_| ENOMEM)?;
+            self.address_space
+                .map_new_zeroed(allocator, memory, next, flags)
+                .map_err(|_| ENOMEM)?;
+            self.heap.mapped_end += page;
+        }
+        self.heap.brk = new_brk;
+        Ok(old)
+    }
+
     /// Returns every owned frame, retaining this image if the allocator rejects it.
     pub fn destroy(self, allocator: &mut dyn FrameSource) -> Result<(), LoadedImageDestroyError> {
         let Self {
             address_space,
             entry,
             user_stack_top,
+            heap,
         } = self;
         match address_space.destroy(allocator) {
             Ok(()) => Ok(()),
@@ -93,6 +158,7 @@ impl LoadedImage {
                         address_space,
                         entry,
                         user_stack_top,
+                        heap,
                     },
                 })
             }
@@ -155,10 +221,17 @@ pub fn load_image_with_kernel_mappings<M: FrameStore, I: IntoIterator<Item = Ker
             .map_err(LoadError::Vm)?;
     }
 
+    let heap_start = plan.image_end();
     Ok(LoadedImage {
         address_space: builder.finish(),
         entry,
         user_stack_top,
+        heap: UserHeap {
+            image_pages: plan.total_user_pages(),
+            start: heap_start,
+            brk: heap_start,
+            mapped_end: heap_start,
+        },
     })
 }
 
@@ -589,6 +662,70 @@ mod tests {
         let image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
 
         assert_eq!(allocator.stats().allocated - before.allocated, 23);
+        image.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats(), before);
+    }
+
+    // Catches sbrk starting anywhere but the image end, moving the break on
+    // a rejected request, mapping heap pages executable, double-mapping
+    // after a partial failure, or leaking heap frames past destroy.
+    #[test]
+    fn sbrk_grows_from_the_image_end_and_keeps_partial_maps_on_exhaustion() {
+        use minios_abi::syscall::{EINVAL, ENOMEM};
+
+        let bytes = fixture::valid_riscv64_elf();
+        let mut allocator = fixture_allocator();
+        let before = allocator.stats();
+        let mut memory = TestFrameStore::default();
+        let mut image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
+        let start = 0x0020_1000;
+
+        assert_eq!(image.sbrk(0, &mut allocator, &mut memory), Ok(start));
+        assert_eq!(image.sbrk(-1, &mut allocator, &mut memory), Err(EINVAL));
+        assert_eq!(
+            image.sbrk(isize::MAX, &mut allocator, &mut memory),
+            Err(ENOMEM)
+        );
+        // guardより下でもimage 2 page + heapが上限を超えればENOMEM。
+        let over_limit = isize::try_from(crate::elf::MAX_USER_IMAGE_PAGES * PAGE_SIZE).unwrap();
+        assert_eq!(
+            image.sbrk(over_limit, &mut allocator, &mut memory),
+            Err(ENOMEM)
+        );
+        assert_eq!(image.brk(), start);
+
+        assert_eq!(image.sbrk(10, &mut allocator, &mut memory), Ok(start));
+        assert_eq!(image.brk(), start + 10);
+        let heap_flags = image
+            .address_space()
+            .translate(&memory, VirtAddr::try_new(start).unwrap())
+            .unwrap()
+            .1;
+        assert_eq!(heap_flags, PageFlags::new(true, true, false, true).unwrap());
+        assert!(
+            read_virtual(&image, &memory, start, PAGE_SIZE)
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+
+        // 残りframeより多いpageを要求すると、map済みpageは残しbreakは動かない。
+        let free = allocator.stats().free;
+        let request = isize::try_from((free + 8) * PAGE_SIZE).unwrap();
+        assert_eq!(
+            image.sbrk(request, &mut allocator, &mut memory),
+            Err(ENOMEM)
+        );
+        assert_eq!(image.brk(), start + 10);
+        assert_eq!(allocator.stats().free, 0);
+
+        // map済みの範囲に収まる成長はframeを確保せず成功する。
+        let step = isize::try_from(PAGE_SIZE).unwrap();
+        assert_eq!(
+            image.sbrk(step, &mut allocator, &mut memory),
+            Ok(start + 10)
+        );
+        assert_eq!(allocator.stats().free, 0);
+
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
     }

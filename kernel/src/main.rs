@@ -1958,6 +1958,28 @@ unsafe fn exec_current_process(
     process.exec(name, elf, &[], &mut frames, memory, plan.mappings())
 }
 
+/// 現在processのbreakを動かす (`sbrk` syscall)。frameは`GlobalFrames`、
+/// page tableへの書き込みは`USER_SYSCALL_PROBE_MEMORY`を使う。
+/// 新しいPTEはactiveなuser satpへ入るため、戻る前にTLBを無効化する。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn sbrk_current_process(increment: isize) -> Result<u64, isize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let Some(process) = (unsafe { process.as_mut() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    let memory = unsafe { &mut *(USER_SYSCALL_PROBE_MEMORY as *mut IdentityFrameStore) };
+    let mut frames = GlobalFrames;
+    let result = process.sbrk(increment, &mut frames, memory);
+    // Safety: S-modeのtrap窓で、変更したpage tableの古い翻訳を捨てるだけである。
+    unsafe { core::arch::asm!("sfence.vma zero, zero") };
+    result
+}
+
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
 #[cfg(target_arch = "riscv64")]
 fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {

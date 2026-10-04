@@ -42,6 +42,10 @@ pub enum SyscallNumber {
     /// をLEで書き込み、8を返す。両端は`spawn`したchildへ継承され、
     /// kernel所有のbounded bufferを介してbyteをやり取りする。
     Pipe = 22,
+    /// `a0`の符号付きincrementだけ呼び出しprocessのheap breakを進め、
+    /// 旧breakを返す。0は現在のbreakを返す。負のincrementは`EINVAL`、
+    /// 上限超過やframe不足は`ENOMEM`で、どちらもbreakを動かさない。
+    Sbrk = 23,
 }
 
 pub const STDIN: usize = 0;
@@ -190,6 +194,7 @@ mod tests {
         assert_eq!(SyscallNumber::Readdir as usize, 20);
         assert_eq!(SyscallNumber::Exec as usize, 21);
         assert_eq!(SyscallNumber::Pipe as usize, 22);
+        assert_eq!(SyscallNumber::Sbrk as usize, 23);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);

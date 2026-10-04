@@ -174,6 +174,15 @@ impl LoadPlan {
         self.total_user_pages
     }
 
+    /// Returns the page-aligned end of the highest loadable segment, which
+    /// is where the `sbrk` heap starts.
+    pub fn image_end(&self) -> u64 {
+        self.segments()
+            .filter_map(|segment| segment.mapped_end().ok())
+            .max()
+            .unwrap_or(USER_START)
+    }
+
     /// Iterates over nonempty loadable segments in program-header order.
     pub fn segments(&self) -> impl Iterator<Item = &LoadSegment> {
         self.segments[..self.len].iter().flatten()

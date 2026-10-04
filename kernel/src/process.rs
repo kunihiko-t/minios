@@ -622,6 +622,21 @@ impl Process {
             .address_space()
     }
 
+    /// `sbrk` syscall。現在imageのbreakを動かし旧breakを返す。breakは
+    /// imageに属するため、`exec`は新imageの初期breakへ、`spawn`のchildは
+    /// 自分のimageの初期breakから始まる。
+    pub fn sbrk<M: FrameStore>(
+        &mut self,
+        increment: isize,
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+    ) -> Result<u64, isize> {
+        self.image
+            .as_mut()
+            .expect("live process retains its loaded image")
+            .sbrk(increment, allocator, memory)
+    }
+
     pub const fn user_satp(&self) -> u64 {
         self.user_satp
     }
@@ -1303,6 +1318,13 @@ mod tests {
         let old_satp = process.user_satp();
         let old_stack_top = process.kernel_stack_top();
         let allocated_before = fixture.frames.stats().allocated;
+        // heap pageは旧imageと一緒にretireされ、destroyで返る。
+        let heap_start = process
+            .sbrk(0, &mut fixture.frames, &mut fixture.memory)
+            .unwrap();
+        process
+            .sbrk(16, &mut fixture.frames, &mut fixture.memory)
+            .unwrap();
         let bytes = valid_riscv64_elf();
 
         let context = process
@@ -1317,6 +1339,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("exec must succeed: {error:?}"));
 
         assert_eq!(process.name(), "proc-exec-2");
+        // breakはimageに属するため、新imageは初期breakから始まる。
+        assert_eq!(
+            process.sbrk(0, &mut fixture.frames, &mut fixture.memory),
+            Ok(heap_start)
+        );
         assert_eq!(process.kernel_stack_top(), old_stack_top);
         assert_ne!(process.user_satp(), old_satp);
         assert_eq!(process.user_satp() >> 60, 8);

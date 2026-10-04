@@ -467,6 +467,13 @@ impl ControlSource for UartControlSource<'_> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         unsafe { crate::create_pipe() }
     }
+
+    /// guestの`sbrk`を現在processのimageへ委譲する。
+    #[cfg(target_arch = "riscv64")]
+    fn sbrk(&mut self, increment: isize) -> Result<u64, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::sbrk_current_process(increment) }
+    }
 }
 
 /// probe/mountの失敗をguest向けerrnoへ写像する。

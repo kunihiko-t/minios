@@ -91,10 +91,9 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 ### 段階1：user spaceを実用に届かせる
 
 次に、guestが「自分でprogramを書いて動かせる」水準へ到達させます。
-現在のsyscallはfileとprocessの操作を一通り備えていますが、user heap、時刻、fdの複製がないため、Rustの`alloc`も待機も出力の切り替えもguestから使えません。
+現在のsyscallはfileとprocessの操作とuser heapを備えていますが、時刻とfdの複製がないため、待機も出力の切り替えもguestから使えません。
 
-- **`sbrk`**：user address spaceの末尾にheap領域を伸ばし、guest crateで`alloc`の`Vec`と`String`を使えるようにします。
-  `elf/plan.rs`のuser page上限2,048を超えた要求は`ENOMEM`で拒否します。
+- **`sbrk`**（完了）：guestは`SbrkAllocator`をglobal allocatorにして`Vec`と`String`を使えます（`cargo xtask test user-heap`で検証）。
 - **`clock`と`sleep`**：`time.rs`の`uptime_millis`をguestへ公開し、`sleep`は`BlockedUntil(tick)`で待機中のprocessにCPUを渡します。
   既存の`BlockedOnStdin`と同じ再実行の仕組みに乗せます。
 - **`yield`**：busy-waitするsample guestを`yield`で置き換え、schedulerの検証をtime sliceに依存しない形へ直します。

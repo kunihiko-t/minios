@@ -176,6 +176,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ263 byteの`DirEnt`として書き込む。`a1`=0はroot directoryを指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（263）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
 | 21 | `exec` | `a0=path pointer`、`a1=path length` | `path`のfileをELFとして読み込み、呼び出しprocessのimageを置き替える。pidとfd tableは引き継ぐ。成功時は戻らず新imageのentryから始まる。負のerrnoは`ENOENT`/`EISDIR`/`EINVAL`/`EFAULT`/`ENOMEM` |
 | 22 | `pipe` | `a0=out pointer` | kernel管理のbyte channelを1本作成し、read端とwrite端のfdを`a0`のuser bufferへ8 byte（2個の`u32`）で書き込む。戻り値は`PIPE_OUT_LEN`（8）か負のerrno |
+| 23 | `sbrk` | `a0=increment（符号付き）` | 呼び出しprocessのheap breakを`increment` byte進め、旧breakを返す。0は現在のbreakを返す。負のerrnoは`EINVAL`/`ENOMEM` |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -220,6 +221,14 @@ childは呼び出し側のfd tableのsnapshotを引き継ぎます。同じfd番
 `pipe`はkernelが所有する256 byteのring bufferを1本作り、read端とwrite端のfdを`out`が指す8 byteへlittle-endianの`u32`二つ（先にread端）で書き込みます。fdの割り当てより先に`out`の書き込み可能性を検査するため、失敗時にfdは残りません。pipeの両端はfile fdと同じtableのslotを使うため、`spawn`のsnapshot継承で同じpipeを指す端が子へ渡り、process間のbyteの流れ道になります。
 pipeのread端への`read`は、bufferにdataがあれば読んでbyte数を返し、空でwrite端が残っていれば呼び出しprocessを`BlockedOnPipe`へ移してecallを再実行へ回します（`read`のstdin待ちと同じ巻き戻し規約）。write端がすべて閉じていればEOFとして0を返します。write端への`write`は、read端がすべて閉じていれば`EPIPE`、bufferが満杯なら同じくblockして再実行、空きがあれば書いてbyte数を返します。片端への逆方向操作（read端への`write`、write端への`read`）は`EBADF`、pipe fdへの`lseek`/`pread`/`pwrite`は`ESPIPE`を返します。
 `fstat`はpipe fdへ`kind`=`STAT_KIND_PIPE`（2）・`size`=0を返します。processが終了または`close`で端を手放すと、そのpipeを待つprocessは全員wakeされ、再実行した`read`/`write`が新しい端数（EOFや`EPIPE`）を見ます。両端ともどのprocessのfd tableからも消えたpipeのslotは再利用されます。同時にliveなpipeは4本までで、枯渇は`ENOMEM`を返します。
+
+`sbrk`はprocessのheap breakを動かします。
+初期breakはimageの最上位PT_LOAD segment末尾をpage境界へ切り上げた位置で、heapはそこからuser stack下のguard pageへ向けて上へ伸びます。
+新しく必要になったpageはzero済みのユーザー読み書き可能ページ（実行不可）としてmapし、戻り値は伸ばす前のbreakです。
+image page数とheap page数の合計が2,048を超える要求や、breakがguard pageの先頭を越える要求は`ENOMEM`を返し、breakを動かしません。
+frameの確保が途中で尽きた場合も`ENOMEM`を返してbreakを動かしませんが、map済みのpageはprocessが所有したまま残り、次の`sbrk`が再利用します。
+縮小は未対応で、負のincrementは`EINVAL`です。
+breakはimageに属するため、`exec`は新imageの初期breakから始まり、`spawn`したchildも自身のimageの初期breakから始まります。
 負のABI error値は次のとおりです。
 
 | 値 | 名前 | 条件 |
@@ -229,18 +238,18 @@ pipeのread端への`read`は、bufferにdataがあれば読んでbyte数を返�
 | `-9` | `EBADF` | 未知のfile descriptor、標準streamへの`close`/`lseek`/`fstat`、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作 |
 | `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない |
 | `-11` | `EAGAIN` | pipeの`read`/`write`が条件未達でcallerをblockへ移したことを示すkernel内部のsignal。dispatchがecallを巻き戻して再実行するためguestへは返らない |
-| `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足、同時にliveなpipe本数（4本）の枯渇 |
+| `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足、同時にliveなpipe本数（4本）の枯渇、`sbrk`の上限超過やframe不足 |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
 | `-17` | `EEXIST` | `mkdir`の対象と同名のentryが既にある |
 | `-19` | `ENODEV` | block deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
-| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`waitpid`のwait連鎖が呼び出し側へ戻るcycle |
+| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement |
 | `-24` | `EMFILE` | processの同時open数（4個）を超えた。pipeの両端もこのtableのslotを使う |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdへの`lseek`/`pread`/`pwrite` |
 | `-32` | `EPIPE` | read端がすべて閉じたpipeへの`write` |
-| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe` |
+| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe`/`sbrk` |
 | `-39` | `ENOTEMPTY` | `rmdir`の対象directoryに`.`と`..`以外のentryが残っている |
 
 ## 初期スタック ABI v1

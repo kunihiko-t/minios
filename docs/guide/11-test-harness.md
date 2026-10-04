@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|sched|sched-io|sched-io-partial|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|sched|sched-io|sched-io-partial|shell]
 cargo xtask check
 ```
 
@@ -77,12 +77,13 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 30. QEMU file-execテスト
 31. QEMU file-fdinheritテスト
 32. QEMU file-pipeテスト
-33. QEMU schedテスト
-34. QEMU sched-ioテスト
-35. QEMU sched-io-partialテスト
-36. QEMUシェルテスト
+33. QEMU user-heapテスト
+34. QEMU schedテスト
+35. QEMU sched-ioテスト
+36. QEMU sched-io-partialテスト
+37. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順にゲストの33経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
 ### QEMUの三つの検証モード
 
@@ -107,7 +108,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`sched`、`sched-io`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -154,6 +155,10 @@ parentは`waitpid`でblockしてchildのexitを回収し、自分のfd 3のoffse
 disk image内のPIPECH.ELFは継承したfd 3から読んだbyteを標準出力へ写して42で終了します。
 書き込めないout pointerの`EFAULT`、pipe fdの`fstat`（kind=PIPE・size=0）、`lseek`の`ESPIPE`、read端への`write`とwrite端への`read`の`EBADF`、write端全閉後のEOF(0)、read端全閉後の`write`の`EPIPE`、両端を閉じたslotの再利用も確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 parentが`waitpid`でblockするため、childのstdoutとExit frameはparentの`pipe verified`より必ず先に出る、確定的なexact照合を要求します。
+`user-heap`ではuser_heap guestが`SbrkAllocator`をglobal allocatorとして登録し、`sbrk(0)`の初期breakがpage境界かつ`USER_START`以上であることを確かめます。
+4,096個の`u32`を`Vec`へ積んで複数pageへまたがるheapの中身を検証し、`alloc::format!`で組んだ`heap vec len=4096 sum=25163776`を標準出力へ出します。
+`sbrk(-1)`の`EINVAL`と巨大な要求の`ENOMEM`がbreakを動かさないことも確かめてから、`heap verified`を出して終了コード42を返すことを要求します。
+diskを使わない単一processの経路なので、exact照合で検査します。
 
 シェルテストは**対話モード**です。
 通常のカーネルが最初の`minios> `を出すまで待ち、`help`、`info`、`uptime`、`memory`、`ls`、`ls DOCS`、`cat DOCS/NOTE.TXT`、`cat Long File Name.txt`、`rm Long File Name.txt`、`ls`、`cat Long File Name.txt`、`mkdir NEWDIR`、`ls`、`rmdir DOCS`、`rmdir NEWDIR`、`ls`、`mv HELLO.TXT WORLD.TXT`、`ls`、`mv WORLD.TXT HELLO.TXT`、`mv DOCS NOTESD`、`ls`、`cat NOTESD/NOTE.TXT`、`mv NOTESD DOCS`、`mv HELLO.TXT DOCS/MOVED.TXT`、`ls`、`cat DOCS/MOVED.TXT`、`mv DOCS/MOVED.TXT HELLO.TXT`、`not-a-command`、`shutdown`を標準入力へ送ります。
@@ -231,10 +236,11 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 43. QEMU file-exec test
 44. QEMU file-fdinherit test
 45. QEMU file-pipe test
-46. QEMU sched test
-47. QEMU sched-io test
-48. QEMU sched-io-partial test
-49. QEMU shell test
+46. QEMU user-heap test
+47. QEMU sched test
+48. QEMU sched-io test
+49. QEMU sched-io-partial test
+50. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -273,12 +279,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/49] cargo fmt --all -- --check
-phase 1/49 passed (elapsed: ...s)
+[1/50] cargo fmt --all -- --check
+phase 1/50 passed (elapsed: ...s)
 ...
-[49/49] QEMU shell test
-phase 49/49 passed (elapsed: ...s)
-summary: PASSED all 49 phases (elapsed: ...s)
+[50/50] QEMU shell test
+phase 50/50 passed (elapsed: ...s)
+summary: PASSED all 50 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

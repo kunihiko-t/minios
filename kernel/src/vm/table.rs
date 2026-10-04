@@ -385,6 +385,105 @@ impl AddressSpace {
         ))
     }
 
+    /// `finish`後のspaceへzero済みの新しいuser frameを1page追加でmapする
+    /// （`sbrk`のheap成長）。所有権はbuilderと同じく台帳へ記録し、
+    /// 途中で確保した中間page tableも含める。失敗時はこの呼び出しで
+    /// 書いたbranch PTEを消し、確保したframeをすべてallocatorへ返すため、
+    /// spaceと台帳は呼び出し前の状態に戻る。
+    pub fn map_new_zeroed<M: FrameStore>(
+        &mut self,
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+        page: VirtPage,
+        flags: PageFlags,
+    ) -> Result<MappedFrame, VmError<M::Error>> {
+        // 別allocatorのframeを台帳へ混ぜると`destroy`が返却先を誤るため拒否する。
+        if allocator.allocator_id() != self.allocator_id {
+            return Err(VmError::OutOfFrames);
+        }
+        let mark = self.storage.len();
+        let mut linked: [Option<(PhysAddr, usize)>; 2] = [None; 2];
+        let result = self.try_map_new_zeroed(allocator, memory, page, flags, &mut linked);
+        if result.is_err() {
+            for (table, index) in linked.iter().rev().flatten() {
+                let _ = memory.write_u64(table.as_u64() as usize, *index, 0);
+            }
+            while self.storage.len() > mark {
+                let owned = self.storage.pop().expect("len above mark");
+                let _ = allocator.deallocate(owned.frame);
+            }
+        }
+        result
+    }
+
+    fn try_map_new_zeroed<M: FrameStore>(
+        &mut self,
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+        page: VirtPage,
+        flags: PageFlags,
+        linked: &mut [Option<(PhysAddr, usize)>; 2],
+    ) -> Result<MappedFrame, VmError<M::Error>> {
+        let vpn = page.vpn();
+        let mut table = self.root;
+        for (slot, level) in [2, 1].into_iter().enumerate() {
+            let index = vpn[level];
+            let entry = read_entry(memory, table, index)?;
+            if entry.is_valid() {
+                if entry.is_leaf() {
+                    return Err(VmError::AlreadyMapped);
+                }
+                table = entry.ppn().map_err(VmError::Pte)?.start();
+                continue;
+            }
+            let child = self.push_zeroed(allocator, memory, FrameKind::PageTable)?;
+            let child_ppn = PhysPageNum::from_start(child.as_u64()).map_err(VmError::Address)?;
+            let branch = PageTableEntry::branch(child_ppn).map_err(VmError::Pte)?;
+            memory
+                .write_u64(table.as_u64() as usize, index, branch.bits())
+                .map_err(VmError::Store)?;
+            linked[slot] = Some((table, index));
+            table = child;
+        }
+
+        let leaf_index = vpn[0];
+        if read_entry(memory, table, leaf_index)?.is_valid() {
+            return Err(VmError::AlreadyMapped);
+        }
+        let physical = self.push_zeroed(allocator, memory, FrameKind::User)?;
+        let ppn = PhysPageNum::from_start(physical.as_u64()).map_err(VmError::Address)?;
+        let leaf = PageTableEntry::leaf(ppn, flags).map_err(VmError::Pte)?;
+        memory
+            .write_u64(table.as_u64() as usize, leaf_index, leaf.bits())
+            .map_err(VmError::Store)?;
+        Ok(MappedFrame { physical })
+    }
+
+    /// frameを確保して台帳へ積み、zeroする。台帳へ積んだ後の失敗は
+    /// `map_new_zeroed`のrollbackがpopして返す。
+    fn push_zeroed<M: FrameStore>(
+        &mut self,
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+        kind: FrameKind,
+    ) -> Result<PhysAddr, VmError<M::Error>> {
+        let frame = allocator.allocate().ok_or(VmError::OutOfFrames)?;
+        let frame_start = frame.start();
+        let physical = match PhysAddr::try_new(frame_start as u64) {
+            Ok(physical) => physical,
+            Err(error) => {
+                let _ = allocator.deallocate(frame);
+                return Err(VmError::Address(error));
+            }
+        };
+        if let Err((error, frame)) = self.storage.push(frame, kind) {
+            let _ = allocator.deallocate(frame);
+            return Err(error);
+        }
+        memory.zero_frame(frame_start).map_err(VmError::Store)?;
+        Ok(physical)
+    }
+
     pub fn destroy(mut self, allocator: &mut dyn FrameSource) -> Result<(), DestroyError> {
         if allocator.allocator_id() != self.allocator_id {
             return Err(DestroyError {
@@ -896,6 +995,81 @@ mod tests {
         let retry = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
         assert_eq!(retry.root().as_u64(), 0x1000);
         drop(retry);
+    }
+
+    // Catches post-finish growth that skips the ownership ledger or maps
+    // the wrong frame: the new page must translate with its flags and be
+    // returned by destroy along with its new intermediate tables.
+    #[test]
+    fn finished_space_maps_a_new_zeroed_page_and_owns_it() {
+        let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
+        let before = allocator.stats();
+        let mut store = TestFrameStore::default();
+        let mut space = AddressSpaceBuilder::new(&mut allocator, &mut store)
+            .unwrap()
+            .finish();
+        let page = VirtPage::from_start(0x0020_0000).unwrap();
+        let flags = PageFlags::new(true, true, false, true).unwrap();
+
+        let mapped = space
+            .map_new_zeroed(&mut allocator, &mut store, page, flags)
+            .unwrap();
+
+        assert_eq!(
+            space.translate(&store, page.start()).unwrap(),
+            (mapped.physical(), flags)
+        );
+        assert_eq!(space.owned_frames(), 4);
+        space.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats(), before);
+    }
+
+    // Catches growth that silently replaces an existing leaf.
+    #[test]
+    fn finished_space_rejects_mapping_an_already_mapped_page() {
+        let mut allocator = test_allocator::<8>(0x1000, 0x21_000);
+        let mut store = TestFrameStore::default();
+        let page = VirtPage::from_start(0x0010_0000).unwrap();
+        let flags = PageFlags::new(true, true, false, true).unwrap();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
+        builder.map_new_zeroed(page, flags).unwrap();
+        let mut space = builder.finish();
+        let stats = allocator.stats();
+
+        assert_eq!(
+            space.map_new_zeroed(&mut allocator, &mut store, page, flags),
+            Err(VmError::AlreadyMapped)
+        );
+        assert_eq!(allocator.stats(), stats);
+        assert_eq!(space.owned_frames(), 4);
+        space.destroy(&mut allocator).unwrap();
+    }
+
+    // Catches a failed growth leaking the intermediate tables it allocated
+    // or leaving a branch PTE that points at a freed frame.
+    #[test]
+    fn finished_space_growth_rolls_back_intermediate_tables_on_exhaustion() {
+        // root + L1 tableの2 frameだけ。leafの確保で尽きる。
+        let mut allocator = test_allocator::<1>(0x1000, 0x3000);
+        let mut store = TestFrameStore::default();
+        let mut space = AddressSpaceBuilder::new(&mut allocator, &mut store)
+            .unwrap()
+            .finish();
+        let stats = allocator.stats();
+        let page = VirtPage::from_start(0x0030_0000).unwrap();
+        let flags = PageFlags::new(true, true, false, true).unwrap();
+
+        assert_eq!(
+            space.map_new_zeroed(&mut allocator, &mut store, page, flags),
+            Err(VmError::OutOfFrames)
+        );
+        assert_eq!(allocator.stats(), stats);
+        assert_eq!(space.owned_frames(), 1);
+        assert_eq!(
+            space.translate(&store, page.start()),
+            Err(VmError::NotMapped)
+        );
+        space.destroy(&mut allocator).unwrap();
     }
 
     #[test]
