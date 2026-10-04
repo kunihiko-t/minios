@@ -12,9 +12,11 @@ use minios_abi::control::FrameKind;
 
 /// user trap handler専用stackのpage数。
 ///
-/// 現在のassembly frameは1 page内へ収まるが、将来の診断処理にも余裕を残し、
-/// Task 2から4で使った16 KiBの静的test stackと同じ幅を所有frameで確保する。
-pub const KERNEL_STACK_PAGES: usize = 4;
+/// FAT32を通るsyscall（`read_file`、`open`、`stat`など）はtrap handlerから
+/// 約17 KiBのstackを使う。guard pageがないため、溢れた分は直下のframe
+/// （直前に確保したuser stack）を黙って壊す。32 KiBで約2倍の余裕を持たせる。
+// ponytail: 幅を広げただけで溢れの検出はない。深さが増えたらguard pageを置く。
+pub const KERNEL_STACK_PAGES: usize = 8;
 
 const fn sv39_satp_bits(root: PhysPageNum) -> u64 {
     (8u64 << 60) | root.as_u64()
