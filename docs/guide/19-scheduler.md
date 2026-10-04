@@ -30,7 +30,7 @@ host側では[`xtask/src/bundle.rs`](../../xtask/src/bundle.rs)の`render_manife
 
 ### Processとround-robin
 
-[`kernel/src/process.rs`](../../kernel/src/process.rs)の`Process`は、user address spaceを持つ`LoadedImage`、4ページのkernel trap stack、中断時の`UserContext`、process状態を所有します。
+[`kernel/src/process.rs`](../../kernel/src/process.rs)の`Process`は、user address spaceを持つ`LoadedImage`、guard page付きのkernel trap stack、中断時の`UserContext`、process状態を所有します。
 allocatorやframe memoryへの参照は保持せず呼び出し側が都度渡すため、生存中のprocess同士がborrowを共有せず、一つのtableが複数のprocessを同時に抱えられます。
 
 `ProcessTable`は`Vec`でlive processだけを保持し、`insert`のたびに`next_pid`から単調にpidを採番します。

@@ -26,6 +26,10 @@ pub fn init() {
     // Safety: `kernel_main`はOpenSBIからS-modeで呼ばれている。
     // `__trap_entry`は下位2ビットが0になる4バイト境界のBASEであり、Directモードの全トラップを保存フレームで受ける。
     unsafe { super::csr::write_stvec(direct_entry) };
+    // `user.S`の入口は`sscratch=0`をS-mode実行中の目印にする。reset値に頼らず、
+    // user trap入口へ切り替える前から0にしておく。
+    // Safety: S-modeが所有するscratch CSRを書くだけで、メモリーへ触れない。
+    unsafe { core::arch::asm!("csrw sscratch, zero", options(nomem, nostack)) };
 }
 
 #[cfg(target_arch = "riscv64")]

@@ -70,6 +70,9 @@ pub trait FrameSource {
     /// `start`で指定したframeが空きなら占有する。隣接成長のように
     /// 特定の番地だけが意味を持つ供給要求に使う。
     fn allocate_at(&mut self, start: usize) -> Option<PhysFrame>;
+    /// 物理的に連続した`frames.len()`枚を一度に占有し、低位から順に`frames`へ入れる。
+    /// 区間がなければ`false`を返し、何も占有しない。`frames`は全slotが`None`であること。
+    fn allocate_contiguous(&mut self, frames: &mut [Option<PhysFrame>]) -> bool;
     /// `frame`を供給元へ返す。
     fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError>;
     /// `deallocate`と同じだが、失敗時にframeの所有権を呼び出し側へ戻す。
@@ -208,6 +211,37 @@ impl<const WORDS: usize> FrameAllocator<WORDS> {
         Some(PhysFrame(start))
     }
 
+    /// 物理的に連続した`frames.len()`枚の空きframeを、低位から最初に見つかった
+    /// 区間（first-fit）でまとめて占有し、低位から順に`frames`へ入れる。
+    /// 区間がなければ`false`を返し、bitmapも`frames`も変えない。
+    pub fn allocate_contiguous(&mut self, frames: &mut [Option<PhysFrame>]) -> bool {
+        debug_assert!(frames.iter().all(Option::is_none));
+        let count = frames.len();
+        if count == 0 {
+            return true;
+        }
+        let mut run_start = 0;
+        for frame_index in 0..self.frame_count {
+            let bit = 1_u64 << (frame_index % u64::BITS as usize);
+            if self.bitmap[frame_index / u64::BITS as usize] & bit != 0 {
+                run_start = frame_index + 1;
+                continue;
+            }
+            if frame_index + 1 - run_start < count {
+                continue;
+            }
+            for (offset, slot) in frames.iter_mut().enumerate() {
+                let index = run_start + offset;
+                self.bitmap[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+                // 区間全体が空きで`frame_count`未満なので、排他所有が成り立つ。
+                *slot = Some(PhysFrame(self.base + index * PAGE_SIZE));
+            }
+            self.allocated += count;
+            return true;
+        }
+        false
+    }
+
     /// 所有権を表す値を消費し、対応するページをアロケーターへ返す。
     ///
     /// ```compile_fail
@@ -274,6 +308,10 @@ impl<const WORDS: usize> FrameSource for FrameAllocator<WORDS> {
 
     fn allocate_at(&mut self, start: usize) -> Option<PhysFrame> {
         FrameAllocator::allocate_at(self, start)
+    }
+
+    fn allocate_contiguous(&mut self, frames: &mut [Option<PhysFrame>]) -> bool {
+        FrameAllocator::allocate_contiguous(self, frames)
     }
 
     fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
@@ -423,6 +461,37 @@ mod tests {
         allocator.deallocate(frame).unwrap();
         assert_eq!(allocator.stats().free, 4);
         assert_eq!(allocator.allocate_at(0x7000).unwrap().start(), 0x7000);
+    }
+
+    // Catches handing out frames one by one without checking adjacency, or
+    // taking a hole that is too small instead of the first one that fits.
+    #[test]
+    fn allocate_contiguous_takes_the_first_run_that_fits() {
+        let mut allocator = allocator_fixture::<1>(0x4000, 0xc000).unwrap();
+        let _low = allocator.allocate_at(0x4000).unwrap();
+        let _split = allocator.allocate_at(0x7000).unwrap();
+        let mut frames = [const { None }; 3];
+
+        // 0x5000..0x7000は2枚しかないため、0x8000からの3枚を取る。
+        assert!(allocator.allocate_contiguous(&mut frames));
+        let starts: [usize; 3] = core::array::from_fn(|i| frames[i].as_ref().unwrap().start());
+        assert_eq!(starts, [0x8000, 0x9000, 0xa000]);
+        assert_eq!(allocator.stats().allocated, 5);
+        // 隙間の2枚は単独確保へ残る。
+        assert_eq!(allocator.allocate().unwrap().start(), 0x5000);
+    }
+
+    // Catches partially claiming a run when no gap is large enough.
+    #[test]
+    fn allocate_contiguous_fails_without_changing_the_bitmap() {
+        let mut allocator = allocator_fixture::<1>(0x4000, 0x8000).unwrap();
+        let _split = allocator.allocate_at(0x6000).unwrap();
+        let before = allocator.stats();
+        let mut frames = [const { None }; 3];
+
+        assert!(!allocator.allocate_contiguous(&mut frames));
+        assert!(frames.iter().all(Option::is_none));
+        assert_eq!(allocator.stats(), before);
     }
 
     #[test]

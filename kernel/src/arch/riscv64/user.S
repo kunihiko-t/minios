@@ -16,6 +16,10 @@
  * trap frameのUserContext（34語、272バイト）はheaderの直下
  * [kernel_stack_top-416, kernel_stack_top-144) に置く。
  * register i は 8*i、sepc=256、sstatus=264 が`UserContext`のC ABI layoutである。
+ *
+ * sscratchはU-mode実行中だけkernel stack topを持ち、S-mode実行中は0である。
+ * trap入口はこの0でS-modeからのtrapを見分け、溢れたかもしれないkernel stackを
+ * 使わずに専用stackで`rust_kernel_trap_in_user_window`へ渡す。
  */
 .section .text.user, "ax"
 .balign 4
@@ -44,6 +48,9 @@ __run_user:
     sd a2, 128(t0)
     sd zero, 136(t0)
     mv sp, t0
+    /* S-mode trapの診断がguard pageを特定できるよう、現在のstack topを残す。 */
+    la t1, __user_kernel_stack_top
+    sd a3, 0(t1)
     /* user address spaceからもこの命令列とstackを参照できるよう、
      * 交換前のtrap入口sscratchにkernel stack topを置いてからsatpを切り替える。 */
     csrw sscratch, a3
@@ -105,6 +112,8 @@ __run_user:
 .type __user_trap_entry, @function
 __user_trap_entry:
     csrrw sp, sscratch, sp
+    /* sscratch=0はS-mode実行中のtrapである。spは0、sscratchは元のspになる。 */
+    beqz sp, 3f
     addi sp, sp, -416
     sd ra,   8(sp)
     sd gp,  24(sp)
@@ -139,6 +148,8 @@ __user_trap_entry:
     /* t0..t2のuser値は保存済み。以降のcsrr退避にt0を使う。 */
     csrr t0, sscratch
     sd t0,  16(sp)
+    /* ここからhandlerはS-modeで動くため、次のtrapをS-mode由来と判別させる。 */
+    csrw sscratch, zero
     csrr t0, sepc
     sd t0, 256(sp)
     csrr t0, sstatus
@@ -197,6 +208,16 @@ __user_trap_entry:
     /* spをcontext baseから固定header baseへ戻し、kernelへ復帰する。 */
     addi sp, sp, 272
     j __user_run_leave
+3:
+    /* S-mode trap。kernel stackのguard pageへ溢れた場合を含むため、元のspは
+     * 信用せず専用stackへ移る。handlerは診断を出して停止し、戻らない。 */
+    csrr a0, sscratch
+    la t0, __user_kernel_stack_top
+    ld a1, 0(t0)
+    la sp, __kernel_trap_stack_top
+    call rust_kernel_trap_in_user_window
+4:
+    j 4b
 .size __user_trap_entry, . - __user_trap_entry
 
 /* kernel address spaceとboot stackを復元し、Rust callerへRunExitを返す。
@@ -226,3 +247,13 @@ __user_run_leave:
     ld sp, 120(sp)
     ret
 .size __user_run_leave, . - __user_run_leave
+
+/* 直近の`__run_user`へ渡したkernel stack topと、S-mode trap診断専用のstack。 */
+.section .bss.user_trap, "aw", @nobits
+.balign 16
+__user_kernel_stack_top:
+    .space 8
+.balign 16
+__kernel_trap_stack:
+    .space 8192
+__kernel_trap_stack_top:
