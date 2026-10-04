@@ -359,10 +359,15 @@ pub fn check_harness_example(root: &Path, commands: &[String]) -> Result<(), Doc
     Ok(())
 }
 
-/// 本文に「49段階」のような段階数を手書きしていないか調べる。
+/// 公開文書の本文に「49段階」のような段階数を手書きしていないか調べる。
 /// 段階数は第11章の検査済み実行例だけに置き、他の文書はそこへlinkする。
+/// 対象はルート直下のMarkdownと`docs/`に限る。git管理外のメモや、
+/// `.claude/worktrees`の下にある別ブランチのcheckoutを検査しないため。
 pub fn check_hand_written_phase_counts(root: &Path) -> Result<(), DocsError> {
-    for source in markdown_files(root)? {
+    let published = markdown_files(root)?
+        .into_iter()
+        .filter(|source| source.components().count() == 1 || source.starts_with("docs"));
+    for source in published {
         let contents = read_text(root, &source)?;
         let mut fence = None;
         for (line_index, line) in contents.lines().enumerate() {
@@ -1880,6 +1885,30 @@ mod tests {
             Err(DocsError::HandWrittenPhaseCount {
                 path: PathBuf::from("README.md"),
                 line: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn phase_counts_outside_published_docs_are_ignored() {
+        let temp = TestTree::new();
+        temp.write(".devin/specs/note.md", "33段階\n");
+        temp.write(".claude/worktrees/old/README.md", "31段階\n");
+        temp.write("guest/NOTES.md", "44段階\n");
+
+        assert_eq!(check_hand_written_phase_counts(temp.path()), Ok(()));
+    }
+
+    #[test]
+    fn hand_written_phase_count_under_docs_is_rejected() {
+        let temp = TestTree::new();
+        temp.write("docs/reference/roadmap.md", "18個の経路を含む33段階\n");
+
+        assert_eq!(
+            check_hand_written_phase_counts(temp.path()),
+            Err(DocsError::HandWrittenPhaseCount {
+                path: PathBuf::from("docs/reference/roadmap.md"),
+                line: 1,
             })
         );
     }
