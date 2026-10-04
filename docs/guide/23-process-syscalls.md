@@ -71,7 +71,7 @@ MiniOSのprocessには親子関係の記録がなく、liveなpidであれば自
 
 trap handlerの実行窓ではまだ旧imageのpage tableが`satp`に載っているため、旧imageはその場では解放できません。
 `exec`は旧imageを`retired_image`へ退避し、`dispatch_exec`はtrap slotの`UserContext`を新imageの初期contextで上書きして`SyscallFlow::Exec`を返します。
-run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取り出して`destroy`し、processはrunnableのまま次のdispatchで新imageの`_start`から走ります。
+run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取り出して`destroy`し、processはrunnableのまま次のdispatchで新imageのELF entryから走ります。
 
 ## 実行と確認
 
