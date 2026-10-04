@@ -71,13 +71,102 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 `spawn`したchildは呼び出し側のfd tableのsnapshotを引き継ぎ、parentが開いたfileを同じfd番号とoffsetで読めます（`cargo xtask test file-fdinherit`で検証）。
 `pipe`はkernel所有の256 byte ring bufferのread/write両端をfdとして返し、継承した端経由でprocess間へbyteを流せます。空のreadと満杯のwriteは`BlockedOnPipe`で待ち、端のcloseやprocess終了がwaiterを起こします（`cargo xtask test file-pipe`で検証）。
 
-## 次
+## 今後の段階
 
-汎用heapの動的拡張は実装済みで、ヒープはOOM時にframe allocatorの最上位pageを取り込んで下方へ成長します。
-次はこの成長経路を使う可変個のkernel object管理を、固定容量の単一address spaceを越える段階で導入します。
-その後にfile systemの拡充、network、multi-hart、NEORV32以外の実機対応を進めます。
+完成度を上げる作業は、新機能の追加だけを指しません。
+現在の実装には、文書と実装の食い違い、guestから使えないkernel機能、処理の上限が小さすぎて実用に届かない箇所が残っています。
+そこで以下では、作業を五つの段階に分け、各段階の受け入れ条件を`cargo xtask test`の経路または`cargo xtask check`の検査として書きます。
+段階の順序は依存関係で決めており、段階1はuser spaceのlibraryを前提とし、段階3は段階2の割り込み基盤を前提とします。
 
-OCI image、Linux binary互換、multi-tenant isolationはこの実装の目標に含めません。
+### 段階0：文書と実装の整合
+
+最初に、すでに書いた文書を実装へ追いつかせます。
+この段階は新しいkernel codeを含まず、ほかの段階より先に終えられます。
+
+- **release gateの段階数**：README、本書、学習ガイドの間で29、31、33、44、49と食い違っています。
+  数値を各文書へ手書きする方式をやめ、`cargo xtask check`のdocs検査が実際の段階数と照合する一箇所だけに残します。
+- **READMEの「現在の制約」**：file descriptor、FAT32の書き込み、`spawn`、`pipe`が実装済みである事実を反映していません。
+  実装済み機能の節と制約の節を書き直し、syscall一覧へのlinkを置きます。
+- **学習ガイドの欠落章**：第17章で止まっており、heapの成長、Device Tree、scheduler、virtio-blk、FAT32、file descriptor、`spawn`/`waitpid`/`pipe`を扱う章がありません。
+  第18章から第23章として追加し、第12章「次に作るもの」は本書への案内に縮めます。
+- **guest側のsyscall wrapperの重複**：`guest/src/bin/`の各programが`sys_*`関数を2個から10個ずつ複製しています。
+  `guest/src/sys.rs`として一つにまとめ、段階1のuser libraryの土台にします。
+
+受け入れ条件は`cargo xtask check`が段階数の不一致を検出すること、全guest programが共通moduleを使うこと、学習ガイドの索引に新章が並ぶことです。
+
+### 段階1：user spaceを実用に届かせる
+
+次に、guestが「自分でprogramを書いて動かせる」水準へ到達させます。
+現在のsyscallはfileとprocessの操作を一通り備えていますが、user heap、時刻、fdの複製がないため、Rustの`alloc`も待機も出力の切り替えもguestから使えません。
+
+- **`sbrk`**：user address spaceの末尾にheap領域を伸ばし、guest crateで`alloc`の`Vec`と`String`を使えるようにします。
+  `elf/plan.rs`のuser page上限2,048を超えた要求は`ENOMEM`で拒否します。
+- **`clock`と`sleep`**：`time.rs`の`uptime_millis`をguestへ公開し、`sleep`は`BlockedUntil(tick)`で待機中のprocessにCPUを渡します。
+  既存の`BlockedOnStdin`と同じ再実行の仕組みに乗せます。
+- **`yield`**：busy-waitするsample guestを`yield`で置き換え、schedulerの検証をtime sliceに依存しない形へ直します。
+- **`dup2`と`MAX_OPEN_FILES`の引き上げ**：`pipe`の端をstdin/stdoutへ付け替える手段がなく、open file数4では`spawn`したchildへpipeを継承させると残りが足りません。
+  `dup2`を追加し、上限を16へ上げます。
+- **`spawn`への引数渡し**：現在の`spawn`はpathだけを受け取り、childは`argv`を受け取れません。
+  manifestと同じ初期stack ABIで`argv`を積む形へ拡張します。
+- **user library crate**：段階0でまとめたwrapperを`guest/src/lib.rs`として公開し、`println!`、`File`、`Process`のような薄い型を置きます。
+  各sample guestはこのlibraryだけを使って書き直します。
+- **user mode shell**：FAT32上の`SH.ELF`としてuser modeのshellを書き、path指定の起動、`|`によるpipe、`<`と`>`によるredirectを実装します。
+  kernel shellは起動と診断に残し、通常の操作はuser shellへ移します。
+
+受け入れ条件は`cargo xtask test user-heap`、`user-sleep`、`user-dup`、`user-shell`の四経路で、特に`user-shell`はQEMU上で`cat FILE.TXT | wc`相当のpipelineが動くことを観測します。
+
+### 段階2：kernelの堅牢化と整理
+
+段階1で機能が増えると、kernel内の大きなfileと暗黙の規約が保守の障害になります。
+この段階では振る舞いを変えず、境界と検査を整えます。
+
+- **大きなfileの分割**：`storage/fat32.rs`は4,086行、`user/syscall.rs`は3,826行、`main.rs`は3,087行あります。
+  FAT32はdirectory、cluster chain、write pathへ、syscallはfile、process、pipeへ、`main.rs`はboot段階ごとのmoduleへ分けます。
+- **user pointer検査の一本化**：各syscallが個別に行っているrangeとPTE権限の検査を`copy_from_user`と`copy_to_user`に集めます。
+  検査漏れが起きる場所を一箇所に絞るためです。
+- **processの異常終了の統一**：fatal trapを起こしたprocessの回収経路が、単一実行時の`UserRun`と複数process時の`ProcessTable`で分かれています。
+  複数process時にfatal trapが起きても他のprocessが継続し、`waitpid`が異常終了codeを受け取れることを経路として固定します。
+- **`kill`**：親が子を止める手段がないため、`kill(pid)`を追加して`waitpid`へ終了codeを渡します。
+- **heap成長pageの返却**：OOMで取り込んだpageをheapが返さないため、長時間動かすとprocess用のframeが減り続けます。
+  free-listの末尾がpage境界で空いたときに`FrameAllocator`へ返す経路を追加します。
+- **FAT32 write pathの整合性**：FSInfoのfree cluster数とcluster chainの検査をhost testで固定し、途中で電源が落ちた相当のimageを読み込んだときの振る舞いを決めます。
+- **host側のfuzz test**：FAT32 parser、ELF header、MiniBundle manifestの三つのparserに`cargo fuzz`の経路を置きます。
+  release gateには含めず、手動実行の手順を`CONTRIBUTING.md`へ書きます。
+
+受け入れ条件は、既存の全QEMU経路が変更前と同じ出力で通ること、`cargo xtask test proc-fault`と`proc-kill`が追加されること、各fileが1,500行以内に収まることです。
+
+### 段階3：割り込み駆動のI/Oとnetwork
+
+ここまでのkernelはUART入力をpollingで読み、virtio-blkも完了を待ち続けます。
+networkを扱うには、外部割り込みでdeviceの完了を受け取る基盤が先に要ります。
+
+- **PLIC driver**：QEMU `virt`のPLICを初期化し、UARTとvirtio deviceの割り込みをS-modeへ配送します。
+- **UART受信割り込み**：`StdinStaging`を割り込みhandlerから供給し、`BlockedOnStdin`のprocessを割り込みで起こします。
+  shellのidle時に`wfi`で待てるようになります。
+- **virtio-blkの割り込み化**：polling waitを割り込み完了に置き換え、I/O待ちのprocessを`BlockedOnIo`で退避させます。
+- **virtio-net driver**：frameの送受信をringで扱い、hostの`-netdev user`で疎通を確認します。
+- **最小のnetwork stack**：ARP、IPv4、ICMP echo、UDPまでを実装し、TCPは対象外とします。
+  guestへは`socket`、`sendto`、`recvfrom`の三つのsyscallで公開します。
+
+受け入れ条件は`cargo xtask test irq-uart`、`irq-blk`、`net-ping`、`net-udp`の四経路です。
+`net-ping`はQEMUのuser network経由でhostからのICMP echoに応答することを観測します。
+
+### 段階4：multi-hart
+
+最後に、単一hartの前提を外します。
+この段階は、heapの「割り込み内で割り当てない」規約と、`ProcessTable`のlockなし設計の両方を置き換えるため、前の段階が落ち着いてから着手します。
+
+- **hartごとのboot**：SBI HSMで二つ目以降のhartを起動し、hartごとのtrap stackとscheduler stateを持たせます。
+- **spinlock**：heap、`ProcessTable`、fd table、pipe bufferをlockで守ります。
+- **IPI**：process終了やpipeの起床を別hartへ通知します。
+- **QEMUの`-smp 2`**：release gateのQEMU経路を`-smp 1`と`-smp 2`の両方で実行します。
+
+受け入れ条件は、全既存経路が`-smp 2`でも同じframe列を出すことと、`cargo xtask test smp-sched`が二つのhartで同時に進むprocessを観測することです。
+
+### 対象外のまま残すもの
+
+OCI image、Linux binary互換、multi-tenant isolation、TCP、Windows host、NEORV32以外の実機driverは、この実装の目標に含めません。
+NEORV32経路はkernel shellとread-only FAT32までを維持し、段階1以降の機能はQEMU `virt`だけを対象とします。
 
 [U-modeの学習章](../guide/15-user-mode.md)と[payloadの学習章](../guide/16-boot-payload.md)は実行と回収の境界を説明します。
 [Rust guestの学習章](../guide/17-rust-guest.md)はユーザープログラムのbuild、MiniBundle生成、QEMU実行を説明します。
