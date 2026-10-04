@@ -913,6 +913,11 @@ fn run_heap_test() {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
 
+    // kernel address spaceの所有権台帳などがすでにheap上にあるため、
+    // 検査はtest自身の割り当てが解放へ戻るかの差分で行う。基準値は
+    // test自身が割り当てる前に取る。
+    let baseline = KERNEL_HEAP.stats();
+
     // Vecの成長が再割り当てと既存内容の保持を繰り返すことを確認する。
     let mut values: Vec<u64> = Vec::new();
     for i in 0..512u64 {
@@ -931,9 +936,7 @@ fn run_heap_test() {
     }
     drop(boxed);
 
-    // kernel address spaceの所有権台帳などがすでにheap上にあるため、
-    // 検査はtest自身の割り当てが解放へ戻るかの差分で行う。
-    let baseline = KERNEL_HEAP.stats();
+    // VecとBoxをすべて解放したので、割り当て量は基準値へ戻っているはずである。
     let stats = KERNEL_HEAP.stats();
     if stats.total != KERNEL_HEAP_LEN || stats.free == 0 || stats.allocated != baseline.allocated {
         fatal_qemu_test(format_args!("heap: unexpected stats {stats:?}"));
