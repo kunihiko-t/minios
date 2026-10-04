@@ -3,8 +3,10 @@
 MiniOSは、RustとRISC-VでOSの基礎を段階的に学ぶための小さな`no_std`カーネルです。
 主教材はQEMU `virt`上のRISC-V 64環境です。
 OpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーター、Sv39のカーネルアドレス空間を備えています。
-静的なRISC-V 64 ELFを検証し、U-modeで`write`と`exit`を実行するloaderも備えています。
-MiniBundle boot payloadはQEMU loaderから予約物理windowへ渡せます。
+静的なRISC-V 64 ELFを検証してU-modeで実行するloaderと、複数のprocessをタイマー割り込みで切り替えるround-robin schedulerを備えています。
+virtio-blk上のFAT32 volumeを読み書きでき、user programはfile descriptor、process生成、pipeなどのsystem callを使えます。
+system callの一覧は[MiniContainer Guest ABI](docs/reference/minicontainer-abi.md#syscall-abi-v1)にあります。
+user programはMiniBundle boot payloadとしてQEMU loaderから渡すか、FAT32上のELFとして`spawn`で起動します。
 NEORV32向けには、RISC-V 32のM-modeで起動してUARTシェルを動かす小さな実機経路があります。
 日本語の学習ガイドと、同じ結果を繰り返し確認できるテストハーネスも用意しています。
 
@@ -31,6 +33,12 @@ help      Show available commands
 info      Show system information
 uptime    Show elapsed time
 memory    Show physical memory statistics
+ls        List a directory
+cat       Read a file
+rm        Remove a file
+mkdir     Create a directory
+rmdir     Remove an empty directory
+mv        Rename a file or directory
 clear     Clear the terminal
 shutdown  Shut down MiniOS
 minios> info
@@ -45,6 +53,7 @@ shutting down
 
 `uptime`の数値は実行時点で変わりますが、`uptime: <n> ms`の直後に`ticks: <n>`が1行ずつ表示されます。
 シングルハート構成の`info`は、バナーに続けて`hart id: 0`を表示します。
+`cargo xtask run`は起動ごとに検査用のFAT32 disk imageを生成して接続するため、`ls`や`cat`でその中身を確かめられます。
 
 ## 対応環境
 
@@ -110,7 +119,8 @@ cargo build -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none
 
 ## テスト
 
-対象を絞るときは`cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]`を使います。
+対象を絞るときは`cargo xtask test <対象>`を使います。
+指定できる対象の一覧は、引数を付けずに`cargo xtask`を実行すると表示されます。
 リリース前の全検査は次のコマンドで実行します。
 
 ```sh
@@ -122,14 +132,28 @@ cargo xtask check
 
 ## 現在の制約
 
-MiniOSが実行対象にするのは、MiniBundleへ格納した静的RISC-V 64 ELFだけです。
-OCI image、network、volume、Linux binary互換、multi-tenant isolation、Windowsは保証しません。
-プロセス管理、VirtIO、ファイルシステム、network、マルチハート、NEORV32以外の実機driverは未実装です。
-ヒープはmanaged RAM末尾の固定1 MiB領域に限り、フレームアロケーターからの動的拡張は行いません。
-`write`はstdoutとstderrだけを扱い、`exit`は一つのU-mode実行をkernelへ戻します。
-ハードウェアアドレス、タイムベース、RAMの上端はOpenSBIが渡すDevice Treeから発見しますが、対象machineはQEMU `virt`の配置契約に限定しています。
-シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
-永続ストレージとセキュリティー境界は提供しません。
+MiniOSが実行対象にするのは、静的RISC-V 64 ELFだけです。
+OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保証しません。
+
+次の機能は未実装です。
+
+- **network**：virtio-netとprotocol stackはありません。
+- **マルチハート**：1ハートだけを起動し、kernel内の共有状態はlockを前提にしていません。
+- **割り込み駆動のI/O**：UART入力とvirtio-blkの完了はpollingで待ちます。
+- **user heap**：guestが実行中にメモリーを追加で確保するsystem callはありません。
+- **NEORV32以外の実機driver**：実機経路はNEORV32のUARTとSDカードだけです。
+
+実装済みの機能にも、教材として小さく保つための上限があります。
+
+- 同時に動かせるprocessは4個までで、各processが開けるfileも4個までです。
+- pipeのbufferは256 byteで、満杯のときは書き込み側が待ちます。
+- FAT32へ新しく作れるfile名は、8.3形式へ正規化できる名前だけです。
+- `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。
+- ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長しますが、取り込んだpageは返しません。
+- ハードウェアアドレス、タイムベース、RAMの上端はOpenSBIが渡すDevice Treeから発見しますが、対象machineはQEMU `virt`の配置契約に限定しています。
+- シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
+
+今後の計画は[発展ロードマップ](docs/reference/roadmap.md)にあります。
 
 ## セキュリティー上の位置づけ
 
