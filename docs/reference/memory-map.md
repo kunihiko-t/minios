@@ -12,7 +12,7 @@ MiniOSはQEMU `virt`を`-m 128M`で起動し、OpenSBIが`a1`へ渡すDTBから�
 | `0x8020_0000` | カーネルの先頭とELF entryの配置位置 | `linker.ld`のlocation counter、OpenSBIの`Next Address`、QEMUの`-kernel`が一致する位置 |
 | `0x8020_0000..__kernel_end` | `.text`、`.rodata`、`.data`、`.bss`、64 KiBの起動用stack、bitmap | カーネル自身が占有し、sectionごとの最小権限でS-modeへ恒等写像 |
 | `align_up(__kernel_end, 0x1000)..0x8770_0000` | 割り当て可能な物理RAM | 一つの`FrameAllocator`だけが排他的に取得し、S-modeの`R+W`で恒等写像。上端からヒープ成長分を供給する |
-| `0x8770_0000..0x8780_0000` | 汎用ヒープの初期領域 (1 MiB) | 16バイト粒度のfree-listが16バイト未満のkernel objectを分割・併合する。`#[global_allocator]`経由で`alloc` crateへ供給。OOM時は`allocate_at`で直上のframeを取り込み下端を下へ伸ばす |
+| `0x8770_0000..0x8780_0000` | 汎用ヒープの初期領域 (1 MiB) | 16バイト粒度のfree-listが4 KiB pageより細かいkernel objectのために領域を分割・併合する。`#[global_allocator]`経由で`alloc` crateへ供給。OOM時は`allocate_at`で直下のframeを取り込み下端を下へ伸ばす |
 | `0x8780_0000..0x87e0_0000` | MiniBundle boot payloadの予約領域 | allocatorの対象外であり、payloadがあるときは使用pageだけをS-mode read-onlyでmap |
 | `0x87e0_0000..0x8800_0000` | FDTの予約領域 | QEMUがRAM上端の2 MiB整列境界へ置くDTBを守るため、allocatorの対象外で未写像 |
 | `0x8800_0000` | 128 MiB RAMの排他的な上端 | RAMの上端であり、allocatorの上端ではない |

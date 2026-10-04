@@ -53,8 +53,9 @@ type Rv32Storage = crate::storage::fat32::Fat32<
     crate::storage::sd::SdCard<crate::drivers::neorv32_sd::Neorv32SdBus>,
 >;
 
-/// RV64 shellが保持する単一のvirtio-blk/FAT32 session。初回の`ls`/`cat`で
-/// FDTのslotをprobeしてmountし、以降は同じsessionを使い回す。
+/// RV64 shellが保持する単一のvirtio-blk/FAT32 session。初回のstorage command
+/// （`ls`/`cat`/`rm`/`mkdir`/`rmdir`/`mv`）でFDTのslotをprobeしてmountし、
+/// 以降は同じsessionを使い回す。
 #[cfg(target_arch = "riscv64")]
 pub(crate) type Rv64Storage = crate::storage::fat32::Fat32<
     crate::storage::virtio_blk::VirtioBlk<
@@ -157,19 +158,19 @@ fn execute(
         }
         Command::Ls(path) => list_dir(storage, frames, path),
         Command::Cat("") => {
-            crate::println!("virtio: usage: cat NAME.EXT");
+            crate::println!("virtio: usage: cat PATH");
         }
         Command::Cat(name) => read_root_file(storage, name, frames),
         Command::Rm("") => {
-            crate::println!("virtio: usage: rm NAME");
+            crate::println!("virtio: usage: rm PATH");
         }
         Command::Rm(path) => remove_file(storage, frames, path),
         Command::Mkdir("") => {
-            crate::println!("virtio: usage: mkdir NAME");
+            crate::println!("virtio: usage: mkdir PATH");
         }
         Command::Mkdir(path) => make_directory(storage, frames, path),
         Command::Rmdir("") => {
-            crate::println!("virtio: usage: rmdir NAME");
+            crate::println!("virtio: usage: rmdir PATH");
         }
         Command::Rmdir(path) => remove_directory(storage, frames, path),
         Command::Mv(old_path, new_path) if old_path.is_empty() || new_path.is_empty() => {
@@ -373,8 +374,9 @@ fn print_dir_entry(entry: &crate::storage::fat32::DirEntry) {
     }
 }
 
-/// RV32のSD経路はflatな8.3名前空間だけを扱う。`/`を含む引数は
-/// IMEMを使うpath機構を持たず、`InvalidName`として報告する。
+/// RV32のSD経路はflatな8.3名前空間だけを扱い、IMEMを使うpath機構を
+/// 持たない。`ls`はrootだけを列挙し、引数を渡すと`invalid 8.3 name`と
+/// 報告する。
 #[cfg(target_arch = "riscv32")]
 fn list_dir(storage: &mut Option<Rv32Storage>, path: &str) {
     if !path.is_empty() {
@@ -569,7 +571,12 @@ fn print_fat_error<E>(prefix: &str, error: crate::storage::fat32::FatError<E>) {
             crate::println!("{prefix}: not a directory");
         }
         crate::storage::fat32::FatError::InvalidName => {
+            // RV32は8.3名だけを受理する。RV64はpathと長いfile名で既存entryを
+            // 引けるが、`mkdir`/`mv`が作る最終要素は8.3名に限る。
+            #[cfg(target_arch = "riscv32")]
             crate::println!("{prefix}: invalid 8.3 name");
+            #[cfg(target_arch = "riscv64")]
+            crate::println!("{prefix}: invalid name (new names must be 8.3)");
         }
         crate::storage::fat32::FatError::CorruptChain => {
             crate::println!("{prefix}: corrupt cluster chain");

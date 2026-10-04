@@ -1,4 +1,5 @@
-//! `write`、`read`、`exit`、未知のsystem callを純粋なdispatch結果へ変換する。
+//! user system callを番号ごとに検証し、`ControlSink`/`ControlSource`への
+//! 委譲と純粋なdispatch結果（`SyscallFlow`）へ変換する。未知の番号は`ENOSYS`。
 
 use crate::{
     user::{
@@ -297,15 +298,18 @@ pub enum SyscallFlow<E, SE = E> {
 
 /// `a7`のsystem call番号に従って`context`を処理する。
 ///
-/// guest pointerをRust参照として解することなく、`write`は1回の検証付きcopyと
-/// 1回の`sink.frame`で処理し、戻り値を`a0`へ書き込む。console出力を指すfdだけを
-/// sinkへ流し、4,096 byteを超える長さは拒否する。`read`はconsole入力を指すfdなら
-/// 書き込み検証を通してから1回の`source.read_stdin`で`read_scratch`へ受信する。
-/// どのfdがconsoleを指すかは`source.console_fd`が決め、fd番号では決めない。
-/// sourceが`Ok(None)`を返す未到着では`Blocked`を返し、`sepc`をecallへ戻して
-/// 再開時の再実行に委ねる。
-/// userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは呼び出し側が
-/// 1個だけ持ち、多重frameへ4 KiBを複製しない。
+/// 各syscallはguest pointerをRust参照として解することなく引数を検証し、
+/// storage・process・pipeの操作は`source`へ、console出力は`sink`へ委ねて、
+/// 戻り値かerrnoを`a0`へ書き込む。未知の番号は`ENOSYS`である。
+/// `write`は1回の検証付きcopyの後、console出力を指すfdなら1回の`sink.frame`へ、
+/// fileとpipeのfdなら`source.write_fd`へ流し、4,096 byteを超える長さは拒否する。
+/// `read`は書き込み検証を通してから、console入力を指すfdなら1回の
+/// `source.read_stdin`で、fileとpipeのfdなら`source.read_fd`で`read_scratch`へ
+/// 受信する。どのfdがconsoleを指すかは`source.console_fd`が決め、fd番号では
+/// 決めない。stdinの未到着（`Ok(None)`）、pipe待ち（`EAGAIN`）、`waitpid`の
+/// 対象がliveな場合は`Blocked`を返し、`sepc`をecallへ戻して再開時の再実行に
+/// 委ねる。userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは
+/// 呼び出し側が1個だけ持ち、多重frameへ4 KiBを複製しない。
 pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace,
@@ -470,7 +474,8 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
 /// `a0/a1`が指すuser memoryのpathを`path_buf`へ検証付きcopyし、長さを
 /// 返す。長さの範囲違反は`EINVAL`、user range外は`EFAULT`を`a0`へ書いて
 /// `None`を返す。fd割り当てやdir entry変更のside effectより先に
-/// EFAULT/EINVALを確定する規約をopen/create/unlinkで共有する。
+/// EFAULT/EINVALを確定する規約を、pathを1個取るsyscall（open/create/
+/// unlink/mkdir/rmdir/spawn/exec/stat/readdir）で共有する。
 fn copy_user_path<M: FrameStore>(
     context: &mut UserContext,
     space: &AddressSpace,
@@ -695,7 +700,7 @@ fn copy_spawn_argv<M: FrameStore>(
 
 /// `exec` (`a0=path_ptr, a1=path_len`)。path検証は`spawn`と同じ規約。
 /// 成功時はsourceが返す新imageの初期contextをtrap slotへ上書きして
-/// `Exec`を返す——`sepc`のecallへは戻らず、kernel復帰後にprocessは
+/// `Exec`を返す。`sepc`のecallへは戻らず、kernel復帰後にprocessは
 /// 新しいsatpとcontextでdispatchされる。旧imageはcaller satpが有効な
 /// 間は解放できないため、source側が`Process::retired_image`へ退避済み
 /// である。失敗時はerrnoを`a0`へ書いてResumeし、旧imageのまま続く。
@@ -787,8 +792,9 @@ fn dispatch_stat<M: FrameStore, E, R: ControlSource>(
     }
 }
 
-/// `fstat` (`a0=fd, a1=out_ptr`)。console entryは`size`=0の
-/// `STAT_KIND_CONSOLE`、それ以外はsourceへ委譲し、未割当fdは`EBADF`。
+/// `fstat` (`a0=fd, a1=out_ptr`)。consoleを指すfdはここで`size`=0の
+/// `STAT_KIND_CONSOLE`を返し、それ以外のfd（fileとpipe）はsourceへ委譲する。
+/// `FD_TABLE_LEN`以上のfdはここで、未割当fdはsourceが`EBADF`を返す。
 /// copy-outは`stat`と同じReadComplete経路。
 fn dispatch_fstat<M: FrameStore, E, R: ControlSource>(
     context: &mut UserContext,
@@ -3619,8 +3625,8 @@ mod tests {
                 kind: STAT_KIND_FILE,
             }
         );
-        // 成功時の戻り値は`complete_read`が`a0`へ書く`len` (=STAT_LEN)——
-        // `read`系のbyte-count規約。dispatch自体はa0へ触れない。
+        // 成功時の戻り値は`complete_read`が`a0`へ書く`len` (=STAT_LEN)で、
+        // `read`系のbyte-count規約に従う。dispatch自体はa0へ触れない。
         let _ = context;
     }
 

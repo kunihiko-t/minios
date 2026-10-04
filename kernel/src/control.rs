@@ -319,9 +319,10 @@ impl ControlSource for UartControlSource<'_> {
         })
     }
 
-    /// guestの`fstat`をfdのFileDescから返す。`FileDesc`はopen時のsizeを
-    /// 保持し`write_range`が更新するため、sessionへ触れずに済む。
-    /// 未割当fdは`EBADF`。
+    /// guestの`fstat`をfdのentryから返す。file fdは`FileDesc`が保持する
+    /// size（open時の値を`write_range`が更新する）を返すため、sessionへ
+    /// 触れずに済む。pipe端とconsoleはsize 0でそれぞれの`STAT_KIND_*`を
+    /// 返す。未割当fdは`EBADF`。
     #[cfg(target_arch = "riscv64")]
     fn fstat(&mut self, fd: usize) -> Result<minios_abi::syscall::Stat, isize> {
         use minios_abi::syscall::{EBADF, STAT_KIND_FILE, Stat};

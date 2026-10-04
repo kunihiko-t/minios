@@ -4,10 +4,12 @@
 //! (`bytes_per_sector=512`、`data_cluster_count >= 65525`等) を満たす
 //! superfloppy (パーティション無し) imageを組み立てる。
 //! root directoryには`HELLO.TXT`（内容は[`HELLO_TXT`]）、`DOCS`、LFN名のfileを置き、
-//! 検査によっては`BIN` directoryも足す。
+//! 検査によっては`BIN` directoryも足す。`DOCS`には`NOTE.TXT`と、guestの
+//! process検査が起動する最小ELF（`CHILD.ELF`・`FDCHILD.ELF`・`PIPECH.ELF`）を置く。
+//! 検査が渡す追加fileは`DOCS`か`BIN`の下へ並べる。cluster配置は[`image_bytes`]を参照。
 //!
 //! imageはsparse fileとして書き出す: 総サイズ約34 MiBだが、実際に書くのは
-//! boot sector・FAT 2面・root directory・file dataの数sectorだけである。
+//! boot sector・FAT 2面・directory・file dataのうち0以外を含むsectorだけである。
 
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -324,8 +326,12 @@ fn short_name(name: &str) -> [u8; 11] {
 
 /// 完全なdisk imageを`Vec`として組み立てる。テストでparserと直接照合する
 /// ため、sparse書き出しとは別に全byteを返す経路も用意する。
-/// `files`の各`(path, bytes)`を連続clusterへ置く。pathは`DOCS/NAME.EXT`か
-/// `BIN/NAME.EXT`で、`BIN`のfileが1個でもあればrootに`BIN` directoryを作る。
+/// 固定の配置はcluster 2=root、3=`HELLO.TXT`、4=`DOCS`、5=`DOCS/NOTE.TXT`、
+/// 6=`Long File Name.txt`、7〜9=`DOCS`のELF fixture（`CHILD.ELF`・
+/// `FDCHILD.ELF`・`PIPECH.ELF`）で、いずれも1 clusterに収まる。
+/// `files`の各`(path, bytes)`はcluster 10以降の連続clusterへ置く。pathは
+/// `DOCS/NAME.EXT`か`BIN/NAME.EXT`で、`BIN`のfileが1個でもあればrootに
+/// `BIN` directoryを作り、そのclusterを追加fileより先に取る。
 /// spawn-args検査は`DOCS/ECHO.ELF`、user-shell検査は`BIN`配下のtoolを渡す。
 fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     let fat_sectors = fat_sectors();
@@ -351,7 +357,7 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     boot[50..52].copy_from_slice(&6u16.to_le_bytes()); // backup boot sector
     boot[510..512].copy_from_slice(&[0x55, 0xaa]);
 
-    // --- FAT (2面同一): [0]=media, [1]=EOC, [2]=EOC(root), [3]=EOC(file) ---
+    // --- FAT (2面同一): [0]=media, [1]=EOC, [2]〜[9]=固定entryのEOC ---
     let mut fat = std::vec![0u8; fat_sectors as usize * SECTOR];
     let set = |fat: &mut [u8], index: u32, value: u32| {
         let offset = index as usize * 4;
@@ -401,7 +407,7 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
         image[start..start + fat.len()].copy_from_slice(&fat);
     }
 
-    // --- root directory (cluster 2): HELLO.TXT + DOCS + 終端0x00 record ---
+    // --- root directory (cluster 2): HELLO.TXT + DOCS + LFN file (+ BIN) ---
     let root_start = data_start as usize * SECTOR;
     let dir_entry =
         |image: &mut [u8], index: usize, name: &[u8; 11], attr: u8, cluster: u32, size: u32| {
@@ -495,7 +501,8 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
         }
     }
 
-    // --- file data (cluster 3 = HELLO.TXT, cluster 5 = NOTE.TXT) ---
+    // --- file data (cluster 3 = HELLO.TXT, 5 = NOTE.TXT, 6 = LFN file,
+    // 7〜9 = ELF fixture、10以降 = 追加file) ---
     let file_start = (data_start + (FILE_CLUSTER - 2)) as usize * SECTOR;
     image[file_start..file_start + HELLO_TXT.len()].copy_from_slice(HELLO_TXT);
     let note_start = (data_start + (NOTE_CLUSTER - 2)) as usize * SECTOR;

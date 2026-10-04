@@ -21,8 +21,10 @@ const FDT_PROP: u32 = 3;
 const FDT_NOP: u32 = 4;
 const FDT_END: u32 = 9;
 
-/// QEMU `virt`のnode階層は深さ4まで。学習対象のmachine記述に必要な
-/// 深さだけを許容し、深い構造は探索しない。
+/// 同時に開いているnodeの数（root nodeを含む）の上限。rootを深さ0と数えると
+/// QEMU `virt`の最深nodeは深さ4（`/cpus/cpu-map/cluster0/core0`）で、開いた
+/// nodeは5個になる。8はこれに余裕を持たせた値であり、超えるDTBは
+/// `BadStructure`として全体を拒否する。
 const MAX_DEPTH: usize = 8;
 /// node名とproperty名の読み取り上限。QEMUが出す名前はすべてこれより短い。
 const MAX_NAME: usize = 64;
