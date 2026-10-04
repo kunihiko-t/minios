@@ -32,7 +32,8 @@ const MESSAGE: &[u8] = b"waitpid verified\n";
 extern "C" fn guest_main() -> ! {
     // CHILD.ELFを新processとして起動する。childはpid 1を採番し、
     // `spawn-child`をstdoutへ書いて42で終了する。
-    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len()) != CHILD_PID as isize {
+    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len(), core::ptr::null(), 0) != CHILD_PID as isize
+    {
         sys_exit(FAILURE_EXIT);
     }
 

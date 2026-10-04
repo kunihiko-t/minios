@@ -56,7 +56,10 @@ extern "C" fn guest_main() -> ! {
     let (read_fd, write_fd) = pipe();
     check(sys_dup2(STDOUT, SAVED_STDOUT) == SAVED_STDOUT as isize);
     check(sys_dup2(write_fd, STDOUT) == STDOUT as isize);
-    check(sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len()) == CHILD_PID as isize);
+    check(
+        sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len(), core::ptr::null(), 0)
+            == CHILD_PID as isize,
+    );
     check(sys_dup2(SAVED_STDOUT, STDOUT) == STDOUT as isize);
     check(sys_close(SAVED_STDOUT) == 0);
     check(sys_close(write_fd) == 0);

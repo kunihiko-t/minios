@@ -7,12 +7,14 @@ use crate::{
     },
     vm::{AddressSpace, FrameStore},
 };
+use alloc::vec::Vec;
 use minios_abi::{
     control::FrameKind,
+    manifest::ARG_MAX_LEN,
     syscall::{
-        DIRENT_LEN, DirEnt, EAGAIN, EBADF, EFAULT, EINVAL, ENOSYS, ESPIPE, MAX_PATH_LEN,
-        MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, STAT_KIND_CONSOLE, STAT_LEN, STDERR, STDIN,
-        STDOUT, Stat, SyscallNumber,
+        DIRENT_LEN, DirEnt, EAGAIN, EBADF, EFAULT, EINVAL, ENOMEM, ENOSYS, ESPIPE, MAX_PATH_LEN,
+        MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, SPAWN_ARG_LEN, SPAWN_MAX_ARGC,
+        STAT_KIND_CONSOLE, STAT_LEN, STDERR, STDIN, STDOUT, Stat, SyscallNumber,
     },
 };
 
@@ -174,10 +176,12 @@ pub trait ControlSource {
     }
 
     /// `path`のFAT32 fileをELFとして新processへ読み込み、採番したpidを
-    /// 返す。childは親と独立してscheduleされ、終了codeは`waitpid`で
-    /// 回収できる。`Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
-    fn spawn(&mut self, path: &str) -> Result<usize, isize> {
-        let _ = path;
+    /// 返す。`argv`はdispatchが検証・copy済みのchildのargvで、空なら
+    /// pathのbasenameだけをargv[0]にする。childは親と独立してscheduleされ、
+    /// 終了codeは`waitpid`で回収できる。`Err`はそのまま`a0`へ返すerrno
+    /// である。default実装は`ENOSYS`。
+    fn spawn(&mut self, path: &str, argv: &[&str]) -> Result<usize, isize> {
+        let _ = (path, argv);
         Err(ENOSYS)
     }
 
@@ -604,9 +608,11 @@ fn dispatch_getpid<E, R: ControlSource>(
     SyscallFlow::Resume
 }
 
-/// `spawn` (`a0=path_ptr, a1=path_len`)。検証規約は`open`と同じで、
-/// process生成のside effectより先にpathのEFAULT/EINVALを確定する。
-/// 成功時は`a0`へchildのpidを返す。
+/// `spawn` (`a0=path_ptr, a1=path_len, a2=argv_ptr, a3=argc`)。path検証は
+/// `open`と同じ規約で、argvも`copy_spawn_argv`でkernelへcopyしてから
+/// sourceへ渡す。process生成のside effectより先にEFAULT/EINVALを確定
+/// するため、失敗したspawnはpidもframeも消費しない。成功時は`a0`へ
+/// childのpidを返す。
 fn dispatch_spawn<M: FrameStore, E, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace,
@@ -621,11 +627,70 @@ fn dispatch_spawn<M: FrameStore, E, R: ControlSource>(
         context.set_register(10, EINVAL as usize);
         return SyscallFlow::Resume;
     };
-    match source.spawn(path) {
+    let mut strings = Vec::new();
+    let mut ends = [0usize; SPAWN_MAX_ARGC];
+    let argc = match copy_spawn_argv(context, space, memory, &mut strings, &mut ends) {
+        Ok(argc) => argc,
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            return SyscallFlow::Resume;
+        }
+    };
+    let mut argv = [""; SPAWN_MAX_ARGC];
+    let mut start = 0;
+    for (slot, &end) in argv.iter_mut().zip(&ends[..argc]) {
+        // copy_spawn_argvが各文字列のUTF-8を検証済みである。
+        *slot = core::str::from_utf8(&strings[start..end]).unwrap_or_default();
+        start = end;
+    }
+    match source.spawn(path, &argv[..argc]) {
         Ok(pid) => context.set_register(10, pid),
         Err(errno) => context.set_register(10, errno as usize),
     }
     SyscallFlow::Resume
+}
+
+/// `spawn`の`a2`/`a3`が指すargvを`strings`へ詰めてcopyし、argcを返す。
+/// `ends[i]`はi番目の文字列の`strings`内の終端offsetである。
+/// `a3`=0は`a2`を読まない。`a3`が`SPAWN_MAX_ARGC`超、文字列が
+/// `ARG_MAX_LEN`超・NUL含み・非UTF-8なら`EINVAL`、entry列か文字列が
+/// 読めなければ`EFAULT`。entryは先頭から順に検査する。
+fn copy_spawn_argv<M: FrameStore>(
+    context: &UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    strings: &mut Vec<u8>,
+    ends: &mut [usize; SPAWN_MAX_ARGC],
+) -> Result<usize, isize> {
+    let argc = context.register(13);
+    if argc > SPAWN_MAX_ARGC {
+        return Err(EINVAL);
+    }
+    let mut table = [0u8; SPAWN_MAX_ARGC * SPAWN_ARG_LEN];
+    let table = &mut table[..argc * SPAWN_ARG_LEN];
+    copy_from_user(space, memory, context.register(12) as u64, table).map_err(|_| EFAULT)?;
+    // 最大長で一度だけ確保し、以降のresizeで再確保しない。
+    strings
+        .try_reserve_exact(argc * ARG_MAX_LEN)
+        .map_err(|_| ENOMEM)?;
+    let (entries, _) = table.as_chunks::<SPAWN_ARG_LEN>();
+    for (entry, end) in entries.iter().zip(ends.iter_mut()) {
+        let (pointer, len) = entry.split_at(8);
+        let pointer = u64::from_le_bytes(pointer.try_into().unwrap_or_default());
+        let len = u64::from_le_bytes(len.try_into().unwrap_or_default());
+        if len > ARG_MAX_LEN as u64 {
+            return Err(EINVAL);
+        }
+        let start = strings.len();
+        strings.resize(start + len as usize, 0);
+        let text = &mut strings[start..];
+        copy_from_user(space, memory, pointer, text).map_err(|_| EFAULT)?;
+        if text.contains(&0) || core::str::from_utf8(text).is_err() {
+            return Err(EINVAL);
+        }
+        *end = strings.len();
+    }
+    Ok(argc)
 }
 
 /// `exec` (`a0=path_ptr, a1=path_len`)。path検証は`spawn`と同じ規約。
@@ -1143,7 +1208,7 @@ fn dispatch_write<M: FrameStore, S: ControlSink, R: ControlSource>(
 mod tests {
     extern crate std;
 
-    use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
+    use std::{boxed::Box, collections::BTreeMap, string::String, vec, vec::Vec};
 
     use super::{ControlSink, ControlSource, SyscallFlow, dispatch_syscall};
     use crate::{
@@ -1153,11 +1218,12 @@ mod tests {
     };
     use minios_abi::{
         control::FrameKind,
+        manifest::ARG_MAX_LEN,
         syscall::{
             DIRENT_LEN, DIRENT_NAME_LEN, DirEnt, EBADF, EFAULT, EINVAL, EISDIR, ENODEV, ENOENT,
             ENOSYS, ENOTDIR, ENOTEMPTY, ESPIPE, FIRST_FILE_FD, MAX_OPEN_FILES, MAX_PATH_LEN,
-            MAX_READ_LEN, MAX_WRITE_LEN, STAT_KIND_FILE, STAT_LEN, STDERR, STDIN, STDOUT, Stat,
-            SyscallNumber,
+            MAX_READ_LEN, MAX_WRITE_LEN, SPAWN_MAX_ARGC, STAT_KIND_FILE, STAT_LEN, STDERR, STDIN,
+            STDOUT, Stat, SyscallNumber,
         },
     };
 
@@ -1458,6 +1524,7 @@ mod tests {
         getpid_result: isize,
         spawns: usize,
         spawn_result: Result<usize, isize>,
+        seen_argv: Vec<String>,
         waitpids: usize,
         seen_wait_pid: Option<usize>,
         waitpid_result: Result<Option<u32>, isize>,
@@ -1503,6 +1570,7 @@ mod tests {
                 getpid_result: 7,
                 spawns: 0,
                 spawn_result: Ok(11),
+                seen_argv: Vec::new(),
                 waitpids: 0,
                 seen_wait_pid: None,
                 waitpid_result: Ok(Some(42)),
@@ -1639,9 +1707,10 @@ mod tests {
             self.getpid_result
         }
 
-        fn spawn(&mut self, path: &str) -> Result<usize, isize> {
+        fn spawn(&mut self, path: &str, argv: &[&str]) -> Result<usize, isize> {
             self.spawns += 1;
             self.seen_path = Some(Vec::from(path.as_bytes()));
+            self.seen_argv = argv.iter().map(|text| String::from(*text)).collect();
             self.spawn_result
         }
 
@@ -3295,6 +3364,134 @@ mod tests {
 
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    /// spawn検査用のMESSAGE page内容。offset 0に`CHILD.ELF`、
+    /// `SPAWN_TABLE`にargv entry列、`strings`の各`(offset, bytes)`を置く。
+    const SPAWN_TABLE: usize = 64;
+
+    fn spawn_page(entries: &[(u64, u64)], strings: &[(usize, &[u8])]) -> Vec<u8> {
+        let mut page = vec![0u8; PAGE_SIZE];
+        page[..9].copy_from_slice(b"CHILD.ELF");
+        for (index, (pointer, len)) in entries.iter().enumerate() {
+            let at = SPAWN_TABLE + index * 16;
+            page[at..at + 8].copy_from_slice(&pointer.to_le_bytes());
+            page[at + 8..at + 16].copy_from_slice(&len.to_le_bytes());
+        }
+        for (offset, bytes) in strings {
+            page[*offset..*offset + bytes.len()].copy_from_slice(bytes);
+        }
+        page
+    }
+
+    fn dispatch_spawn_page(page: &[u8], argc: usize) -> (usize, FileSource) {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_numbered_file_fixture(
+            SPAWN_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            MESSAGE_PAGE + SPAWN_TABLE,
+            argc,
+            page,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        (context.register(10), source)
+    }
+
+    // Catches spawn dropping, reordering or truncating argv strings, and the
+    // zero-argc path reading a2: argc=0 must reach the source with an empty
+    // argv even when a2 is garbage, so old callers keep today's child argv.
+    #[test]
+    fn spawn_copies_argv_entries_in_order() {
+        let base = MESSAGE_PAGE as u64;
+        let page = spawn_page(
+            &[(base + 256, 8), (base + 300, 5), (base + 320, 10)],
+            &[(256, b"echoargs"), (300, b"alpha"), (320, b"beta gamma")],
+        );
+        let (a0, source) = dispatch_spawn_page(&page, 3);
+        assert_eq!(a0, 11);
+        assert_eq!(source.seen_argv, ["echoargs", "alpha", "beta gamma"]);
+
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_numbered_file_fixture(
+            SPAWN_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0x40_000,
+            0,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), 11);
+        assert_eq!(source.spawns, 1);
+        assert!(source.seen_argv.is_empty());
+    }
+
+    // Catches argv limits drifting from the manifest's or an invalid argv
+    // reaching the source: every rejection must leave spawns at 0, and the
+    // exact limits (SPAWN_MAX_ARGC entries, ARG_MAX_LEN bytes) must pass.
+    #[test]
+    fn spawn_rejects_invalid_argv_before_the_source() {
+        let base = MESSAGE_PAGE as u64;
+        let long = [b'a'; ARG_MAX_LEN + 1];
+        let full = [(base + 1024, 1); SPAWN_MAX_ARGC + 1];
+
+        let page = spawn_page(&full, &[(1024, b"x")]);
+        let (a0, source) = dispatch_spawn_page(&page, SPAWN_MAX_ARGC);
+        assert_eq!(a0, 11);
+        assert_eq!(source.seen_argv.len(), SPAWN_MAX_ARGC);
+        let (a0, source) = dispatch_spawn_page(&page, SPAWN_MAX_ARGC + 1);
+        assert_eq!(a0, EINVAL as usize);
+        assert_eq!(source.spawns, 0);
+
+        let page = spawn_page(&[(base + 1024, ARG_MAX_LEN as u64)], &[(1024, &long)]);
+        assert_eq!(dispatch_spawn_page(&page, 1).0, 11);
+
+        let cases: [(&[(u64, u64)], &[(usize, &[u8])], isize); 5] = [
+            // 長すぎる文字列。
+            (
+                &[(base + 1024, ARG_MAX_LEN as u64 + 1)],
+                &[(1024, &long)],
+                EINVAL,
+            ),
+            // 未mapの文字列pointer。2個目で落ちても1個目は渡らない。
+            (&[(base + 1024, 1), (0x40_000, 1)], &[(1024, b"x")], EFAULT),
+            // page末尾をまたいで未mapへ出る文字列。
+            (&[(base + 4095, 2)], &[], EFAULT),
+            // NULを含む文字列。
+            (&[(base + 1024, 3)], &[(1024, b"a\0b")], EINVAL),
+            // UTF-8でない文字列。
+            (&[(base + 1024, 1)], &[(1024, &[0xff])], EINVAL),
+        ];
+        for (entries, strings, errno) in cases {
+            let page = spawn_page(entries, strings);
+            let (a0, source) = dispatch_spawn_page(&page, entries.len());
+            assert_eq!(a0, errno as usize);
+            assert_eq!(source.spawns, 0);
+        }
+
+        // entry列自体が読めない。
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, _) = dispatch_numbered_file_fixture(
+            SPAWN_NUMBER,
+            MESSAGE_PAGE,
+            9,
+            0x40_000,
+            1,
+            b"CHILD.ELF",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(context.register(10), EFAULT as usize);
+        assert_eq!(source.spawns, 0);
     }
 
     // Catches waitpid dropping the reaped code or the waited pid: a

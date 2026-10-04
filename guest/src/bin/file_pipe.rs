@@ -77,7 +77,8 @@ extern "C" fn guest_main() -> ! {
 
     // childを起動する。PIPECH.ELFは継承したfd 3から11 byteを読み、
     // stdoutへ写して42で終了する。
-    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len()) != CHILD_PID as isize {
+    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len(), core::ptr::null(), 0) != CHILD_PID as isize
+    {
         sys_exit(FAILURE_EXIT);
     }
     if sys_write(write_fd, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {

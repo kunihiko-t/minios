@@ -169,7 +169,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 13 | `mkdir` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、directoryを作成する。戻り値は0か負のerrno |
 | 14 | `rmdir` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、空のdirectoryを削除する。戻り値は0か負のerrno |
 | 15 | `getpid` | なし | 呼び出したprocessのpidを返す |
-| 16 | `spawn` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、pathのELF fileを新しいprocessとして起動する。戻り値はchildのpidか負のerrno |
+| 16 | `spawn` | `a0=path pointer`、`a1=path length`、`a2=argv pointer`、`a3=argc` | `open`と同じpath規約で、pathのELF fileを新しいprocessとして起動する。`a3`が1以上なら`a2`の`argc`個のentryがchildのargvになり、0なら`a2`は読まずargvはpathのbasename 1個になる。戻り値はchildのpidか負のerrno |
 | 17 | `waitpid` | `a0=pid` | `pid`のprocessの終了codeを返す。対象がliveなら呼び出しprocessをblockし、対象の終了後に同じecallが再実行されてcodeを返す。負のerrnoは`ECHILD`/`EINVAL` |
 | 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 | 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
@@ -221,6 +221,15 @@ directoryはfdを持たないため、`mkdir`と`rmdir`が失効させるfdは�
 `getpid`は呼び出したprocessのpidを返します。pidはprocess tableが採番する単調な識別子で、manifest宣言順のimageは0から始まり、`spawn`で起動したprocessは以後の番号を受け取ります。
 `spawn`は`path`のfileをELF executableとして読み込み、新しいprocessを生成してschedulerへ登録し、childのpidを返します。childは呼び出し側と独立してscheduleされ、親が終了しても残り続けます。
 childは呼び出し側のfd tableのsnapshotをfd 0、1、2も含めて引き継ぎます。同じfd番号が同じfileを指し、spawn時点のoffsetを引き継ぎますが、継承はcopyなのでその後のseekやcloseは互いに影響しません。`dup2`でfd 1をpipeへ向けてから`spawn`すれば、childの標準出力はそのpipeへ流れます。manifestから起動するprocessはconsole entryだけを持つtableで開始します。
+`spawn`の`a2`は`argc`個のentryの配列を指し、各entryは`SPAWN_ARG_LEN`（16）byteの`[pointer: u64, length: u64]`です。
+文字列はpathと同じくpointerと長さで渡し、user memory上でNUL終端する必要はありません。
+childは初期スタックABIのとおり`a0=argc`、`a1=argv`で起動し、argvはNUL終端した文字列として渡した順に並びます。
+`argv[0]`も呼び出し側が渡した文字列そのままで、慣習としてprogram名を置きます。
+上限はmanifest経路のchildと同じで、`argc`は`SPAWN_MAX_ARGC`（`ARG_MAX_COUNT + 1`、現在は17）以下、各文字列は`ARG_MAX_LEN`（256）byte以下です。
+上限を超える`argc`や文字列、NULを含む文字列、UTF-8でない文字列は`EINVAL`、entry配列か文字列が読み取り可能なユーザーページに収まらない場合は`EFAULT`です。
+kernelはprocessを作る前にentry配列と全文字列をkernel内へcopyして検証するため、これらの失敗ではprocessもpidも消費されません。
+`argc`が0の場合は`a2`を読まず、childは従来どおりpathのbasename（`DOCS/CHILD.ELF`なら`CHILD.ELF`）だけを`argv[0]`に持つ`argc=1`で起動します。
+argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたため、この規約で挙動は変わりません。
 `spawn`が失敗した場合、途中まで確保したframe・address space・imageはすべて解放され、新しいprocessは登録されません。pathがfileを指さない（`ENOENT`）、directoryを指す（`EISDIR`）、ELFとして受理できない（`EINVAL`）、process tableが満杯または資源が足りない（`ENOMEM`）場合がerrnoです。
 `waitpid`は`a0`のpidを持つprocessの終了codeを返します。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
 対象が自分自身・存在しない・既にreap済み・異常終了でstatusを持たない場合は`ECHILD`、wait連鎖が呼び出し側へ戻るcycleは`EINVAL`を返します。複数のprocessが同じpidを待つこともでき、終了時に全員がwakeしますが、codeを回収できるのは先に再実行された1つだけで、残りは`ECHILD`を受け取ります。kernelは終了codeをprocess数上限分だけ台帳へ保持し、超過分は最古からdropします。
@@ -265,7 +274,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-19` | `ENODEV` | block deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
-| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement |
+| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement |
 | `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdとconsole entryへの`lseek`/`pread`/`pwrite` |
@@ -288,6 +297,7 @@ MiniOSは、MiniBundleのmanifestにある`name`と`arg=`行をguestの初期ス
 
 スタック上位から低位へは、NUL終端の文字列、`AT_NULL`（typeとvalueの二語とも0）、空の`envp`（0）、`argv`のNULL終端（0）、`argv[0]`から`argv[argc - 1]`までのpointer列、`argc`の順に並びます。
 `argv[0]`はmanifestの`name`を指し、`argv[1]`以降は`arg=`行の順序どおりの文字列を指します。
+`spawn`で起動したchildも同じ配置で始まり、argvは`spawn`へ渡した文字列（`argc`が0ならpathのbasename 1個）です。
 guestは書き換え前のスタックを読み取り専用の初期データとして扱い、以降のスタック使用は`sp`より下位へ行います。
 
 ## 互換性規約

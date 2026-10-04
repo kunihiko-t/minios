@@ -208,10 +208,11 @@ impl ControlSource for UartControlSource<'_> {
     }
 
     /// guestの`spawn`をstorage sessionとprocess tableへ委譲する。
-    /// `path`のfileをELFとして読み込み、basenameをprocess名として
-    /// 新processを生成してtableへ登録し、採番pidを返す。
+    /// `path`のfileをELFとして読み込み、新processを生成してtableへ登録し、
+    /// 採番pidを返す。`argv`が空ならbasenameをprocess名とargv[0]にし、
+    /// 空でなければ`argv[0]`をprocess名、`argv`全体をchildのargvにする。
     #[cfg(target_arch = "riscv64")]
-    fn spawn(&mut self, path: &str) -> Result<usize, isize> {
+    fn spawn(&mut self, path: &str, argv: &[&str]) -> Result<usize, isize> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
         // 外へ持ち出さない。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -220,13 +221,16 @@ impl ControlSource for UartControlSource<'_> {
             .read_file(path, |chunk| elf.extend_from_slice(chunk))
             .map_err(fat_errno)?;
 
-        // `Process.name`は`&'static str`必須のため、basenameをleakする。
+        // `Process.name`は`&'static str`必須のため、argv[0]をleakする。
         // spawn回数比例の小さいleakとして明示的に許容する。
-        let name = path.rsplit('/').next().unwrap_or(path);
+        let (name, arguments) = match argv.split_first() {
+            Some((first, rest)) => (*first, rest),
+            None => (path.rsplit('/').next().unwrap_or(path), &[][..]),
+        };
         let name = alloc::string::String::from(name).leak();
 
         // Safety: 同上。返り値のprocess所有権はinsertか回収まで持つ。
-        let process = match unsafe { crate::spawn_process(name, &elf, &[]) } {
+        let process = match unsafe { crate::spawn_process(name, &elf, arguments) } {
             Ok(process) => process,
             Err(failure) => {
                 // 回収しきれなかったimageが残っていればdestroyを一度試す。

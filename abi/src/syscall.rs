@@ -19,6 +19,8 @@ pub enum SyscallNumber {
     Getpid = 15,
     /// `a0`/`a1`が指すFAT32 pathのELF fileを新processとして起動し、
     /// childのpidを返す。childは親と独立してscheduleされる。
+    /// `a2`は`a3`個の`SPAWN_ARG_LEN` byte entryを指し、childのargvになる。
+    /// `a3`=0なら`a2`は読まず、childのargvはpathのbasename 1個だけである。
     Spawn = 16,
     /// `a0`のpidを持つprocessの終了を待ち、その終了codeを返す。
     /// 対象がまだliveなら呼び出しprocessをblockし、対象の終了で
@@ -72,6 +74,13 @@ pub const MAX_OPEN_FILES: usize = 16;
 /// `FIRST_FILE_FD`から始まる`MAX_OPEN_FILES`個のslotを合わせた数。
 /// `dup2`の`newfd`はこの値未満でなければならない。
 pub const FD_TABLE_LEN: usize = FIRST_FILE_FD + MAX_OPEN_FILES;
+
+/// `spawn`の`a2`が指すargv entry 1個のbyte長。`[pointer: u64, length: u64]`
+/// のLE列で、文字列はuser memory上でNUL終端しない。
+pub const SPAWN_ARG_LEN: usize = 16;
+/// `spawn`の`a3` (argc) の上限。manifest経路のchildと同じく、program name
+/// 1個と`ARG_MAX_COUNT`個の引数までを受理する。各文字列の上限は`ARG_MAX_LEN`。
+pub const SPAWN_MAX_ARGC: usize = crate::manifest::ARG_MAX_COUNT + 1;
 
 /// `lseek`の`a2`が取る基準位置。file先頭からの絶対offset。
 pub const SEEK_SET: usize = 0;
@@ -229,6 +238,8 @@ mod tests {
         assert_eq!(FIRST_FILE_FD, 3);
         assert_eq!(MAX_OPEN_FILES, 16);
         assert_eq!(FD_TABLE_LEN, 19);
+        assert_eq!(SPAWN_ARG_LEN, 16);
+        assert_eq!(SPAWN_MAX_ARGC, 17);
         assert_eq!(ENOENT, -2);
         assert_eq!(EIO, -5);
         assert_eq!(EBADF, -9);

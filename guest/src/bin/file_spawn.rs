@@ -38,22 +38,34 @@ extern "C" fn guest_main() -> ! {
 
     // CHILD.ELFを新processとして起動する。childはpid 1を採番し、
     // 起動後に`spawn-child`をstdoutへ書いて42で終了する。
-    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len()) != CHILD_PID {
+    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len(), core::ptr::null(), 0) != CHILD_PID {
         sys_exit(FAILURE_EXIT);
     }
 
     // errno契約：不在pathはENOENT、directoryはEISDIR、非ELF fileは
     // EINVAL。空pathはdispatch段階でEINVAL。
-    if sys_spawn(MISSING_PATH.as_ptr(), MISSING_PATH.len()) != ENOENT {
+    if sys_spawn(
+        MISSING_PATH.as_ptr(),
+        MISSING_PATH.len(),
+        core::ptr::null(),
+        0,
+    ) != ENOENT
+    {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_spawn(DIR_PATH.as_ptr(), DIR_PATH.len()) != EISDIR {
+    if sys_spawn(DIR_PATH.as_ptr(), DIR_PATH.len(), core::ptr::null(), 0) != EISDIR {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_spawn(NOTELF_PATH.as_ptr(), NOTELF_PATH.len()) != EINVAL {
+    if sys_spawn(
+        NOTELF_PATH.as_ptr(),
+        NOTELF_PATH.len(),
+        core::ptr::null(),
+        0,
+    ) != EINVAL
+    {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_spawn(MISSING_PATH.as_ptr(), 0) != EINVAL {
+    if sys_spawn(MISSING_PATH.as_ptr(), 0, core::ptr::null(), 0) != EINVAL {
         sys_exit(FAILURE_EXIT);
     }
 
