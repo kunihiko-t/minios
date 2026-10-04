@@ -79,21 +79,14 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 そこで以下では、作業を五つの段階に分け、各段階の受け入れ条件を`cargo xtask test`の経路または`cargo xtask check`の検査として書きます。
 段階の順序は依存関係で決めており、段階1はuser spaceのlibraryを前提とし、段階3は段階2の割り込み基盤を前提とします。
 
-### 段階0：文書と実装の整合
+### 段階0：文書と実装の整合（完了）
 
-最初に、すでに書いた文書を実装へ追いつかせます。
-この段階は新しいkernel codeを含まず、ほかの段階より先に終えられます。
+段階0では、新しいkernel codeを加えずに文書を実装へ追いつかせました。
 
-- **release gateの段階数**：README、本書、学習ガイドの間で29、31、33、44、49と食い違っています。
-  数値を各文書へ手書きする方式をやめ、`cargo xtask check`のdocs検査が実際の段階数と照合する一箇所だけに残します。
-- **READMEの「現在の制約」**：file descriptor、FAT32の書き込み、`spawn`、`pipe`が実装済みである事実を反映していません。
-  実装済み機能の節と制約の節を書き直し、syscall一覧へのlinkを置きます。
-- **学習ガイドの欠落章**：第17章で止まっており、heapの成長、Device Tree、scheduler、virtio-blk、FAT32、file descriptor、`spawn`/`waitpid`/`pipe`を扱う章がありません。
-  第18章から第23章として追加し、第12章「次に作るもの」は本書への案内に縮めます。
-- **guest側のsyscall wrapperの重複**：`guest/src/bin/`の各programが`sys_*`関数を2個から10個ずつ複製しています。
-  `guest/src/sys.rs`として一つにまとめ、段階1のuser libraryの土台にします。
-
-受け入れ条件は`cargo xtask check`が段階数の不一致を検出すること、全guest programが共通moduleを使うこと、学習ガイドの索引に新章が並ぶことです。
+- release gateの段階数を本文へ手書きする方式をやめ、`cargo xtask check`のdocs検査が第11章の実行例と段階一覧を検査計画と照合するようにしました。
+- READMEの「現在の制約」を、未実装機能と実装済み機能の上限に分けて書き直しました。
+- 学習ガイドへ第18章から第23章を追加し、第12章を第13章以降と本書への案内に縮めました。
+- guestのsyscall wrapperを`minios_guest` library（`guest/src/lib.rs`と`guest/src/sys.rs`）へまとめ、全guest programがそれを使うようにしました。
 
 ### 段階1：user spaceを実用に届かせる
 
@@ -109,7 +102,7 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
   `dup2`を追加し、上限を16へ上げます。
 - **`spawn`への引数渡し**：現在の`spawn`はpathだけを受け取り、childは`argv`を受け取れません。
   manifestと同じ初期stack ABIで`argv`を積む形へ拡張します。
-- **user library crate**：段階0でまとめたwrapperを`guest/src/lib.rs`として公開し、`println!`、`File`、`Process`のような薄い型を置きます。
+- **user library crate**：段階0で作った`minios_guest` libraryへ、`println!`、`File`、`Process`のような薄い型を加えます。
   各sample guestはこのlibraryだけを使って書き直します。
 - **user mode shell**：FAT32上の`SH.ELF`としてuser modeのshellを書き、path指定の起動、`|`によるpipe、`<`と`>`によるredirectを実装します。
   kernel shellは起動と診断に残し、通常の操作はuser shellへ移します。

@@ -10,8 +10,9 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
-use minios_abi::syscall::{EFAULT, EINVAL, EISDIR, ENOENT, SyscallNumber};
+use core::arch::naked_asm;
+use minios_abi::syscall::{EFAULT, EINVAL, EISDIR, ENOENT};
+use minios_guest::sys::{sys_exec, sys_exit};
 
 /// exit異常の的内code。errno契約違反やpanicで使う。
 const FAILURE_EXIT: u32 = 70;
@@ -23,37 +24,6 @@ const TEXT_PATH: &[u8] = b"HELLO.TXT";
 const MISSING_PATH: &[u8] = b"MISSING";
 /// exec対象の子image。disk image fixtureに置いた最小ELF。
 const CHILD_PATH: &[u8] = b"DOCS/CHILD.ELF";
-
-/// MiniOS ABIの`exec`を呼ぶ。`a0`/`a1`がFAT32 path。成功時は戻らず、
-/// 失敗時のみ負のerrnoを返す。
-fn sys_exec(path: *const u8, path_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // a0はpath pointer兼戻り値、a1/a7は引数である。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a7") SyscallNumber::Exec as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`exit`を呼び、戻らない。
-fn sys_exit(code: u32) -> ! {
-    // Safety: ecallはkernelへtrapし、exitはprocessを終了させるため戻らない。
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") code,
-            in("a7") SyscallNumber::Exit as usize,
-            options(noreturn),
-        );
-    }
-}
 
 /// `_start`から呼ばれるRust本体。errno契約を順に確かめてからexecする。
 extern "C" fn guest_main() -> ! {

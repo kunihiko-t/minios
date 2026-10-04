@@ -11,6 +11,12 @@ build = "build.rs"
 [dependencies]
 minios-abi = { path = "../abi" }
 
+[lib]
+path = "src/lib.rs"
+test = false
+bench = false
+doctest = false
+
 [[bin]]
 name = "minios-guest"
 path = "src/main.rs"

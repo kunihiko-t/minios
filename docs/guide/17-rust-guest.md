@@ -40,6 +40,7 @@ program headerの2個目は`PT_RISCV_ATTRIBUTES`であり、loaderは`PT_LOAD`�
 `argv[0]`はmanifestの`name`、`argv[1]`以降は`arg=`行の順序どおりの文字列です。
 
 system callは[`minios_abi::syscall`](../../abi/src/syscall.rs)の番号に従います。
+syscall wrapperは全guest programが共有する[`guest/src/sys.rs`](../../guest/src/sys.rs)にあり、各programは`minios_guest::sys`から使います。
 `sys_write`は`a0=fd`（引数兼戻り値）、`a1=pointer`、`a2=len`、`a7=1`で`ecall`し、書いたbyte数か負のerrnoを受けます。
 `sys_exit`は`a0=code`、`a7=2`で`ecall`し、kernelがguestへ戻らない契約のため`noreturn`です。
 panic handlerと`write`失敗時は終了code70で`exit`し、沈黙した停止や未定義の継続を作りません。

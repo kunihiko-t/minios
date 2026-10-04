@@ -9,9 +9,13 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 use minios_abi::syscall::{
-    EBADF, EINVAL, FIRST_FILE_FD, SEEK_CUR, SEEK_END, SEEK_SET, STDIN, STDOUT, SyscallNumber,
+    EBADF, EINVAL, FIRST_FILE_FD, SEEK_CUR, SEEK_END, SEEK_SET, STDIN, STDOUT,
+};
+use minios_guest::sys::{
+    sys_close, sys_create, sys_exit, sys_lseek, sys_open, sys_pread, sys_pwrite, sys_read,
+    sys_write,
 };
 
 /// exit異常の的内code。syscall失敗や契約違反、panicで使う。
@@ -24,121 +28,6 @@ const WRITE_PATH: &[u8] = b"SEEKW.TXT";
 const CONTENT: &[u8] = b"0123456789";
 const PAYLOAD: &[u8] = b"seek verified\n";
 const BUFFER_LEN: usize = 64;
-
-macro_rules! sys1 {
-    ($number:expr, $a0:expr) => {{
-        let returned: isize;
-        // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-        unsafe {
-            asm!(
-                "ecall",
-                inlateout("a0") $a0 as isize => returned,
-                in("a7") $number as usize,
-                options(nostack),
-            );
-        }
-        returned
-    }};
-}
-
-macro_rules! sys3 {
-    ($number:expr, $a0:expr, $a1:expr, $a2:expr) => {{
-        let returned: isize;
-        // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-        unsafe {
-            asm!(
-                "ecall",
-                inlateout("a0") $a0 as isize => returned,
-                in("a1") $a1 as isize,
-                in("a2") $a2 as isize,
-                in("a7") $number as usize,
-                options(nostack),
-            );
-        }
-        returned
-    }};
-}
-
-/// MiniOS ABIの`create`を呼ぶ。戻り値はwritable fdか負のerrno。
-fn sys_create(path: &[u8]) -> isize {
-    sys3!(SyscallNumber::Create, path.as_ptr() as usize, path.len(), 0)
-}
-
-/// MiniOS ABIの`open`を呼ぶ。戻り値はread-only fdか負のerrno。
-fn sys_open(path: &[u8]) -> isize {
-    sys3!(SyscallNumber::Open, path.as_ptr() as usize, path.len(), 0)
-}
-
-/// MiniOS ABIの`read`を呼ぶ。戻り値は読んだbyte数、EOFは0、負はerrno。
-fn sys_read(fd: usize, buffer: &mut [u8], len: usize) -> isize {
-    sys3!(SyscallNumber::Read, fd, buffer.as_mut_ptr() as usize, len)
-}
-
-/// MiniOS ABIの`pread`を呼ぶ。fdのoffsetを動かさず`offset`から読む。
-fn sys_pread(fd: usize, buffer: &mut [u8], len: usize, offset: u64) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // bufferはU+W検証済みのstack bufferである。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd as isize => returned,
-            in("a1") buffer.as_mut_ptr() as usize,
-            in("a2") len,
-            in("a3") offset,
-            in("a7") SyscallNumber::Pread as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`write`を呼ぶ。戻り値は書いたbyte数か負のerrno。
-fn sys_write(fd: usize, data: &[u8]) -> isize {
-    sys3!(SyscallNumber::Write, fd, data.as_ptr() as usize, data.len())
-}
-
-/// MiniOS ABIの`pwrite`を呼ぶ。fdのoffsetを動かさず`offset`へ書く。
-fn sys_pwrite(fd: usize, data: &[u8], offset: u64) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // dataはU+R検証済みのstatic rangeである。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd as isize => returned,
-            in("a1") data.as_ptr() as usize,
-            in("a2") data.len(),
-            in("a3") offset,
-            in("a7") SyscallNumber::Pwrite as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`lseek`を呼ぶ。戻り値は新しいoffsetか負のerrno。
-fn sys_lseek(fd: usize, offset: isize, whence: usize) -> isize {
-    sys3!(SyscallNumber::Lseek, fd, offset, whence)
-}
-
-/// MiniOS ABIの`close`を呼ぶ。戻り値は0か負のerrno。
-fn sys_close(fd: usize) -> isize {
-    sys1!(SyscallNumber::Close, fd)
-}
-
-/// MiniOS ABIの`exit`。kernelはこの呼び出しの後guestへ戻らない。
-fn sys_exit(code: u32) -> ! {
-    // Safety: exitのecallはresumeしない契約のため、noreturnでよい。
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") code as isize,
-            in("a7") SyscallNumber::Exit as usize,
-            options(noreturn),
-        );
-    }
-}
 
 /// bufferの先頭`len` byteが`expected`と一致しなければ70で終了する。
 fn expect_bytes(buffer: &[u8], len: usize, expected: &[u8]) {
@@ -153,17 +42,17 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     let mut buffer = [0u8; BUFFER_LEN];
 
     // 既知の内容を持つfileを用意してread-onlyで開き直す。
-    let fd = sys_create(PATH);
+    let fd = sys_create(PATH.as_ptr(), PATH.len());
     if fd < FIRST_FILE_FD as isize {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_write(fd as usize, CONTENT) != CONTENT.len() as isize {
+    if sys_write(fd as usize, CONTENT.as_ptr(), CONTENT.len()) != CONTENT.len() as isize {
         sys_exit(FAILURE_EXIT);
     }
     if sys_close(fd as usize) != 0 {
         sys_exit(FAILURE_EXIT);
     }
-    let rfd = sys_open(PATH);
+    let rfd = sys_open(PATH.as_ptr(), PATH.len());
     if rfd < FIRST_FILE_FD as isize {
         sys_exit(FAILURE_EXIT);
     }
@@ -171,11 +60,11 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
 
     // preadはfdのoffsetを動かさない: offset 4から読んでも
     // 続くreadは先頭から進む。
-    if sys_pread(rfd, &mut buffer, 4, 4) != 4 {
+    if sys_pread(rfd, buffer.as_mut_ptr(), 4, 4) != 4 {
         sys_exit(FAILURE_EXIT);
     }
     expect_bytes(&buffer, 4, b"4567");
-    if sys_read(rfd, &mut buffer, 2) != 2 {
+    if sys_read(rfd, buffer.as_mut_ptr(), 2) != 2 {
         sys_exit(FAILURE_EXIT);
     }
     expect_bytes(&buffer, 2, b"01");
@@ -184,21 +73,21 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     if sys_lseek(rfd, 4, SEEK_SET) != 4 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_read(rfd, &mut buffer, 2) != 2 {
+    if sys_read(rfd, buffer.as_mut_ptr(), 2) != 2 {
         sys_exit(FAILURE_EXIT);
     }
     expect_bytes(&buffer, 2, b"45");
     if sys_lseek(rfd, -3, SEEK_CUR) != 3 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_read(rfd, &mut buffer, 1) != 1 {
+    if sys_read(rfd, buffer.as_mut_ptr(), 1) != 1 {
         sys_exit(FAILURE_EXIT);
     }
     expect_bytes(&buffer, 1, b"3");
     if sys_lseek(rfd, -2, SEEK_END) != 8 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_read(rfd, &mut buffer, 2) != 2 {
+    if sys_read(rfd, buffer.as_mut_ptr(), 2) != 2 {
         sys_exit(FAILURE_EXIT);
     }
     expect_bytes(&buffer, 2, b"89");
@@ -207,13 +96,13 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     if sys_lseek(rfd, 0, SEEK_END) != 10 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_read(rfd, &mut buffer, 1) != 0 {
+    if sys_read(rfd, buffer.as_mut_ptr(), 1) != 0 {
         sys_exit(FAILURE_EXIT);
     }
     if sys_lseek(rfd, 64, SEEK_SET) != 64 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_read(rfd, &mut buffer, 1) != 0 {
+    if sys_read(rfd, buffer.as_mut_ptr(), 1) != 0 {
         sys_exit(FAILURE_EXIT);
     }
     // 負になる結果と未知のwhence、file以外のfdはerrnoを返す。
@@ -230,10 +119,10 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
         sys_exit(FAILURE_EXIT);
     }
     // read-only fdへのpwriteと未割当fdへのpreadはEBADF。
-    if sys_pwrite(rfd, b"x", 0) != EBADF {
+    if sys_pwrite(rfd, b"x".as_ptr(), b"x".len(), 0) != EBADF {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_pread(FIRST_FILE_FD + 3, &mut buffer, 1, 0) != EBADF {
+    if sys_pread(FIRST_FILE_FD + 3, buffer.as_mut_ptr(), 1, 0) != EBADF {
         sys_exit(FAILURE_EXIT);
     }
     if sys_close(rfd) != 0 {
@@ -242,32 +131,32 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
 
     // pwriteはfdのoffsetを動かさない: offset 1へ"ZZ"を書いても
     // 続くwriteはfd offset 4へ追記する。
-    let wfd = sys_create(WRITE_PATH);
+    let wfd = sys_create(WRITE_PATH.as_ptr(), WRITE_PATH.len());
     if wfd < FIRST_FILE_FD as isize {
         sys_exit(FAILURE_EXIT);
     }
     let wfd = wfd as usize;
-    if sys_write(wfd, b"aaaa") != 4 {
+    if sys_write(wfd, b"aaaa".as_ptr(), b"aaaa".len()) != 4 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_pwrite(wfd, b"ZZ", 1) != 2 {
+    if sys_pwrite(wfd, b"ZZ".as_ptr(), b"ZZ".len(), 1) != 2 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_write(wfd, b"b") != 1 {
+    if sys_write(wfd, b"b".as_ptr(), b"b".len()) != 1 {
         sys_exit(FAILURE_EXIT);
     }
     // writable fdへのpreadと、sizeを越えるpwriteはerrnoを返す。
-    if sys_pread(wfd, &mut buffer, 1, 0) != EBADF {
+    if sys_pread(wfd, buffer.as_mut_ptr(), 1, 0) != EBADF {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_pwrite(wfd, b"x", 10) != EINVAL {
+    if sys_pwrite(wfd, b"x".as_ptr(), b"x".len(), 10) != EINVAL {
         sys_exit(FAILURE_EXIT);
     }
     // lseekで先頭へ戻して上書きする。fileは"QZZab"になる。
     if sys_lseek(wfd, 0, SEEK_SET) != 0 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_write(wfd, b"Q") != 1 {
+    if sys_write(wfd, b"Q".as_ptr(), b"Q".len()) != 1 {
         sys_exit(FAILURE_EXIT);
     }
     if sys_close(wfd) != 0 {
@@ -275,11 +164,11 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     }
 
     // 書き換えた内容をread-onlyで読み戻して照合する。
-    let vfd = sys_open(WRITE_PATH);
+    let vfd = sys_open(WRITE_PATH.as_ptr(), WRITE_PATH.len());
     if vfd < FIRST_FILE_FD as isize {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_read(vfd as usize, &mut buffer, BUFFER_LEN) != 5 {
+    if sys_read(vfd as usize, buffer.as_mut_ptr(), BUFFER_LEN) != 5 {
         sys_exit(FAILURE_EXIT);
     }
     expect_bytes(&buffer, 5, b"QZZab");
@@ -288,7 +177,7 @@ extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
     }
 
     // 検証済みの旨をstdoutへ流し、verifierへ届ける。
-    if sys_write(STDOUT, PAYLOAD) < 0 {
+    if sys_write(STDOUT, PAYLOAD.as_ptr(), PAYLOAD.len()) < 0 {
         sys_exit(FAILURE_EXIT);
     }
     sys_exit(SUCCESS_EXIT);

@@ -7,43 +7,13 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
-use minios_abi::syscall::{STDOUT, SyscallNumber};
+use core::arch::naked_asm;
+use minios_abi::syscall::STDOUT;
+use minios_guest::sys::{sys_exit, sys_write};
 
 /// 1回のbusy-waitの反復数。QEMU TCGでおおよそ数百msになり、
 /// 100 Hzのtimer tickを複数回またぐ長さにしてある。
 const SPIN_ITERATIONS: usize = 60_000_000;
-
-/// MiniOS ABIの`write`を呼ぶ。戻り値は書いたbyte数か負のerrno。
-fn sys_write(fd: usize, pointer: *const u8, len: usize) -> isize {
-    let fd_argument = fd as isize;
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd_argument => returned,
-            in("a1") pointer as usize,
-            in("a2") len,
-            in("a7") SyscallNumber::Write as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`exit`。kernelはこの呼び出しの後guestへ戻らない。
-fn sys_exit(code: u32) -> ! {
-    // Safety: exitのecallはresumeしない契約のため、noreturnでよい。
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") code as isize,
-            in("a7") SyscallNumber::Exit as usize,
-            options(noreturn),
-        );
-    }
-}
 
 /// プリエンプションされても進行するbusy-wait。timer trapはuser registerを
 /// 保存・復元するため、counter値は割り込みの前後で変わらない。

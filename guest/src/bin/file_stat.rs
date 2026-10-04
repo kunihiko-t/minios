@@ -10,11 +10,12 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 use minios_abi::syscall::{
     EBADF, EFAULT, ENOENT, ENOTDIR, FIRST_FILE_FD, STAT_KIND_DIR, STAT_KIND_FILE, STAT_LEN, STDOUT,
-    Stat, SyscallNumber,
+    Stat,
 };
+use minios_guest::sys::{sys_exit, sys_fstat, sys_open, sys_stat, sys_write};
 
 /// exit異常の的内code。syscall失敗や契約違反、panicで使う。
 const FAILURE_EXIT: u32 = 70;
@@ -30,92 +31,6 @@ const DOCS_PATH: &[u8] = b"DOCS";
 const THROUGH_FILE_PATH: &[u8] = b"DOCS/NOTE.TXT/DEEP";
 const MISSING_PATH: &[u8] = b"MISSING.TXT";
 const MESSAGE: &[u8] = b"stat verified\n";
-
-/// MiniOS ABIの`stat`を呼ぶ。`a0`/`a1`がpath、`a2`が`Stat`の書き込み先。
-/// 戻り値は書いたbyte数（`STAT_LEN`）か負のerrno。
-fn sys_stat(path: *const u8, path_len: usize, out: *mut u8) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // a0はpath pointer兼戻り値、a1/a2/a7は引数である。outはU+W検証対象である。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a2") out as usize,
-            in("a7") SyscallNumber::Stat as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`fstat`を呼ぶ。`a0`がfd、`a1`が`Stat`の書き込み先。
-/// 戻り値は書いたbyte数（`STAT_LEN`）か負のerrno。
-fn sys_fstat(fd: usize, out: *mut u8) -> isize {
-    let fd_argument = fd as isize;
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // a0はfd兼戻り値、a1/a7は引数である。outはU+W検証対象である。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd_argument => returned,
-            in("a1") out as usize,
-            in("a7") SyscallNumber::Fstat as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`open`を呼ぶ。戻り値はfdか負のerrno。
-fn sys_open(path: *const u8, path_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // a0はpath pointer兼戻り値、a1/a7は引数である。pathはU+R検証済みのstatic rangeである。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a7") SyscallNumber::Open as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`write`を呼ぶ。戻り値は書いたbyte数か負のerrno。
-fn sys_write(fd: usize, pointer: *const u8, len: usize) -> isize {
-    let fd_argument = fd as isize;
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd_argument => returned,
-            in("a1") pointer as usize,
-            in("a2") len,
-            in("a7") SyscallNumber::Write as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`exit`を呼び、戻らない。
-fn sys_exit(code: u32) -> ! {
-    // Safety: ecallはkernelへtrapし、exitはprocessを終了させるため戻らない。
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") code,
-            in("a7") SyscallNumber::Exit as usize,
-            options(noreturn),
-        );
-    }
-}
 
 /// `path`の`stat`を呼び、成功なら`Stat`を返す。失敗時はerrnoを返す。
 fn stat_of(path: &[u8]) -> Result<Stat, isize> {
