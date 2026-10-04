@@ -86,6 +86,7 @@ MiniOSのprocessには親子関係の記録がなく、liveなpidであれば自
 [`Process::exec`](../../kernel/src/process.rs)は、新しいimageの読み込みと`argv`の書き込みをすべて終えてから旧imageと交換します。
 交換前に失敗すれば旧imageには触れず、呼び出し側はerrnoを受けて元のprogramのまま動き続けます。
 成功時はpid、kernel trap stack、fd tableを引き継ぎ、address space、`user_satp`、process名だけを新しくします。
+引き継いだtrap stackのguard pageは、新しいaddress spaceのidentity mappingからも外します。
 
 trap handlerの実行窓ではまだ旧imageのpage tableが`satp`に載っているため、旧imageはその場では解放できません。
 `exec`は旧imageを`retired_image`へ退避し、`dispatch_exec`はtrap slotの`UserContext`を新imageの初期contextで上書きして`SyscallFlow::Exec`を返します。

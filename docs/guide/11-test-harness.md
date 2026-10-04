@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|shell]
 cargo xtask check
 ```
 
@@ -57,41 +57,42 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 10. QEMU user-trapテスト
 11. QEMU user-syscallテスト
 12. QEMU user-exitテスト
-13. QEMU FDTテスト
-14. QEMUヒープテスト
-15. QEMU VirtIOテスト
-16. QEMU payloadテスト
-17. QEMU payload-argsテスト
-18. QEMU payload-stdinテスト
-19. QEMU fileテスト
-20. QEMU file-fdテスト
-21. QEMU file-writeテスト
-22. QEMU file-unlinkテスト
-23. QEMU file-seekテスト
-24. QEMU file-renameテスト
-25. QEMU file-mkdirテスト
-26. QEMU file-spawnテスト
-27. QEMU file-waitpidテスト
-28. QEMU file-statテスト
-29. QEMU file-readdirテスト
-30. QEMU file-execテスト
-31. QEMU file-fdinheritテスト
-32. QEMU file-pipeテスト
-33. QEMU user-heapテスト
-34. QEMU user-sleepテスト
-35. QEMU user-dupテスト
-36. QEMU spawn-argsテスト
-37. QEMU user-shellテスト
-38. QEMU schedテスト
-39. QEMU sched-ioテスト
-40. QEMU sched-io-partialテスト
-41. QEMUシェルテスト
+13. QEMU kernel-stackテスト
+14. QEMU FDTテスト
+15. QEMUヒープテスト
+16. QEMU VirtIOテスト
+17. QEMU payloadテスト
+18. QEMU payload-argsテスト
+19. QEMU payload-stdinテスト
+20. QEMU fileテスト
+21. QEMU file-fdテスト
+22. QEMU file-writeテスト
+23. QEMU file-unlinkテスト
+24. QEMU file-seekテスト
+25. QEMU file-renameテスト
+26. QEMU file-mkdirテスト
+27. QEMU file-spawnテスト
+28. QEMU file-waitpidテスト
+29. QEMU file-statテスト
+30. QEMU file-readdirテスト
+31. QEMU file-execテスト
+32. QEMU file-fdinheritテスト
+33. QEMU file-pipeテスト
+34. QEMU user-heapテスト
+35. QEMU user-sleepテスト
+36. QEMU user-dupテスト
+37. QEMU spawn-argsテスト
+38. QEMU user-shellテスト
+39. QEMU schedテスト
+40. QEMU sched-ioテスト
+41. QEMU sched-io-partialテスト
+42. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
 ### QEMUの三つの検証モード
 
-起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、FDT、ヒープ、VirtIOのテストは**マーカーモード**です。
+起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、kernel-stack、FDT、ヒープ、VirtIOのテストは**マーカーモード**です。
 テストごとのCargo機能を有効にしてカーネルをビルドし、UARTの記録、終了ステータス0、次の完全一致するマーカーを要求します。
 
 ```text
@@ -104,6 +105,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 [MINIOS_TEST] user-entry: reached
 [MINIOS_TEST] user-trap: rejected
 [MINIOS_TEST] user-syscall: ok
+[MINIOS_TEST] kernel-stack: overflow detected
 [MINIOS_TEST] fdt: ram=0x80000000..0x88000000 uart=0x10000000 timebase=10000000
 [MINIOS_TEST] heap: ok
 ```
@@ -111,6 +113,8 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 マーカーがなければ、終了ステータスが0でも成功とは見なしません。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
+`kernel-stack`はuser-exitの実行窓を使い、最初のsyscallの中でkernel trap stackを再帰で使い切ります。
+guard pageで止まった診断の後にマーカーが出ることを要求し、syscallから戻ったことを示す`[MINIOS_TEST] user-exit: ok code=42`は禁止します。
 
 `user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`spawn-args`、`user-shell`、`sched`、`sched-io`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
@@ -239,35 +243,36 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 23. QEMU user-trap test
 24. QEMU user-syscall test
 25. QEMU user-exit test
-26. QEMU fdt test
-27. QEMU heap test
-28. QEMU virtio test
-29. QEMU payload test
-30. QEMU payload-args test
-31. QEMU payload-stdin test
-32. QEMU file test
-33. QEMU file-fd test
-34. QEMU file-write test
-35. QEMU file-unlink test
-36. QEMU file-seek test
-37. QEMU file-rename test
-38. QEMU file-mkdir test
-39. QEMU file-spawn test
-40. QEMU file-waitpid test
-41. QEMU file-stat test
-42. QEMU file-readdir test
-43. QEMU file-exec test
-44. QEMU file-fdinherit test
-45. QEMU file-pipe test
-46. QEMU user-heap test
-47. QEMU user-sleep test
-48. QEMU user-dup test
-49. QEMU spawn-args test
-50. QEMU user-shell test
-51. QEMU sched test
-52. QEMU sched-io test
-53. QEMU sched-io-partial test
-54. QEMU shell test
+26. QEMU kernel-stack test
+27. QEMU fdt test
+28. QEMU heap test
+29. QEMU virtio test
+30. QEMU payload test
+31. QEMU payload-args test
+32. QEMU payload-stdin test
+33. QEMU file test
+34. QEMU file-fd test
+35. QEMU file-write test
+36. QEMU file-unlink test
+37. QEMU file-seek test
+38. QEMU file-rename test
+39. QEMU file-mkdir test
+40. QEMU file-spawn test
+41. QEMU file-waitpid test
+42. QEMU file-stat test
+43. QEMU file-readdir test
+44. QEMU file-exec test
+45. QEMU file-fdinherit test
+46. QEMU file-pipe test
+47. QEMU user-heap test
+48. QEMU user-sleep test
+49. QEMU user-dup test
+50. QEMU spawn-args test
+51. QEMU user-shell test
+52. QEMU sched test
+53. QEMU sched-io test
+54. QEMU sched-io-partial test
+55. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -306,12 +311,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/54] cargo fmt --all -- --check
-phase 1/54 passed (elapsed: ...s)
+[1/55] cargo fmt --all -- --check
+phase 1/55 passed (elapsed: ...s)
 ...
-[54/54] QEMU shell test
-phase 54/54 passed (elapsed: ...s)
-summary: PASSED all 54 phases (elapsed: ...s)
+[55/55] QEMU shell test
+phase 55/55 passed (elapsed: ...s)
+summary: PASSED all 55 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

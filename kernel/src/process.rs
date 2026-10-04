@@ -15,13 +15,13 @@ use crate::storage::fat32::FileDesc;
 use crate::user::syscall::{ConsoleFd, FD_TABLE_LEN};
 use crate::{
     elf::{LoadError, LoadedImage, load_image_with_kernel_mappings},
-    memory::frame::{FrameError, FrameSource, PAGE_SIZE, PhysFrame},
+    memory::frame::{FrameError, FrameSource},
     user::{
         context::UserContext,
-        run::KERNEL_STACK_PAGES,
+        run::{KernelStack, KernelStackError},
         stack::{InitialStackError, write_initial_argv},
     },
-    vm::{AddressSpace, FrameStore, KernelMapping, PhysPageNum, VirtAddr},
+    vm::{AddressSpace, FrameStore, KernelMapping, PhysPageNum, VirtAddr, VmError},
 };
 
 /// 同時に生存できるprocess数。manifestが宣言できるimage数の上限と一致させる。
@@ -37,12 +37,12 @@ const TRAP_FRAME_BYTES: usize = 416;
 pub enum SpawnError<E> {
     /// ELFの解析・mapping・user stack確保に失敗した。
     Load(LoadError<E>),
-    /// kernel trap stack用の物理frameを確保できなかった。
+    /// guard pageを含むkernel trap stack用の連続frameを確保できなかった。
     OutOfFrames,
-    /// 確保したstack frameが連続していなかった。
-    NonContiguousStack,
     /// stack frameのzero化でframe memoryが失敗した。
     Memory(E),
+    /// user address spaceからtrap stackのguard pageを外せなかった。
+    Guard(VmError<E>),
     /// argv blockの構築・書き込みに失敗した。
     Argv(InitialStackError<E>),
     /// 途中失敗後の回収自体が失敗した。`image`が`SpawnFailure`へ残る。
@@ -351,8 +351,7 @@ pub struct Process {
     /// activeのままなため解放できず、run loopがkernel satpへ戻った直後に
     /// `take_retired_image`で取り出してdestroyする。
     retired_image: Option<LoadedImage>,
-    kernel_stack: [Option<PhysFrame>; KERNEL_STACK_PAGES],
-    kernel_stack_bottom: usize,
+    kernel_stack: KernelStack,
     user_satp: u64,
     context: UserContext,
     state: ProcessState,
@@ -364,7 +363,7 @@ impl fmt::Debug for Process {
         formatter
             .debug_struct("Process")
             .field("name", &self.name)
-            .field("kernel_stack_bottom", &self.kernel_stack_bottom)
+            .field("kernel_stack", &self.kernel_stack)
             .field("user_satp", &self.user_satp)
             .finish_non_exhaustive()
     }
@@ -386,58 +385,36 @@ impl Process {
         memory: &mut M,
         kernel_mappings: I,
     ) -> Result<Self, SpawnFailure<M::Error>> {
-        let image = match load_image_with_kernel_mappings(elf, allocator, memory, kernel_mappings) {
-            Ok(image) => image,
+        let mut image =
+            match load_image_with_kernel_mappings(elf, allocator, memory, kernel_mappings) {
+                Ok(image) => image,
+                Err(error) => {
+                    return Err(SpawnFailure {
+                        error: SpawnError::Load(error),
+                        image: None,
+                    });
+                }
+            };
+
+        let mut kernel_stack = match KernelStack::new(allocator, memory, image.address_space_mut())
+        {
+            Ok(stack) => stack,
             Err(error) => {
-                return Err(SpawnFailure {
-                    error: SpawnError::Load(error),
-                    image: None,
-                });
+                let error = match error {
+                    KernelStackError::OutOfFrames => SpawnError::OutOfFrames,
+                    KernelStackError::Memory(error) => SpawnError::Memory(error),
+                    KernelStackError::Guard(error) => SpawnError::Guard(error),
+                };
+                return Err(destroy_failure(image, allocator, error));
             }
         };
-
-        let mut kernel_stack = [const { None }; KERNEL_STACK_PAGES];
-        let mut stack_bottom = None;
-        for index in 0..KERNEL_STACK_PAGES {
-            let Some(frame) = allocator.allocate() else {
-                return Err(spawn_failure(
-                    image,
-                    &mut kernel_stack,
-                    allocator,
-                    SpawnError::OutOfFrames,
-                ));
-            };
-            let start = frame.start();
-            let bottom = *stack_bottom.get_or_insert(start);
-            if start != bottom + index * PAGE_SIZE {
-                kernel_stack[index] = Some(frame);
-                return Err(spawn_failure(
-                    image,
-                    &mut kernel_stack,
-                    allocator,
-                    SpawnError::NonContiguousStack,
-                ));
-            }
-            kernel_stack[index] = Some(frame);
-            if let Err(error) = memory.zero_frame(start) {
-                return Err(spawn_failure(
-                    image,
-                    &mut kernel_stack,
-                    allocator,
-                    SpawnError::Memory(error),
-                ));
-            }
-        }
 
         let initial = match write_initial_argv(image.address_space(), memory, name, arguments) {
             Ok(initial) => initial,
             Err(error) => {
-                return Err(spawn_failure(
-                    image,
-                    &mut kernel_stack,
-                    allocator,
-                    SpawnError::Argv(error),
-                ));
+                // 確保直後のframeは所有したままなので返却は失敗しない。
+                let _ = kernel_stack.release(allocator);
+                return Err(destroy_failure(image, allocator, SpawnError::Argv(error)));
             }
         };
 
@@ -459,7 +436,6 @@ impl Process {
             image: Some(image),
             retired_image: None,
             kernel_stack,
-            kernel_stack_bottom: stack_bottom.expect("kernel stack has at least one page"),
             user_satp,
             context,
             state: ProcessState::Runnable,
@@ -485,33 +461,29 @@ impl Process {
         memory: &mut M,
         kernel_mappings: I,
     ) -> Result<UserContext, SpawnFailure<M::Error>> {
-        let image = match load_image_with_kernel_mappings(elf, allocator, memory, kernel_mappings) {
-            Ok(image) => image,
-            Err(error) => {
-                return Err(SpawnFailure {
-                    error: SpawnError::Load(error),
-                    image: None,
-                });
-            }
-        };
+        let mut image =
+            match load_image_with_kernel_mappings(elf, allocator, memory, kernel_mappings) {
+                Ok(image) => image,
+                Err(error) => {
+                    return Err(SpawnFailure {
+                        error: SpawnError::Load(error),
+                        image: None,
+                    });
+                }
+            };
 
+        // kernel stackは既存を使い回すため、guard pageを新imageからも外す。
+        // 失敗時の回収対象はimageだけである。
+        if let Err(error) = self
+            .kernel_stack
+            .hide_guard(image.address_space_mut(), memory)
+        {
+            return Err(destroy_failure(image, allocator, SpawnError::Guard(error)));
+        }
         let initial = match write_initial_argv(image.address_space(), memory, name, arguments) {
             Ok(initial) => initial,
             Err(error) => {
-                // kernel stackは既存を使い回すため回収対象はimageだけである。
-                return Err(match image.destroy(allocator) {
-                    Ok(()) => SpawnFailure {
-                        error: SpawnError::Argv(error),
-                        image: None,
-                    },
-                    Err(destroy_error) => {
-                        let (frame_error, image) = destroy_error.into_parts();
-                        SpawnFailure {
-                            error: SpawnError::Cleanup(frame_error),
-                            image: Some(image),
-                        }
-                    }
-                });
+                return Err(destroy_failure(image, allocator, SpawnError::Argv(error)));
             }
         };
 
@@ -700,7 +672,7 @@ impl Process {
     /// kernel trap stackの上端。`__run_user`へ渡すと、trap入口はこの直下の
     /// context slotを使い、headerは`top-144`を起点に置く。
     pub const fn kernel_stack_top(&self) -> usize {
-        self.kernel_stack_bottom + KERNEL_STACK_PAGES * PAGE_SIZE
+        self.kernel_stack.top()
     }
 
     /// 次の`__run_user`へ渡すcontextのpointer。中断後のcontextが既に
@@ -733,15 +705,7 @@ impl Process {
             self.retired_image = Some(image);
             return Err(frame_error);
         }
-        for index in (0..KERNEL_STACK_PAGES).rev() {
-            let Some(frame) = self.kernel_stack[index].take() else {
-                continue;
-            };
-            if let Err((error, frame)) = allocator.deallocate_recoverable(frame) {
-                self.kernel_stack[index] = Some(frame);
-                return Err(error);
-            }
-        }
+        self.kernel_stack.release(allocator)?;
         let Some(image) = self.image.take() else {
             return Ok(());
         };
@@ -756,21 +720,13 @@ impl Process {
     }
 }
 
-/// kernel stackとimageの部分回収。`UserRun`の`build_failure`と同じ順序で、
-/// 途中失敗時に確保済みresourceを漏らさない。
-fn spawn_failure<E>(
+/// 構築途中のimageを回収して`primary`を返す。回収に失敗したらimageを
+/// `SpawnFailure`へ残し、呼び出し側が再試行できるようにする。
+fn destroy_failure<E>(
     image: LoadedImage,
-    stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
     allocator: &mut dyn FrameSource,
     primary: SpawnError<E>,
 ) -> SpawnFailure<E> {
-    for slot in stack.iter_mut().rev() {
-        if let Some(frame) = slot.take()
-            && let Err((_, frame)) = allocator.deallocate_recoverable(frame)
-        {
-            *slot = Some(frame);
-        }
-    }
     match image.destroy(allocator) {
         Ok(()) => SpawnFailure {
             error: primary,
@@ -1156,7 +1112,7 @@ mod tests {
     use super::*;
     use crate::{
         elf::fixture::valid_riscv64_elf,
-        memory::frame::{FrameAllocator, FrameStats},
+        memory::frame::{FrameAllocator, FrameStats, PAGE_SIZE},
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1303,7 +1259,7 @@ mod tests {
     }
 
     // Catches a spawn that loses ownership of the image, stack, or context:
-    // the process must hold an address space, a contiguous 4-page kernel stack,
+    // the process must hold an address space, a contiguous kernel stack,
     // and an Sv39 user satp rooted at the image's table.
     #[test]
     fn spawn_owns_image_stack_and_context() {
@@ -1325,7 +1281,7 @@ mod tests {
     #[test]
     fn spawn_failure_releases_everything() {
         // imageが占有するframe数を測り、それより2枚だけ多いarenaを用意すると、
-        // stack確保が途中で枯渇して部分確保の回収経路を踏む。
+        // guard page付きの連続stackを確保できず、imageの回収経路を踏む。
         let mut probe = SpawnFixture::new();
         let before = probe.baseline().allocated;
         let bytes = valid_riscv64_elf();
@@ -1425,6 +1381,55 @@ mod tests {
             .unwrap_or_else(|error| panic!("retired image must destroy: {error:?}"));
         assert!(process.take_retired_image().is_none());
         assert_eq!(fixture.frames.stats().allocated, allocated_before);
+    }
+
+    // Catches exec installing a new image that still identity-maps the guard
+    // page below the kept kernel stack, so an overflow during a later syscall
+    // would silently write into the guard frame again.
+    #[test]
+    fn spawn_and_exec_hide_the_kernel_stack_guard_page() {
+        const RAM: core::ops::Range<usize> = 0x8000_0000..0x8018_0000;
+        let identity = || {
+            RAM.step_by(PAGE_SIZE).map(|address| {
+                KernelMapping::new(
+                    crate::vm::VirtPage::from_start(address as u64).unwrap(),
+                    crate::vm::PhysAddr::try_new(address as u64).unwrap(),
+                    crate::vm::PageFlags::supervisor_rw(),
+                )
+            })
+        };
+        let mut frames = unsafe { FrameAllocator::<16>::new(RAM.start, RAM.end).unwrap() };
+        let mut memory = TestFrameStore::default();
+        let bytes = valid_riscv64_elf();
+        let mut process = Process::spawn(
+            "guard",
+            &bytes,
+            &[],
+            FileFdTable::new(),
+            &mut frames,
+            &mut memory,
+            identity(),
+        )
+        .unwrap_or_else(|error| panic!("fixture process must spawn: {error:?}"));
+        let guard = process.kernel_stack.guard_page();
+        let guard_address = VirtAddr::try_new(guard as u64).unwrap();
+        let bottom = VirtAddr::try_new(process.kernel_stack.bottom() as u64).unwrap();
+
+        assert_eq!(
+            process.address_space().translate(&memory, guard_address),
+            Err(VmError::NotMapped)
+        );
+        process
+            .exec("guard-2", &bytes, &[], &mut frames, &mut memory, identity())
+            .unwrap_or_else(|error| panic!("exec must succeed: {error:?}"));
+        assert_eq!(
+            process.address_space().translate(&memory, guard_address),
+            Err(VmError::NotMapped)
+        );
+        assert!(process.address_space().translate(&memory, bottom).is_ok());
+
+        process.reclaim(&mut frames).unwrap();
+        assert_eq!(frames.stats().allocated, 0);
     }
 
     // Catches exec touching the live image on a failed load: the process

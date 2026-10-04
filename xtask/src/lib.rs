@@ -211,6 +211,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::UserTrap) => "QEMU user-trap test".to_owned(),
             Self::Qemu(qemu::TestKind::UserSyscall) => "QEMU user-syscall test".to_owned(),
             Self::Qemu(qemu::TestKind::UserExit) => "QEMU user-exit test".to_owned(),
+            Self::Qemu(qemu::TestKind::KernelStack) => "QEMU kernel-stack test".to_owned(),
             Self::Qemu(qemu::TestKind::Fdt) => "QEMU fdt test".to_owned(),
             Self::Qemu(qemu::TestKind::Heap) => "QEMU heap test".to_owned(),
             Self::Qemu(qemu::TestKind::Virtio) => "QEMU virtio test".to_owned(),
@@ -259,6 +260,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserTrap),
         Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::UserExit),
+        Phase::Qemu(qemu::TestKind::KernelStack),
         Phase::Qemu(qemu::TestKind::Fdt),
         Phase::Qemu(qemu::TestKind::Heap),
         Phase::Qemu(qemu::TestKind::Virtio),
@@ -318,6 +320,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserTrap),
         Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::UserExit),
+        Phase::Qemu(qemu::TestKind::KernelStack),
         Phase::Qemu(qemu::TestKind::Fdt),
         Phase::Qemu(qemu::TestKind::Heap),
         Phase::Qemu(qemu::TestKind::Virtio),
@@ -454,6 +457,9 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
             Some(vec![Phase::Qemu(qemu::TestKind::UserSyscall)])
         }
         Command::Test(TestFilter::UserExit) => Some(vec![Phase::Qemu(qemu::TestKind::UserExit)]),
+        Command::Test(TestFilter::KernelStack) => {
+            Some(vec![Phase::Qemu(qemu::TestKind::KernelStack)])
+        }
         Command::Test(TestFilter::Fdt) => Some(vec![Phase::Qemu(qemu::TestKind::Fdt)]),
         Command::Test(TestFilter::Heap) => Some(vec![Phase::Qemu(qemu::TestKind::Heap)]),
         Command::Test(TestFilter::Virtio) => Some(vec![Phase::Qemu(qemu::TestKind::Virtio)]),
@@ -567,6 +573,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::UserTrap),
                 Phase::Qemu(qemu::TestKind::UserSyscall),
                 Phase::Qemu(qemu::TestKind::UserExit),
+                Phase::Qemu(qemu::TestKind::KernelStack),
                 Phase::Qemu(qemu::TestKind::Fdt),
                 Phase::Qemu(qemu::TestKind::Heap),
                 Phase::Qemu(qemu::TestKind::Virtio),
@@ -648,6 +655,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserTrap),
             Phase::Qemu(qemu::TestKind::UserSyscall),
             Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::KernelStack),
             Phase::Qemu(qemu::TestKind::Fdt),
             Phase::Qemu(qemu::TestKind::Heap),
             Phase::Qemu(qemu::TestKind::Virtio),
@@ -722,6 +730,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserTrap),
             Phase::Qemu(qemu::TestKind::UserSyscall),
             Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::KernelStack),
             Phase::Qemu(qemu::TestKind::Fdt),
             Phase::Qemu(qemu::TestKind::Heap),
             Phase::Qemu(qemu::TestKind::Virtio),
@@ -752,8 +761,8 @@ mod tests {
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 39], expected);
-        assert_eq!(plan.len(), 54);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 40], expected);
+        assert_eq!(plan.len(), 55);
     }
 
     #[test]
@@ -781,6 +790,10 @@ mod tests {
         assert_eq!(
             phase_plan_for(&Command::Test(TestFilter::UserExit)),
             Some(vec![Phase::Qemu(qemu::TestKind::UserExit)])
+        );
+        assert_eq!(
+            phase_plan_for(&Command::Test(TestFilter::KernelStack)),
+            Some(vec![Phase::Qemu(qemu::TestKind::KernelStack)])
         );
         assert_eq!(
             phase_plan_for(&Command::Test(TestFilter::Payload)),
@@ -823,6 +836,10 @@ mod tests {
         assert_eq!(
             Phase::Qemu(qemu::TestKind::UserExit).command(),
             "QEMU user-exit test"
+        );
+        assert_eq!(
+            Phase::Qemu(qemu::TestKind::KernelStack).command(),
+            "QEMU kernel-stack test"
         );
         assert_eq!(
             Phase::Qemu(qemu::TestKind::Payload).command(),

@@ -357,6 +357,12 @@ impl minios_kernel::memory::frame::FrameSource for GlobalFrames {
             .flatten()
     }
 
+    fn allocate_contiguous(&mut self, frames: &mut [Option<PhysFrame>]) -> bool {
+        GLOBAL_FRAMES
+            .with(|allocator| allocator.allocate_contiguous(frames))
+            .unwrap_or(false)
+    }
+
     fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
         GLOBAL_FRAMES
             .with(|frames| frames.deallocate(frame))
@@ -1517,6 +1523,65 @@ extern "C" fn rust_user_trap_handler(context: *mut UserContext) -> RunExit {
     unsafe { rust_user_trap_handler_impl(context) }
 }
 
+/// user trap入口が受けたS-mode由来のtrap。syscall処理中のkernel stack溢れは、
+/// guard pageへのstore/load page faultとしてここへ届く。`fault_sp`はtrap時の
+/// sp、`stack_top`は直近の`__run_user`へ渡したkernel stack topである。
+/// 元のstackは信用できないため、`user.S`の専用stack上で診断を出して停止する。
+#[cfg(target_arch = "riscv64")]
+// `user.S`がシンボル名とC ABIを直接指定して呼ぶため、この名前とABIを変えてはならない。
+#[unsafe(no_mangle)]
+extern "C" fn rust_kernel_trap_in_user_window(fault_sp: usize, stack_top: usize) -> ! {
+    const LOAD_PAGE_FAULT: usize = 13;
+    const STORE_PAGE_FAULT: usize = 15;
+    let scause = arch::riscv64::csr::read_scause();
+    let sepc = arch::riscv64::csr::read_sepc();
+    let stval = arch::riscv64::csr::read_stval();
+    if matches!(scause, LOAD_PAGE_FAULT | STORE_PAGE_FAULT)
+        && minios_kernel::user::run::kernel_stack_guard_contains(stack_top, stval)
+    {
+        crate::console::emergency_print(format_args!(
+            "\r\nMiniOS kernel stack overflow: sepc={sepc:#018x} stval={stval:#018x} sp={fault_sp:#018x} stack_top={stack_top:#018x}\r\n"
+        ));
+        finish_kernel_stack_overflow()
+    }
+    crate::console::emergency_print(format_args!(
+        "\r\nMiniOS kernel trap: scause={scause:#018x} sepc={sepc:#018x} stval={stval:#018x} sp={fault_sp:#018x}\r\n"
+    ));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
+
+#[cfg(all(target_arch = "riscv64", not(feature = "qemu-test-kernel-stack")))]
+fn finish_kernel_stack_overflow() -> ! {
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
+
+/// kernel-stack probeでは、guard pageで止まったことが成功条件である。
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-kernel-stack"))]
+fn finish_kernel_stack_overflow() -> ! {
+    crate::console::emergency_print(format_args!(
+        "[MINIOS_TEST] kernel-stack: overflow detected\r\n"
+    ));
+    successful_qemu_test_shutdown()
+}
+
+/// syscall処理中のtrap stackを、guard pageへ届くまで再帰で使い切る。
+/// 一段ごとに`black_box`へ渡す配列がframeをstack上に残す。
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-kernel-stack"))]
+#[allow(unconditional_recursion)]
+#[inline(never)]
+fn exhaust_kernel_stack(depth: usize) -> usize {
+    let mut frame = [0u8; 256];
+    frame[depth % frame.len()] = depth as u8;
+    core::hint::black_box(&mut frame);
+    exhaust_kernel_stack(depth + 1) + usize::from(frame[0])
+}
+
 #[cfg(target_arch = "riscv64")]
 unsafe fn rust_user_trap_handler_impl(context: *mut UserContext) -> RunExit {
     let scause = arch::riscv64::csr::read_scause();
@@ -2279,6 +2344,9 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 fn user_trap_system_call(context: &mut UserContext) -> RunExit {
+    // kernel-stack probeは本物のsyscall trapの中でtrap stackを使い切る。
+    #[cfg(feature = "qemu-test-kernel-stack")]
+    core::hint::black_box(exhaust_kernel_stack(0));
     // Safety: user-exit runnerが`__run_user`の直前に設定し、assemblyが
     // kernelへ戻るまで所有する単一hart静的参照である。
     let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace) };

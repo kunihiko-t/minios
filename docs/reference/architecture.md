@@ -52,6 +52,7 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
   4 KiBのalignmentと容量は実装が検査します。
   `Clone`でも`Copy`でもない`PhysFrame`と、その値を消費する`deallocate`により、取得後のページ所有権をsafe codeから複製または偽造できません。
   `allocate`は低位から順に探し、ヒープ成長用の`allocate_at`は指定番地のframeだけを占有します。
+  kernel trap stack用の`allocate_contiguous`は、指定枚数が連続する最初の空き区間をまとめて占有します。
   allocatorの管理上端はヒープ初期位置であり、ヒープ、payload窓、FDT予約を合わせた`0x8770_0000..0x8800_0000`を割り当てません。
   各境界は実行時に`fdt::MachineSpec`がDTBから導きます。
 - `memory/heap.rs`：managed RAM末尾の1 MiB初期領域を16バイト粒度で分割するfirst-fit free-listヒープを提供します。
@@ -86,7 +87,7 @@ payloadがあるbootでは検証済みの使用pageだけをS-mode read-onlyでm
   各user leafは`U=1`であり、`0x3ffe_f000..0x3fff_0000`のguard pageを未写像に保ちます。
 
 ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
-`load_image_with_kernel_mappings`はkernel mappingをborrowed leafとしてimageへ加え、`UserRun::new`はkernel trap stackを確保します。
+`load_image_with_kernel_mappings`はkernel mappingをborrowed leafとしてimageへ加え、`UserRun::new`はkernel trap stackと直下のguard pageを連続して確保し、guard pageをimageのidentity mappingから外します。
 `__run_user`が実行用rootを`satp`へ設定し、`sfence.vma`と`fence.i`を実行してからentry pointへ`sret`します。
 構築失敗時はbuilderが所有frameをrollbackし、`exit`またはfatal trap後は`UserRun::reclaim`がkernel trap stack、page table、user pageを回収します。
 
@@ -101,7 +102,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 ### 複数processとスケジューリング
 
 - `process.rs`：再入可能な実行単位`Process`と、heap-backed `Vec`上のround-robin`ProcessTable`を定義します。
-  各`Process`は`LoadedImage`（user address spaceとその所有frame）、4ページの専用kernel trap stack、前回中断時の`UserContext`、file descriptor table、採番されたpidを所有します。
+  各`Process`は`LoadedImage`（user address spaceとその所有frame）、guard page付きの専用kernel trap stack、前回中断時の`UserContext`、file descriptor table、採番されたpidを所有します。
   allocatorやframe memoryへの参照は保持しないため、生存中のprocess同士がborrowを共有しません。
   fd tableはprocess内に閉じるため他processのfdを構造的に参照できず、`take`されたprocessとともに死ぬので、終了時の明示的なclose処理は要りません。
   `spawn` syscallはcallerのfd tableのsnapshotをchildの初期tableとして渡すため、childはparentが開いたfileを同じfd番号とその時点のoffsetで読めます（継承はcopyで、後のseekやcloseは互いに影響しません）。
