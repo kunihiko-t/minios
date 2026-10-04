@@ -2,8 +2,10 @@ use super::SectorReader;
 #[cfg(not(target_arch = "riscv32"))]
 use super::SectorWriter;
 
-// read-only FAT32 parser。BPBとFATの値はaddress計算の前にすべて検証し、
-// checked演算とdata cluster数上限でvolume外参照と無限loopを防ぐ。
+// FAT32 parser。読み取りに加え、RV32 build以外では`SectorWriter`を備えた
+// backend上でfile/directoryの作成・書き込み・削除・renameを行う。BPBとFATの
+// 値はaddress計算の前にすべて検証し、checked演算とdata cluster数上限で
+// volume外参照と無限loopを防ぐ。
 #[derive(Debug, PartialEq, Eq)]
 pub enum FatError<E> {
     Read(E),
@@ -117,7 +119,7 @@ impl FileDesc {
 }
 
 /// `Fat32::stat`が返すfile metadata。`size`とdirectory bitだけを持ち、
-/// recordの物理位置は返さない——`stat`はside effectを持たないため
+/// recordの物理位置は返さない。`stat`はside effectを持たないため
 /// write-back先は不要である。
 #[cfg(not(target_arch = "riscv32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

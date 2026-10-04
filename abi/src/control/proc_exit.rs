@@ -1,7 +1,9 @@
 pub const PROC_EXIT_PAYLOAD_LEN: usize = 8;
 
 /// 複数image bundleの1 processが終了したことをhostへ通知するpayload。
-/// `pid`はmanifest内のimage index (0始まり) で、終了codeと対にして送る。
+/// `pid`はkernelの`ProcessTable`が採番したpidで、終了codeと対にして送る。
+/// boot時のimageはmanifest順に0から採番されるためimage indexと一致するが、
+/// `spawn`で生成したchildはその後続のpidを持つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcExitPayload {
     pub pid: u32,

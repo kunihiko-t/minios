@@ -1,5 +1,6 @@
-//! virtio-mmio block device (modern interface v2)。read-only・単一queue・
-//! 完了はused ringのpollで待つ。PLICを必要としない。
+//! virtio-mmio block device (modern interface v2)。sector単位の読み書き
+//! （書き込みはRV32 build以外）・単一queue・完了はused ringのpollで待つ。
+//! PLICを必要としない。
 //!
 //! register fileは[`Mmio`] traitで抽象化し、queue/request領域は呼び出し側が
 //! 所有する4 KiB整列の[`VirtioRegion`]とする。kernelはmanaged RAMを恒等map

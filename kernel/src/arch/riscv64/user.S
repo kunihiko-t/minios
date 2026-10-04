@@ -146,7 +146,8 @@ __user_trap_entry:
     mv a0, sp
     /* handlerはcontextの直下に専用frameを確保して呼ぶ。
      * headerとcontextを上書きするとkernel復帰値が壊れるため、frame幅は
-     * それらと無関係に保つ。1920 - 416 = 2336 byte使用し、stackは4 KiB page内に収まる。 */
+     * それらと無関係に保つ。call時点で416 + 1920 = 2336 byteを使い、handler以降の
+     * 呼び出しはさらに下へ伸びる（全体の幅はRust側の`KERNEL_STACK_PAGES`が決める）。 */
     addi sp, sp, -1920
     call rust_user_trap_handler
     addi sp, sp, 1920

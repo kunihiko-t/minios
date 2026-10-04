@@ -2,11 +2,11 @@
 //!
 //! `Pipe`はboundedなring bufferであり、両端はprocessのfd tableが
 //! `FdEntry::Pipe`として指す。`PipeTable`はslot配列を保持するだけで
-//! 参照計数を持たない——あるpipe idのliveな端数は`ProcessTable`が
+//! 参照計数を持たない。あるpipe idのliveな端数は`ProcessTable`が
 //! 全processのfd tableを走査して派生する。端を持つprocessがcloseや
 //! exitでfdを手放すとscan結果が減り、live端が0になったslotは次の
-//! `alloc`で再利用される。この方式ではincrement/decrementの取り
-//! こぼしが構造的に起きない。
+//! `ProcessTable::pipe_alloc`で再利用される。この方式では
+//! increment/decrementの取りこぼしが構造的に起きない。
 
 /// 1本のpipeがkernel内に保持するbyte数の上限。
 pub const PIPE_CAPACITY: usize = 256;
@@ -14,7 +14,8 @@ pub const PIPE_CAPACITY: usize = 256;
 pub const MAX_PIPES: usize = 4;
 
 /// pipe 1本分のbounded ring buffer。`head`は次に読む位置、`len`は
-/// 有効byte数。wrapは`head`/`tail`のmod演算で処理する。
+/// 有効byte数。書き込み位置は`head + len`から都度求め、wrapは
+/// `PIPE_CAPACITY`のmod演算で処理する。
 #[derive(Debug)]
 pub struct Pipe {
     head: usize,
@@ -76,7 +77,7 @@ impl Pipe {
     }
 }
 
-/// `ProcessTable`が所有するpipeの格納域。`alloc`/`get_mut`/`is_vacant`
+/// `ProcessTable`が所有するpipeの格納域。`claim`/`get_mut`/`is_vacant`
 /// のみを提供し、pipe idの生死判定（fd走査）は呼び出し側が行う。
 pub struct PipeTable {
     slots: [Option<Pipe>; MAX_PIPES],

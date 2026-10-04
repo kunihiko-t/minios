@@ -552,7 +552,8 @@ impl Process {
     }
 
     /// stdin待ちへ移す。`dispatch`が`Blocked`を返した直後に呼ぶ。
-    /// `waitpid`が先に`BlockedOnPid`へ移した場合は遷移しない。
+    /// trap窓が先に`BlockedOnPid`（`waitpid`）や`BlockedOnPipe`（pipeの
+    /// `read`/`write`）へ移した場合は、その状態を保持して遷移しない。
     pub fn block_on_stdin(&mut self) {
         if self.is_runnable() {
             self.state = ProcessState::BlockedOnStdin;
@@ -659,7 +660,9 @@ impl Process {
             .relocate_fd_at(old_cluster, old_index, new_cluster, new_index);
     }
 
-    /// stdinへのbyte到着で再びdispatch可能にする。
+    /// blocked状態から`Runnable`へ戻し、再びdispatch可能にする。stdinへの
+    /// byte到着、sleepのdeadline到達、`waitpid`対象の終了、pipeの状態変化で
+    /// table側から呼ばれる。
     pub fn wake(&mut self) {
         self.state = ProcessState::Runnable;
     }
@@ -817,8 +820,8 @@ pub enum PipeWriteOutcome {
 
 /// heap-backedのprocess table。`Vec`がlive processだけを保持し、
 /// pidは`insert`のたびに`next_pid`から単調採番される。終了したpidは
-/// 再利用されないため、PROC_EXIT frameや将来のspawn syscallが参照する
-/// pidと新processのpidは衝突しない。`last_picked`は直前にdispatchした
+/// 再利用されないため、PROC_EXIT frameや`waitpid`が参照する終了済み
+/// processのpidと新processのpidは衝突しない。`last_picked`は直前にdispatchした
 /// pidを保持し、removeによる詰め直しに左右されない再開点となる。
 pub struct ProcessTable {
     procs: Vec<Process>,
@@ -934,7 +937,7 @@ impl ProcessTable {
     }
 
     /// stdinへbyteが届いたら呼び、blocked processをrunnableへ戻す。
-    /// pid待ちのprocessも起こされるが、再dispatchで条件未達なら再び
+    /// pid待ちとpipe待ちのprocessも起こされるが、再dispatchで条件未達なら再び
     /// blockする（疑似wakeは許容する）。sleep中のprocessはecallを
     /// やり直さないため疑似wakeが短いsleepになってしまい、対象から外す。
     pub fn wake_all_blocked(&mut self) {
