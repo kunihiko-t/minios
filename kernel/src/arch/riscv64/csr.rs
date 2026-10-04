@@ -118,6 +118,14 @@ pub fn read_sie() -> usize {
     value
 }
 
+#[cfg(target_arch = "riscv64")]
+pub fn read_sip() -> usize {
+    let value: usize;
+    // Safety: S-modeで`sip`のpendingビットを読むだけで、割り込み状態は変更しない。
+    unsafe { asm!("csrr {value}, sip", value = out(reg) value, options(nomem, nostack)) };
+    value
+}
+
 /// `sie`のうち、実装済みのS-mode割り込み許可ビットだけを書きます。
 ///
 /// # Safety

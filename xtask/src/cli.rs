@@ -54,6 +54,7 @@ pub enum TestFilter {
     FileFdinherit,
     FilePipe,
     UserHeap,
+    UserSleep,
     Sched,
     SchedIo,
     SchedIoPartial,
@@ -74,7 +75,7 @@ pub fn help() -> &'static str {
   cargo xtask run\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
   cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|sched|sched-io|sched-io-partial|shell]\n\
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|sched|sched-io|sched-io-partial|shell]\n\
   cargo xtask check"
 }
 
@@ -171,6 +172,9 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         [command, test] if command == "test" && test == "user-heap" => {
             Ok(Command::Test(TestFilter::UserHeap))
+        }
+        [command, test] if command == "test" && test == "user-sleep" => {
+            Ok(Command::Test(TestFilter::UserSleep))
         }
         [command, test] if command == "test" && test == "sched" => {
             Ok(Command::Test(TestFilter::Sched))
@@ -306,6 +310,7 @@ mod tests {
             (vec!["test", "file-fdinherit"], TestFilter::FileFdinherit),
             (vec!["test", "file-pipe"], TestFilter::FilePipe),
             (vec!["test", "user-heap"], TestFilter::UserHeap),
+            (vec!["test", "user-sleep"], TestFilter::UserSleep),
             (vec!["test", "sched"], TestFilter::Sched),
             (vec!["test", "sched-io"], TestFilter::SchedIo),
             (vec!["test", "sched-io-partial"], TestFilter::SchedIoPartial),
@@ -334,7 +339,7 @@ mod tests {
             "cargo xtask run",
             "cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]",
             "cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]",
-            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|sched|sched-io|sched-io-partial|shell]",
+            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|sched|sched-io|sched-io-partial|shell]",
             "cargo xtask check",
         ] {
             assert!(help.contains(command), "missing help entry: {command}");

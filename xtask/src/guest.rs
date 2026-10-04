@@ -36,6 +36,8 @@ pub const GUEST_FILE_FDINHERIT: &str = "minios-guest-file-fdinherit";
 pub const GUEST_FILE_PIPE: &str = "minios-guest-file-pipe";
 /// `sbrk`とheap割り当て（`Vec`/`String`）を検証するguest bin名。
 pub const GUEST_USER_HEAP: &str = "minios-guest-user-heap";
+/// `clock`/`sleep`/`yield`を検証するguest bin名。
+pub const GUEST_USER_SLEEP: &str = "minios-guest-user-sleep";
 /// scheduler検証のCPU-bound側bin名。
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 /// scheduler検証の短命側bin名。

@@ -77,6 +77,8 @@ const FILE_PIPE_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=file-pipe\n";
 const USER_HEAP_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2b\0\0\0MiniOS sched: spawned pid=0 name=user-heap\n";
+const USER_SLEEP_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=user-sleep\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -104,6 +106,9 @@ const FILE_PIPE_PARENT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0pipe veri
 /// user_heap guestが`alloc::format!`で組んだStringのstdout frame。
 const USER_HEAP_STRING_FRAME: &[u8] = b"MCF1\x02\0\0\0\x1f\0\0\0heap vec len=4096 sum=25163776\n";
 const USER_HEAP_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0e\0\0\0heap verified\n";
+/// user_sleep guestが経過時間の検査を通した後のstdout frame。測った差は
+/// 実行ごとに揺れるため、guestは出力しない。
+const USER_SLEEP_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0f\0\0\0sleep verified\n";
 const ARGS_STDOUT_HELLO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0hello";
 const ARGS_STDOUT_ALPHA_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0alpha";
 const ARGS_STDOUT_BRAVO_FRAME: &[u8] = b"MCF1\x02\0\0\0\x05\0\0\0bravo";
@@ -148,6 +153,7 @@ pub enum TestKind {
     FileFdinherit,
     FilePipe,
     UserHeap,
+    UserSleep,
     PayloadArgs,
     PayloadStdin,
     Sched,
@@ -210,6 +216,7 @@ impl TestKind {
                 unreachable!("the file-pipe test boots the normal kernel")
             }
             Self::UserHeap => unreachable!("the user-heap test boots the normal kernel"),
+            Self::UserSleep => unreachable!("the user-sleep test boots the normal kernel"),
             Self::PayloadArgs => unreachable!("the payload-args test boots the normal kernel"),
             Self::PayloadStdin => unreachable!("the payload-stdin test boots the normal kernel"),
             Self::Sched => unreachable!("the sched test boots the normal kernel"),
@@ -276,6 +283,7 @@ impl TestKind {
                 unreachable!("the file-pipe test verifies interleaved control frames")
             }
             Self::UserHeap => unreachable!("the user-heap test verifies raw control frames"),
+            Self::UserSleep => unreachable!("the user-sleep test verifies raw control frames"),
             Self::PayloadArgs => unreachable!("the payload-args test verifies raw control frames"),
             Self::PayloadStdin => {
                 unreachable!("the payload-stdin test verifies raw control frames")
@@ -504,6 +512,20 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
         bundle.remove();
         return verify_user_heap_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::UserSleep {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_user_sleep()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_exact_frames(
+            &command_line,
+            completed.status.code(),
+            &completed.output,
+            &USER_SLEEP_EXPECTED_FRAMES,
+        );
     }
 
     if kind == TestKind::File {
@@ -997,7 +1019,7 @@ fn run_sched_io_script(
         .expect("sched-io test stdin must be piped");
     for (index, (marker, chunk)) in steps.iter().enumerate() {
         // quick processの最終出力などのmarkerを待ってからstdinを送る。
-        // この時点でreaderは必ずblock済みであり、spinはまだbusy-waitの途中である。
+        // この時点でreaderは必ずblock済みである。
         if let Some(marker) = marker
             && let Err(failure) = wait_for_output(&mut child, &readers, marker, started, deadline)
         {
@@ -1470,6 +1492,16 @@ const USER_HEAP_EXPECTED_FRAMES: [&[u8]; 6] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// user-sleep検査で期待されるcontrol frame列。guestがclockの差・yield・
+/// sleep(0)を確かめ、検証済みの旨をstdoutへ出力する。
+const USER_SLEEP_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    USER_SLEEP_SPAWNED_FRAME,
+    USER_SLEEP_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 /// file-stat検査で期待されるcontrol frame列。guestがstat/fstatの
 /// metadata・errno・EFAULTの経路を通してから、検証済みの旨をstdoutへ
 /// 出力する。
@@ -1811,6 +1843,30 @@ fn verify_user_heap_result(
     Ok(output.to_owned())
 }
 
+/// 単一processの経路をexact照合する。user-sleepはguestが`sleep`で
+/// blockしてidle経路を通っても出力は確定的なので、frame列だけで足りる。
+fn verify_exact_frames(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+    expected: &[&[u8]],
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), expected) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
 /// file-stat検証: guestがstat/fstatの契約を全て確認し、`stat verified`と
 /// Exit(42)を出す。単一processなのでexact照合できる。
 fn verify_file_stat_result(
@@ -1952,10 +2008,16 @@ fn collect_payload_frames(output: &[u8]) -> Option<Vec<(FrameKind, &[u8])>> {
 /// sched検証: 2 processのstdout markerが交差すること、両方のProcExit frameが
 /// 届くこと、kernelが切り替え回数を報告することを確認する。
 ///
-/// `a1` < `b1` < `a3` の順序は、busy-wait中のprocess Aの生存期間内に
-/// process Bが走ったこと＝timerプリエンプションの直接証拠である。
-/// 逐次実行なら必ず `a*…b*` か `b*…a*` の単調列になるため、この条件は
-/// 順次実行を確実に弾く。
+/// `a1` < `b1` < `a3` の順序は、process Aの生存期間内にprocess Bが走った
+/// こと＝実際の切り替えの直接証拠である。逐次実行なら必ず `a*…b*` か
+/// `b*…a*` の単調列になるため、この条件は順次実行を確実に弾く。
+///
+/// Aは各markerの後に`yield`するため、切り替えはtime sliceの長さでなく
+/// Aの命令列で決まる。Bはa1直後のyieldで選ばれ、tickの残りでb1..b3と
+/// exitを済ませる。仮にBがtickの境目でpreemptされても、AはA自身の次の
+/// markerを書いてすぐyieldし、Bはほぼ丸ごと1 tickを得る。AはBより1回
+/// 多くyieldしないとa3へ届かないため、b1 < a3とBが先に終わる順序は
+/// QEMUの速度に依らず保たれる。
 fn verify_sched_result(
     command: &str,
     status: Option<i32>,
@@ -2004,7 +2066,7 @@ fn verify_sched_result(
     };
     let (a1, a3, b1) = (position(b"a1\n"), position(b"a3\n"), position(b"b1\n"));
     let interleaved = matches!((a1, a3, b1), (Some(a1), Some(a3), Some(b1)) if a1 < b1 && b1 < a3);
-    // BがAのspin中に終了するので、ProcExitはpid 1→0の順で確定的である。
+    // Aは3回目のyieldの後で終了するため、ProcExitはpid 1→0の順で確定的である。
     let exits_ok = proc_exits == [(1, 7), (0, 0)];
     let switches_ok = last_diagnostic
         .strip_prefix("\r\nMiniOS payload: ok processes=2 switches=")
@@ -2019,7 +2081,7 @@ fn verify_sched_result(
     Ok(output.to_owned())
 }
 
-/// sched-io検証: stdin待ちreaderの`r1`と`r2`の間に、busy-waitするprocessと
+/// sched-io検証: stdin待ちreaderの`r1`と`r2`の間に、yieldするprocessと
 /// 短命processの出力がすべて挟まること、3つとも`ProcExit` frameを出すこと、
 /// kernelが`processes=3`と切り替え回数を報告することを確認する。
 ///
@@ -2282,6 +2344,12 @@ impl PayloadBundle {
         Self::create_with(payload_user_heap_bundle_bytes(&elf)?)
     }
 
+    /// user-sleep検査用bundle。
+    fn create_user_sleep() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_USER_SLEEP)?;
+        Self::create_with(assemble_test_bundle(b"version=1\nname=user-sleep\n", &elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -2377,7 +2445,7 @@ fn payload_args_bundle_bytes(elf: &[u8]) -> Result<Vec<u8>, QemuError> {
     assemble_test_bundle(MANIFEST, elf)
 }
 
-/// sched検証用bundle: busy-waitするguestとすぐ終わるguestの2 imageを
+/// sched検証用bundle: markerごとにyieldするguestとすぐ終わるguestの2 imageを
 /// manifest v2で組み立てる。process indexは宣言順 (spin=0, quick=1)。
 fn sched_bundle_bytes(spin: &[u8], quick: &[u8]) -> Result<Vec<u8>, QemuError> {
     let images = [
@@ -2400,7 +2468,7 @@ fn sched_bundle_bytes(spin: &[u8], quick: &[u8]) -> Result<Vec<u8>, QemuError> {
         })
 }
 
-/// sched-io検証用bundle: stdinで待つguest・busy-waitするguest・すぐ終わる
+/// sched-io検証用bundle: stdinで待つguest・yieldするguest・すぐ終わる
 /// guestの3 imageをmanifest v2で組み立てる。process indexは宣言順
 /// (reader=0, spin=1, quick=2)。
 fn sched_io_bundle_bytes(reader: &[u8], spin: &[u8], quick: &[u8]) -> Result<Vec<u8>, QemuError> {

@@ -38,7 +38,7 @@ allocatorやframe memoryへの参照は保持せず呼び出し側が都度渡�
 `take`は`swap_remove`ではなく`remove`を使うため、終了したprocessを抜いても残りの並びは変わりません。
 
 `pick_next`は直前に選んだpid（`last_picked`）の次の位置から時計回りに走査し、最初の`Runnable`なprocessを返します。
-`last_picked`がtableから抜けていれば先頭から走査し、`BlockedOnStdin`、`BlockedOnPid`、`BlockedOnPipe`のprocessは飛ばし、全員がblock中なら`None`を返します。
+`last_picked`がtableから抜けていれば先頭から走査し、`BlockedOnStdin`、`BlockedOnPid`、`BlockedOnPipe`、`BlockedUntil`のprocessは飛ばし、全員がblock中なら`None`を返します。
 
 ### timer割り込みでkernelへ戻る
 
@@ -55,8 +55,8 @@ tickの周期は[`kernel/src/time.rs`](../../kernel/src/time.rs)の`TICKS_PER_SE
 dispatch loopの前に`sstatus.SIE`を落とし、`stvec`を`__user_trap_entry`へ向け、`sie`のSTIEを立てます（U-mode実行中の割り込み配送は`sstatus.SIE`に依りません）。
 loopの一周は次の順序で進みます。
 
-1. `console::stdin_pending`がtrueなら`wake_all_blocked`でblock中のprocessを起こします。
-2. `pick_next`でpidを選び、`None`ならstdinにbyteが届くまでpollしてから全員を起こします。
+1. `console::stdin_pending`がtrueなら`wake_all_blocked`でblock中のprocessを起こし、続けて`wake_sleepers`で起床tickに達したsleep中のprocessを起こします。
+2. `pick_next`でpidを選び、`None`ならstdinのbyte到着か`sip.STIP`（timer割り込みのpending）をpollします。STIPが立っていれば`time::handle_interrupt`でtickを進め、loopの先頭へ戻ります。
 3. `__run_user`へprocessの`context_ptr`、`user_satp`、`kernel_stack_top`を渡してU-modeへ入ります。
 4. 戻ったら`reload_context`でtrap frame slot（kernel stack topから416 byte下）の中断contextを`Process`へ回収します。
 5. outcomeが`PREEMPTED`ならそのまま、`BLOCKED`なら`block_on_stdin`、`EXIT`なら終了frameを送って`reclaim_process_slot`で回収します。
@@ -75,6 +75,20 @@ pipeの`read`/`write`と`waitpid`も同じ規約に従い、control層がcaller�
 guestへ`EAGAIN`自体が返ることはありません。
 `block_on_stdin`は`Runnable`のときだけ状態を変えるため、先にmarkされたpipe待ちやpid待ちを上書きしません。
 
+### yieldとsleep
+
+`yield`（syscall 26）は`a0`へ0を書き、`sepc`をecallの次に置いたまま`SyscallFlow::Yield`を返します。
+handlerはこれをtimer割り込みと同じ`USER_RUN_OUTCOME_PREEMPTED`へ写すため、run loopは次のprocessを選び、再び選ばれたprocessはecallの次から続けます。
+`sleep`（syscall 25）は、control層が`time::sleep_deadline`で求めた起床tickを`BlockedUntil`へmarkしてから同じ`Yield`を返します。
+起床tickはmillisecondをtick数へ切り上げ、途中まで経過した現在のtickの分として1を足すため、早く起きることはありません。
+戻り値の0は先に書いてあるので、`wake_sleepers`で起きたprocessはsyscallをやり直しません。
+そのため`wake_all_blocked`はstdinが届いても`BlockedUntil`のprocessを起こしません。
+`sleep(0)`はmarkせずに`yield`と同じ経路を通ります。
+
+dispatch loopのS-modeは`sstatus.SIE`を落としているため、全processがblock中の間はtimer割り込みでtrapせず、tickは進みません。
+そこでidle待ちはstdinと並べて`sip.STIP`をpollし、立っていれば`handle_interrupt`でtickを進めて次のtimerを再アームします。
+この方法なら、process一つだけがsleepしている場合も期限に起こせます。
+
 ### 再開可能なStdin decoder
 
 [`kernel/src/user/stdin.rs`](../../kernel/src/user/stdin.rs)の`StdinStaging`は、Stdin frameのheader蓄積とpayload蓄積を`header_len`、`want`、`have`で表すstate machineであり、`feed`は`try_read_byte`が`None`を返すまでbyteを流し込みます。
@@ -83,9 +97,10 @@ guestへ`EAGAIN`自体が返ることはありません。
 
 ## 実行と確認
 
-[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)は`a1`、`a2`、`a3`の各出力の後に`SPIN_ITERATIONS`回のbusy-waitを挟んで終了code 0で、[`guest/src/bin/sched_b.rs`](../../guest/src/bin/sched_b.rs)は`b1`から`b3`をすぐに出力して終了code 7で`exit`します。
+[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)は`a1`、`a2`、`a3`の各出力の後に`yield`を呼んで終了code 0で、[`guest/src/bin/sched_b.rs`](../../guest/src/bin/sched_b.rs)は`b1`から`b3`をすぐに出力して終了code 7で`exit`します。
 [`guest/src/bin/sched_r.rs`](../../guest/src/bin/sched_r.rs)は`r1`を出してから`read(stdin)`でblockし、入力が届くと`r2`を出して終了code 5で`exit`します。
-どのguestもyieldに相当するsyscallを呼ばないため、出力の交差はtimerプリエンプションでしか起こりません。
+sched_aが各出力の後に`yield`するため、切り替えの時点はtime sliceの長さではなくguestの命令列で決まり、testの結果がQEMUの速度に左右されません。
+sched_rとsched_bは`yield`を呼ばないので、それ以外の切り替えはtimerプリエンプションか`read`のblockで起こります。
 
 `sched` testは`spin`（sched_a）と`quick`（sched_b）の二つのimageを持つbundleを実行します。
 次の出力ではcontrol frameのheader byteを取り除き、payloadのtextだけを残しています。
@@ -107,7 +122,8 @@ summary: PASSED all 1 phases (elapsed: ...)
 ```
 
 [`verify_sched_result`](../../xtask/src/qemu.rs)は、stdout上で`a1 < b1 < a3`の順序になること、`ProcExit`が`(1, 7)`、`(0, 0)`の順に届くこと、`switches`が1以上であることを要求します。
-`b1`が`a1`と`a3`の間に出るのは、`spin`のbusy-wait中にtimerが`quick`へ切り替えたからです。
+`b1`が`a1`と`a3`の間に出るのは、`spin`が`a1`の後の`yield`で`quick`へ順番を譲ったからです。
+`quick`がtickの境目でpreemptされても、`spin`は次の出力の直後にまた`yield`するため、`quick`は`spin`の`a3`より先に終わります。
 
 `sched-io` testは`reader`（sched_r）、`spin`、`quick`の三つを実行し、hostは`b3`を観測してから1 byteのStdin frameを送ります。
 
@@ -120,9 +136,9 @@ b1
 b2
 b3
 a2
-r2
 a3
-MiniOS payload: ok processes=3 switches=20
+r2
+MiniOS payload: ok processes=3 switches=4
 ...
 summary: PASSED all 1 phases (elapsed: ...)
 ```
@@ -139,7 +155,7 @@ b3
 a2
 a3
 r2
-MiniOS payload: ok processes=3 switches=21
+MiniOS payload: ok processes=3 switches=4
 ...
 summary: PASSED all 1 phases (elapsed: ...)
 ```
@@ -154,13 +170,14 @@ decoderが再開可能でなければ、残りのbyteをheaderの先頭として
 - dispatch loopで`sstatus.SIE`を立てたままにする：S-mode実行中に届いたtickが`sscratch`未設定の`__user_trap_entry`へ飛び、context保存先が壊れます。
 - `reload_context`を呼ばずに次のprocessを選ぶ：`Process`内の`context`が古いままになり、次のdispatchで今回の中断位置ではなく前回回収した位置から再開します。
 - `take`を`swap_remove`へ変える：末尾のprocessが抜けた位置へ移り、round-robinの順序が終了のたびに入れ替わります。
-- 全processをpipe待ちやpid待ちにする：`pick_next`が`None`になるとloopはstdinの到着だけを待つため、stdinを送らない限り進みません。
+- 全processをpipe待ちやpid待ちにする：`pick_next`が`None`になるとloopはstdinの到着とtimer tickだけを待ち、tickで起きるのはsleep中のprocessだけなので、stdinを送らない限り進みません。
+- `sleep`で`sepc`を戻す：起床後に同じecallを再実行すると、その時点から新しい期限を計算して眠り直すため、`sleep`がいつまでも戻りません。
 
 ## 演習
 
-[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)の`SPIN_ITERATIONS`を小さくし、`cargo xtask test sched`の出力で`b1`の位置がどう変わるかを観察してください。
-busy-waitがtickの周期より十分に短くなると、`spin`が切り替えの前に`a3`まで進んで`a1 < b1 < a3`が崩れ、testが失敗することがあります。
-確認後は値を元に戻します。
+[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)の`sys_yield`の呼び出しを外し、`cargo xtask test sched`の出力で`b1`の位置がどう変わるかを観察してください。
+`spin`は1 tickのうちに`a3`まで進むため、`a1 < b1 < a3`が崩れてtestが失敗します。
+確認後は呼び出しを元に戻します。
 
 [`kernel/src/process.rs`](../../kernel/src/process.rs)の`pick_next`へ、四つのprocessのうち二つを`BlockedOnStdin`にした状態で走査順を確かめるhost testを追加してください。
 `last_picked`のprocessを`take`で抜いた後に、先頭から走査が再開することも確認します。

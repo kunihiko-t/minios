@@ -50,7 +50,7 @@ MiniOS payload: ok code=42
 ```
 
 host harnessはReady、stdout、stderr、Exit、cleanup diagnosticの順序を検証します。
-複数imageの`sched`経路は、busy-waitするprocessの出力`a1`と`a3`の間に短命processの`b1`が挟まること、二つの`ProcExit` frame、回収diagnosticの`switches`報告を要求します。
+複数imageの`sched`経路は、出力のたびに`yield`するprocessの出力`a1`と`a3`の間に短命processの`b1`が挟まること、二つの`ProcExit` frame、回収diagnosticの`switches`報告を要求します。
 timeout時はQEMU childをkillしてwaitし、出力readerをjoinしてからerrorを返します。
 
 ## よくある失敗

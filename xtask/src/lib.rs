@@ -232,6 +232,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::FileFdinherit) => "QEMU file-fdinherit test".to_owned(),
             Self::Qemu(qemu::TestKind::FilePipe) => "QEMU file-pipe test".to_owned(),
             Self::Qemu(qemu::TestKind::UserHeap) => "QEMU user-heap test".to_owned(),
+            Self::Qemu(qemu::TestKind::UserSleep) => "QEMU user-sleep test".to_owned(),
             Self::Qemu(qemu::TestKind::Sched) => "QEMU sched test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIo) => "QEMU sched-io test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIoPartial) => "QEMU sched-io-partial test".to_owned(),
@@ -276,6 +277,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::FileFdinherit),
         Phase::Qemu(qemu::TestKind::FilePipe),
         Phase::Qemu(qemu::TestKind::UserHeap),
+        Phase::Qemu(qemu::TestKind::UserSleep),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -331,6 +333,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::FileFdinherit),
         Phase::Qemu(qemu::TestKind::FilePipe),
         Phase::Qemu(qemu::TestKind::UserHeap),
+        Phase::Qemu(qemu::TestKind::UserSleep),
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -477,6 +480,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         }
         Command::Test(TestFilter::FilePipe) => Some(vec![Phase::Qemu(qemu::TestKind::FilePipe)]),
         Command::Test(TestFilter::UserHeap) => Some(vec![Phase::Qemu(qemu::TestKind::UserHeap)]),
+        Command::Test(TestFilter::UserSleep) => Some(vec![Phase::Qemu(qemu::TestKind::UserSleep)]),
         Command::Test(TestFilter::Sched) => Some(vec![Phase::Qemu(qemu::TestKind::Sched)]),
         Command::Test(TestFilter::SchedIo) => Some(vec![Phase::Qemu(qemu::TestKind::SchedIo)]),
         Command::Test(TestFilter::SchedIoPartial) => {
@@ -572,6 +576,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::FileFdinherit),
                 Phase::Qemu(qemu::TestKind::FilePipe),
                 Phase::Qemu(qemu::TestKind::UserHeap),
+                Phase::Qemu(qemu::TestKind::UserSleep),
                 Phase::Qemu(qemu::TestKind::Sched),
                 Phase::Qemu(qemu::TestKind::SchedIo),
                 Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -649,6 +654,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::FileFdinherit),
             Phase::Qemu(qemu::TestKind::FilePipe),
             Phase::Qemu(qemu::TestKind::UserHeap),
+            Phase::Qemu(qemu::TestKind::UserSleep),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
@@ -719,13 +725,14 @@ mod tests {
             Phase::Qemu(qemu::TestKind::FileFdinherit),
             Phase::Qemu(qemu::TestKind::FilePipe),
             Phase::Qemu(qemu::TestKind::UserHeap),
+            Phase::Qemu(qemu::TestKind::UserSleep),
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 35], expected);
-        assert_eq!(plan.len(), 50);
+        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 36], expected);
+        assert_eq!(plan.len(), 51);
     }
 
     #[test]

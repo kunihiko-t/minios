@@ -61,7 +61,7 @@ RV32IMEM契約は実効32 KiBへ更新し、RV32 buildは`opt-level=z`で収め�
 manifest v2のbundleは最大4個のimageを宣言でき、kernelは各imageを独立したaddress space・専用kernel trap stack・保存contextを持つ`Process`としてspawnします。
 U-mode実行中のsupervisor timer割り込みは`TrapAction::Timer`へ分類され、trap handlerがtickを再アームしてkernelへ戻ると、`ProcessTable`のround-robinが次のprocessを選んで`__run_user`へ再投入します。
 各processの終了は`PROC_EXIT` frameで個別に通知され、tableから取り除いて全所有frameを回収します。
-`cargo xtask test sched`は、busy-waitするprocessの出力の間に短命processの出力が挟まることと、切り替え回数の報告をQEMU上で確認します。
+`cargo xtask test sched`は、出力のたびに`yield`するprocessの出力の間に短命processの出力が挟まることと、切り替え回数の報告をQEMU上で確認します。
 `read`は入力未到着ならprocessを`BlockedOnStdin`へ回してecallをやり直すため、stdin待ちの間も他processが進みます（`cargo xtask test sched-io`で検証）。
 Stdin frameの受信は`StdinStaging`の再開可能なdecoderが担い、frame途中のbyte枯渇でもprocessは再びstdin待ちへ戻ります（`cargo xtask test sched-io-partial`で検証）。
 guestからの動的process生成も完了しており、`spawn`はFAT32上のELFを新processとして起動してpidを返し、`getpid`は呼び出しprocessのpidを返します（`cargo xtask test file-spawn`で検証）。
@@ -91,12 +91,12 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 ### 段階1：user spaceを実用に届かせる
 
 次に、guestが「自分でprogramを書いて動かせる」水準へ到達させます。
-現在のsyscallはfileとprocessの操作とuser heapを備えていますが、時刻とfdの複製がないため、待機も出力の切り替えもguestから使えません。
+現在のsyscallはfileとprocessの操作、user heap、時刻と待機を備えていますが、fdの複製がないため、出力の切り替えはguestから使えません。
 
 - **`sbrk`**（完了）：guestは`SbrkAllocator`をglobal allocatorにして`Vec`と`String`を使えます（`cargo xtask test user-heap`で検証）。
-- **`clock`と`sleep`**：`time.rs`の`uptime_millis`をguestへ公開し、`sleep`は`BlockedUntil(tick)`で待機中のprocessにCPUを渡します。
-  既存の`BlockedOnStdin`と同じ再実行の仕組みに乗せます。
-- **`yield`**：busy-waitするsample guestを`yield`で置き換え、schedulerの検証をtime sliceに依存しない形へ直します。
+- **`clock`と`sleep`**（完了）：`clock`は`time.rs`の`uptime_millis`を返し、`sleep`は`BlockedUntil(tick)`で待機中のprocessにCPUを渡します（`cargo xtask test user-sleep`で検証）。
+  `sleep`は戻り値0を書いてecallの次へ進めてからblockするため、起床後にsyscallをやり直しません。
+- **`yield`**（完了）：sched_aのbusy-waitを`yield`で置き換え、schedulerの検証がtime sliceに依存しなくなりました。
 - **`dup2`と`MAX_OPEN_FILES`の引き上げ**：`pipe`の端をstdin/stdoutへ付け替える手段がなく、open file数4では`spawn`したchildへpipeを継承させると残りが足りません。
   `dup2`を追加し、上限を16へ上げます。
 - **`spawn`への引数渡し**：現在の`spawn`はpathだけを受け取り、childは`argv`を受け取れません。
