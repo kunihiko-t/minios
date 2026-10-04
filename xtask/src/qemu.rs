@@ -25,6 +25,7 @@ const USER_TRAP_FAULT_DIAGNOSTIC: &str =
     "MiniOS user trap: scause=0x000000000000000f stval=0x0000000010000000";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
 const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
+const KERNEL_STACK_MARKER: &str = "[MINIOS_TEST] kernel-stack: overflow detected";
 // QEMU `virt` -m 128Mが渡すDTBからkernelが発見するmachine記述の期待値。
 const FDT_MARKER: &str =
     "[MINIOS_TEST] fdt: ram=0x80000000..0x88000000 uart=0x10000000 timebase=10000000";
@@ -148,6 +149,7 @@ pub enum TestKind {
     UserTrap,
     UserSyscall,
     UserExit,
+    KernelStack,
     Fdt,
     Heap,
     Virtio,
@@ -192,6 +194,7 @@ impl TestKind {
             Self::UserTrap => "qemu-test-user-trap",
             Self::UserSyscall => "qemu-test-user-syscall",
             Self::UserExit => "qemu-test-user-exit",
+            Self::KernelStack => "qemu-test-kernel-stack",
             Self::Fdt => "qemu-test-fdt",
             Self::Heap => "qemu-test-heap",
             Self::Virtio => "qemu-test-virtio",
@@ -260,6 +263,7 @@ impl TestKind {
             Self::UserTrap => USER_TRAP_REJECTED_MARKER,
             Self::UserSyscall => USER_SYSCALL_MARKER,
             Self::UserExit => USER_EXIT_MARKER,
+            Self::KernelStack => KERNEL_STACK_MARKER,
             Self::Fdt => FDT_MARKER,
             Self::Heap => HEAP_MARKER,
             Self::Virtio => VIRTIO_MARKER,
@@ -327,6 +331,8 @@ impl TestKind {
     fn forbidden_marker(self) -> Option<&'static str> {
         match self {
             Self::UserTrap => Some(USER_TRAP_OK_MARKER),
+            // probeはsyscallの途中で止まるため、user-exitの完了markerは出ない。
+            Self::KernelStack => Some(USER_EXIT_MARKER),
             _ => None,
         }
     }
@@ -3366,6 +3372,15 @@ mod tests {
         assert_eq!(
             TestKind::UserExit.marker(),
             "[MINIOS_TEST] user-exit: ok code=42"
+        );
+        assert_eq!(TestKind::KernelStack.feature(), "qemu-test-kernel-stack");
+        assert_eq!(
+            TestKind::KernelStack.marker(),
+            "[MINIOS_TEST] kernel-stack: overflow detected"
+        );
+        assert_eq!(
+            TestKind::KernelStack.forbidden_marker(),
+            Some("[MINIOS_TEST] user-exit: ok code=42")
         );
         for kind in [
             TestKind::Boot,

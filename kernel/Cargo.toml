@@ -19,6 +19,8 @@ qemu-test-user-entry = []
 qemu-test-user-trap = []
 qemu-test-user-syscall = []
 qemu-test-user-exit = []
+# user-exitの実行窓を使い、syscall中のtrap stack溢れがguard pageで止まることを確かめる。
+qemu-test-kernel-stack = ["qemu-test-user-exit"]
 qemu-test-fdt = []
 qemu-test-heap = []
 qemu-test-virtio = []
