@@ -9,9 +9,13 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 use minios_abi::syscall::{
-    EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, FIRST_FILE_FD, STDOUT, SyscallNumber,
+    EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, FIRST_FILE_FD, STDOUT,
+};
+use minios_guest::sys::{
+    sys_close, sys_create, sys_exit, sys_mkdir, sys_open, sys_read, sys_rename, sys_rmdir,
+    sys_unlink, sys_write,
 };
 
 /// exit異常の的内code。syscall失敗や契約違反、panicで使う。
@@ -52,172 +56,6 @@ const FILE_PATH: &[u8] = b"HELLO.TXT";
 const PAYLOAD: &[u8] = b"renamed by guest\n";
 const MESSAGE: &[u8] = b"rename verified\n";
 const BUFFER_LEN: usize = 64;
-
-/// MiniOS ABIの`create`を呼ぶ。戻り値はwritable fdか負のerrno。
-fn sys_create(path: *const u8, path_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // a0はpath pointer兼戻り値、a1/a7は引数である。pathはU+R検証済みのstatic rangeである。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a7") SyscallNumber::Create as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`open`を呼ぶ。戻り値はread-only fdか負のerrno。
-fn sys_open(path: *const u8, path_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a7") SyscallNumber::Open as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`rename`を呼ぶ。`a0`/`a1`がsource path、`a2`/`a3`が
-/// target path。戻り値は0か負のerrno。
-fn sys_rename(old_ptr: *const u8, old_len: usize, new_ptr: *const u8, new_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // a0は戻り値、a0..a3/a7は引数である。両pathはU+R検証済みのstatic rangeである。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") old_ptr as usize => returned,
-            in("a1") old_len,
-            in("a2") new_ptr as usize,
-            in("a3") new_len,
-            in("a7") SyscallNumber::Rename as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`read`を呼ぶ。戻り値は読んだbyte数、EOFは0、負はerrno。
-fn sys_read(fd: usize, pointer: *mut u8, len: usize) -> isize {
-    let fd_argument = fd as isize;
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd_argument => returned,
-            in("a1") pointer as usize,
-            in("a2") len,
-            in("a7") SyscallNumber::Read as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`write`を呼ぶ。戻り値は書いたbyte数か負のerrno。
-fn sys_write(fd: usize, pointer: *const u8, len: usize) -> isize {
-    let fd_argument = fd as isize;
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd_argument => returned,
-            in("a1") pointer as usize,
-            in("a2") len,
-            in("a7") SyscallNumber::Write as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`close`を呼ぶ。戻り値は0か負のerrno。
-fn sys_close(fd: usize) -> isize {
-    let fd_argument = fd as isize;
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd_argument => returned,
-            in("a7") SyscallNumber::Close as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`mkdir`を呼ぶ。戻り値は0か負のerrno。
-fn sys_mkdir(path: *const u8, path_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a7") SyscallNumber::Mkdir as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`rmdir`を呼ぶ。戻り値は0か負のerrno。
-fn sys_rmdir(path: *const u8, path_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a7") SyscallNumber::Rmdir as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`unlink`を呼ぶ。戻り値は0か負のerrno。
-fn sys_unlink(path: *const u8, path_len: usize) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a7") SyscallNumber::Unlink as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`exit`。kernelはこの呼び出しの後guestへ戻らない。
-fn sys_exit(code: u32) -> ! {
-    // Safety: exitのecallはresumeしない契約のため、noreturnでよい。
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") code as isize,
-            in("a7") SyscallNumber::Exit as usize,
-            options(noreturn),
-        );
-    }
-}
 
 /// `_start`から呼ばれるRust本体。rename→fd継続→置き換え→errnoの契約を
 /// 順に確かめる。

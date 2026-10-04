@@ -13,10 +13,13 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 use minios_abi::syscall::{
     EBADF, EFAULT, EPIPE, ESPIPE, FIRST_FILE_FD, SEEK_SET, STAT_KIND_PIPE, STDOUT, Stat,
-    SyscallNumber,
+};
+use minios_guest::sys::{
+    sys_close, sys_exit, sys_fstat, sys_lseek, sys_pipe, sys_read, sys_spawn, sys_waitpid,
+    sys_write,
 };
 
 /// exit異常の的内code。syscall失敗や契約違反、panicで使う。
@@ -29,90 +32,6 @@ const CHILD_PATH: &[u8] = b"DOCS/PIPECH.ELF";
 /// pipe経由でchildへ流すbyte列。PIPECH.ELFは11 byteを期待する。
 const PAYLOAD: &[u8] = b"pipe-bytes\n";
 const MESSAGE: &[u8] = b"pipe verified\n";
-
-macro_rules! sys1 {
-    ($number:expr, $a0:expr) => {{
-        let returned: isize;
-        // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-        unsafe {
-            asm!(
-                "ecall",
-                inlateout("a0") $a0 as isize => returned,
-                in("a7") $number as usize,
-                options(nostack),
-            );
-        }
-        returned
-    }};
-}
-
-macro_rules! sys3 {
-    ($number:expr, $a0:expr, $a1:expr, $a2:expr) => {{
-        let returned: isize;
-        // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-        unsafe {
-            asm!(
-                "ecall",
-                inlateout("a0") $a0 as isize => returned,
-                in("a1") $a1 as isize,
-                in("a2") $a2 as isize,
-                in("a7") $number as usize,
-                options(nostack),
-            );
-        }
-        returned
-    }};
-}
-
-/// MiniOS ABIの`pipe`を呼ぶ。`out`へ`[read_fd, write_fd]`を8 byteで
-/// 書き込む。戻り値は書き込んだbyte数(8)か負のerrno。
-fn sys_pipe(out: *mut [u32; 2]) -> isize {
-    sys3!(SyscallNumber::Pipe, out as usize, 0, 0)
-}
-
-/// MiniOS ABIの`read`を呼ぶ。戻り値は読んだbyte数か負のerrno。
-fn sys_read(fd: usize, buffer: &mut [u8], len: usize) -> isize {
-    sys3!(SyscallNumber::Read, fd, buffer.as_mut_ptr() as usize, len)
-}
-
-/// MiniOS ABIの`write`を呼ぶ。戻り値は書いたbyte数か負のerrno。
-fn sys_write(fd: usize, buffer: &[u8]) -> isize {
-    sys3!(
-        SyscallNumber::Write,
-        fd,
-        buffer.as_ptr() as usize,
-        buffer.len()
-    )
-}
-
-/// MiniOS ABIの`close`を呼ぶ。戻り値は0か負のerrno。
-fn sys_close(fd: usize) -> isize {
-    sys1!(SyscallNumber::Close, fd)
-}
-
-/// MiniOS ABIの`spawn`を呼ぶ。childはcallerのfd tableのsnapshotを
-/// 引き継ぐ。戻り値はchildのpidか負のerrno。
-fn sys_spawn(path: &[u8]) -> isize {
-    sys3!(SyscallNumber::Spawn, path.as_ptr() as usize, path.len(), 0)
-}
-
-/// MiniOS ABIの`fstat`を呼ぶ。`out`へ8 byteの`Stat`を書き込む。
-fn sys_fstat(fd: usize, out: &mut Stat) -> isize {
-    sys3!(SyscallNumber::Fstat, fd, out as *mut Stat as usize, 0)
-}
-
-/// MiniOS ABIの`exit`を呼び、戻らない。
-fn sys_exit(code: u32) -> ! {
-    // Safety: ecallはkernelへtrapし、exitはprocessを終了させるため戻らない。
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") code,
-            in("a7") SyscallNumber::Exit as usize,
-            options(noreturn),
-        );
-    }
-}
 
 /// `_start`から呼ばれるRust本体。pipeの往復と端の規約を確認して42で
 /// 終了する。
@@ -134,38 +53,40 @@ extern "C" fn guest_main() -> ! {
     }
 
     // pipe端のmetadata規約: kind=PIPE, size=0。
-    let mut stat = Stat { size: 1, kind: 0 };
-    if sys_fstat(read_fd, &mut stat) != minios_abi::syscall::STAT_LEN as isize {
+    // `Stat`はrepr(C)ではないため、kernelが書くLEの8 byteを配列で受けてから復元する。
+    let mut raw = [0xffu8; minios_abi::syscall::STAT_LEN];
+    if sys_fstat(read_fd, raw.as_mut_ptr()) != minios_abi::syscall::STAT_LEN as isize {
         sys_exit(FAILURE_EXIT);
     }
+    let stat = Stat::from_le_bytes(raw);
     if stat.kind != STAT_KIND_PIPE || stat.size != 0 {
         sys_exit(FAILURE_EXIT);
     }
 
     // pipe端はseekできず、read端へのwrite・write端へのreadはEBADF。
-    if sys3!(SyscallNumber::Lseek, read_fd, 0, SEEK_SET) != ESPIPE {
+    if sys_lseek(read_fd, 0, SEEK_SET) != ESPIPE {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_write(read_fd, b"x") != EBADF {
+    if sys_write(read_fd, b"x".as_ptr(), b"x".len()) != EBADF {
         sys_exit(FAILURE_EXIT);
     }
     let mut sink = [0u8; 4];
-    if sys_read(write_fd, &mut sink, 1) != EBADF {
+    if sys_read(write_fd, sink.as_mut_ptr(), 1) != EBADF {
         sys_exit(FAILURE_EXIT);
     }
 
     // childを起動する。PIPECH.ELFは継承したfd 3から11 byteを読み、
     // stdoutへ写して42で終了する。
-    if sys_spawn(CHILD_PATH) != CHILD_PID as isize {
+    if sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len()) != CHILD_PID as isize {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_write(write_fd, PAYLOAD) != PAYLOAD.len() as isize {
+    if sys_write(write_fd, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
         sys_exit(FAILURE_EXIT);
     }
 
     // parentはここでblockされ、childのstdoutとexit frameが先に出てから
     // code 42を回収する。
-    if sys1!(SyscallNumber::Waitpid, CHILD_PID) != SUCCESS_EXIT as isize {
+    if sys_waitpid(CHILD_PID) != SUCCESS_EXIT as isize {
         sys_exit(FAILURE_EXIT);
     }
 
@@ -175,7 +96,7 @@ extern "C" fn guest_main() -> ! {
         sys_exit(FAILURE_EXIT);
     }
     let mut eof = [0xAAu8; 4];
-    if sys_read(read_fd, &mut eof, 4) != 0 {
+    if sys_read(read_fd, eof.as_mut_ptr(), 4) != 0 {
         sys_exit(FAILURE_EXIT);
     }
     if sys_close(read_fd) != 0 {
@@ -194,14 +115,14 @@ extern "C" fn guest_main() -> ! {
     if sys_close(fds2[0] as usize) != 0 {
         sys_exit(FAILURE_EXIT);
     }
-    if sys_write(fds2[1] as usize, b"x") != EPIPE {
+    if sys_write(fds2[1] as usize, b"x".as_ptr(), b"x".len()) != EPIPE {
         sys_exit(FAILURE_EXIT);
     }
     if sys_close(fds2[1] as usize) != 0 {
         sys_exit(FAILURE_EXIT);
     }
 
-    if sys_write(STDOUT, MESSAGE) != MESSAGE.len() as isize {
+    if sys_write(STDOUT, MESSAGE.as_ptr(), MESSAGE.len()) != MESSAGE.len() as isize {
         sys_exit(FAILURE_EXIT);
     }
     sys_exit(SUCCESS_EXIT);

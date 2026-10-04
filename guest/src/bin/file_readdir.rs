@@ -10,11 +10,11 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
+use core::arch::naked_asm;
 use minios_abi::syscall::{
     DIRENT_LEN, DirEnt, EFAULT, ENOENT, ENOTDIR, STAT_KIND_DIR, STAT_KIND_FILE, STDOUT,
-    SyscallNumber,
 };
+use minios_guest::sys::{sys_exit, sys_readdir, sys_write};
 
 /// exit異常の的内code。syscall失敗や契約違反、panicで使う。
 const FAILURE_EXIT: u32 = 70;
@@ -26,58 +26,6 @@ const DOCS_PATH: &[u8] = b"DOCS";
 const FILE_PATH: &[u8] = b"HELLO.TXT";
 const MISSING_PATH: &[u8] = b"MISSING";
 const MESSAGE: &[u8] = b"readdir verified\n";
-
-/// MiniOS ABIの`readdir`を呼ぶ。`a0`/`a1`がpath（`a1`=0はroot）、
-/// `a2`がindex、`a3`が`DirEnt`の書き込み先。戻り値は書いたbyte数
-/// （`DIRENT_LEN`）、末尾超過は0、負はerrno。
-fn sys_readdir(path: *const u8, path_len: usize, index: usize, out: *mut u8) -> isize {
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    // a0はpath pointer兼戻り値、a1/a2/a3/a7は引数である。outはU+W検証対象である。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") path as usize => returned,
-            in("a1") path_len,
-            in("a2") index,
-            in("a3") out as usize,
-            in("a7") SyscallNumber::Readdir as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`write`を呼ぶ。戻り値は書いたbyte数か負のerrno。
-fn sys_write(fd: usize, pointer: *const u8, len: usize) -> isize {
-    let fd_argument = fd as isize;
-    let returned: isize;
-    // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") fd_argument => returned,
-            in("a1") pointer as usize,
-            in("a2") len,
-            in("a7") SyscallNumber::Write as usize,
-            options(nostack),
-        );
-    }
-    returned
-}
-
-/// MiniOS ABIの`exit`を呼び、戻らない。
-fn sys_exit(code: u32) -> ! {
-    // Safety: ecallはkernelへtrapし、exitはprocessを終了させるため戻らない。
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") code,
-            in("a7") SyscallNumber::Exit as usize,
-            options(noreturn),
-        );
-    }
-}
 
 /// `path`の`index`番目のentryを読む。`Ok`は`DirEnt`、`Err(0)`は
 /// 末尾超過、それ以外の`Err`はerrno。
