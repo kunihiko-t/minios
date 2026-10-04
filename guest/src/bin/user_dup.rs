@@ -8,118 +8,93 @@
 //! 併せて`dup2`の`EBADF`と同一fdの規約、複製したpipe端がすべて閉じるまで
 //! EOFにならないこと、fd 2の`close`、16個目までの`open`と17個目の
 //! `EMFILE`も確かめ、`dup verified`を出して42で終了する。
-//! 失敗時は70で終了する。E2Eのuser-dup検査が使う。
+//! 失敗時はpanicし、70で終了する。E2Eのuser-dup検査が使う。
 
 #![no_std]
 #![no_main]
 
-use core::arch::naked_asm;
 use minios_abi::syscall::{
     EBADF, EMFILE, FD_TABLE_LEN, FIRST_FILE_FD, MAX_OPEN_FILES, STDERR, STDOUT,
 };
-use minios_guest::sys::{
-    sys_close, sys_dup2, sys_exit, sys_open, sys_pipe, sys_read, sys_spawn, sys_waitpid, sys_write,
+use minios_guest::{
+    Args, Errno,
+    fs::File,
+    io, println,
+    process::{dup2, pipe, spawn, wait},
+    sys::{sys_close, sys_write},
 };
 
-const FAILURE_EXIT: u32 = 70;
-const SUCCESS_EXIT: u32 = 42;
+const SUCCESS_EXIT: i32 = 42;
 /// consoleのstdoutを退避しておくfd。tableの末尾を使う。
 const SAVED_STDOUT: usize = FD_TABLE_LEN - 1;
+/// pipe端を複製する先のfd。
+const COPY_FD: usize = 10;
 /// disk image fixtureの`DOCS/CHILD.ELF`。fd 1へ`spawn-child\n`を書き、
 /// pid 1 + 41 = 42で終了する。
 const CHILD_PATH: &[u8] = b"DOCS/CHILD.ELF";
 const CHILD_PID: usize = 1;
 const CHILD_OUTPUT: &[u8] = b"spawn-child\n";
 const OPEN_PATH: &[u8] = b"HELLO.TXT";
-const MESSAGE: &[u8] = b"dup verified\n";
 
-fn check(condition: bool) {
-    if !condition {
-        sys_exit(FAILURE_EXIT);
-    }
-}
+minios_guest::entry!(main);
 
-fn pipe() -> (usize, usize) {
-    let mut fds = [0u32; 2];
-    check(sys_pipe(&mut fds) == 8);
-    (fds[0] as usize, fds[1] as usize)
-}
-
-extern "C" fn guest_main() -> ! {
+fn main(_args: Args) -> i32 {
     // 範囲外や未割当のoldfdと範囲外のnewfdはEBADF、同一fdは何も変えない。
-    check(sys_dup2(FD_TABLE_LEN, 5) == EBADF);
-    check(sys_dup2(7, 5) == EBADF);
-    check(sys_dup2(STDOUT, FD_TABLE_LEN) == EBADF);
-    check(sys_dup2(STDOUT, STDOUT) == STDOUT as isize);
+    assert_eq!(dup2(FD_TABLE_LEN, 5), Err(Errno(EBADF)));
+    assert_eq!(dup2(7, 5), Err(Errno(EBADF)));
+    assert_eq!(dup2(STDOUT, FD_TABLE_LEN), Err(Errno(EBADF)));
+    assert_eq!(dup2(STDOUT, STDOUT), Ok(STDOUT));
 
     // childのstdoutをpipeへ向けてからspawnし、parentのstdoutを戻す。
-    let (read_fd, write_fd) = pipe();
-    check(sys_dup2(STDOUT, SAVED_STDOUT) == SAVED_STDOUT as isize);
-    check(sys_dup2(write_fd, STDOUT) == STDOUT as isize);
-    check(
-        sys_spawn(CHILD_PATH.as_ptr(), CHILD_PATH.len(), core::ptr::null(), 0)
-            == CHILD_PID as isize,
-    );
-    check(sys_dup2(SAVED_STDOUT, STDOUT) == STDOUT as isize);
-    check(sys_close(SAVED_STDOUT) == 0);
-    check(sys_close(write_fd) == 0);
-    check(sys_waitpid(CHILD_PID) == SUCCESS_EXIT as isize);
+    let (mut reader, writer) = pipe().unwrap();
+    assert_eq!(dup2(STDOUT, SAVED_STDOUT), Ok(SAVED_STDOUT));
+    let saved = File::from_raw_fd(SAVED_STDOUT);
+    assert_eq!(dup2(writer.as_raw_fd(), STDOUT), Ok(STDOUT));
+    assert_eq!(spawn(CHILD_PATH, &[]), Ok(CHILD_PID));
+    assert_eq!(dup2(saved.as_raw_fd(), STDOUT), Ok(STDOUT));
+    saved.close().unwrap();
+    writer.close().unwrap();
+    assert_eq!(wait(CHILD_PID), Ok(SUCCESS_EXIT));
 
     // childの出力はpipeにあり、write端はすべて閉じたので次はEOF。
     let mut buffer = [0u8; 32];
-    let count = sys_read(read_fd, buffer.as_mut_ptr(), buffer.len());
-    check(count == CHILD_OUTPUT.len() as isize);
-    check(&buffer[..CHILD_OUTPUT.len()] == CHILD_OUTPUT);
-    check(sys_read(read_fd, buffer.as_mut_ptr(), buffer.len()) == 0);
-    check(sys_close(read_fd) == 0);
-    check(sys_write(STDOUT, buffer.as_ptr(), count as usize) == count);
+    let count = reader.read(&mut buffer).unwrap();
+    assert_eq!(&buffer[..count], CHILD_OUTPUT);
+    assert_eq!(reader.read(&mut buffer), Ok(0));
+    reader.close().unwrap();
+    io::write_all(STDOUT, &buffer[..count]).unwrap();
 
     // 複製したwrite端は元を閉じても生きており、dup2で上書きして
     // 最後のwrite端が消えるとEOFになる。
-    let (read_fd, write_fd) = pipe();
-    check(sys_dup2(write_fd, 10) == 10);
-    check(sys_close(write_fd) == 0);
-    check(sys_write(10, b"x".as_ptr(), 1) == 1);
-    check(sys_read(read_fd, buffer.as_mut_ptr(), 1) == 1);
-    check(sys_dup2(read_fd, 10) == 10);
-    check(sys_read(read_fd, buffer.as_mut_ptr(), 1) == 0);
-    check(sys_write(10, b"x".as_ptr(), 1) == EBADF);
-    check(sys_close(10) == 0);
-    check(sys_close(read_fd) == 0);
+    let (mut reader, writer) = pipe().unwrap();
+    assert_eq!(dup2(writer.as_raw_fd(), COPY_FD), Ok(COPY_FD));
+    writer.close().unwrap();
+    let mut copy = File::from_raw_fd(COPY_FD);
+    assert_eq!(copy.write(b"x"), Ok(1));
+    assert_eq!(reader.read(&mut buffer[..1]), Ok(1));
+    assert_eq!(dup2(reader.as_raw_fd(), COPY_FD), Ok(COPY_FD));
+    assert_eq!(reader.read(&mut buffer[..1]), Ok(0));
+    assert_eq!(copy.write(b"x"), Err(Errno(EBADF)));
+    copy.close().unwrap();
+    reader.close().unwrap();
 
-    // fd 2も普通のslotなので閉じられ、consoleをdup2で戻せる。
-    check(sys_close(STDERR) == 0);
-    check(sys_write(STDERR, b"x".as_ptr(), 1) == EBADF);
-    check(sys_close(STDERR) == EBADF);
-    check(sys_dup2(STDOUT, STDERR) == STDERR as isize);
+    // fd 2も普通のslotなので閉じられ、consoleをdup2で戻せる。閉じたfdへの
+    // probeは生のsyscallで行う。
+    assert_eq!(sys_close(STDERR), 0);
+    assert_eq!(sys_write(STDERR, b"x".as_ptr(), 1), EBADF);
+    assert_eq!(sys_close(STDERR), EBADF);
+    assert_eq!(dup2(STDOUT, STDERR), Ok(STDERR));
 
     // fd 0..2を除いてMAX_OPEN_FILES個まで開け、次はEMFILE。
     for index in 0..MAX_OPEN_FILES {
-        check(sys_open(OPEN_PATH.as_ptr(), OPEN_PATH.len()) == (FIRST_FILE_FD + index) as isize);
+        let fd = File::open(OPEN_PATH).unwrap().into_raw_fd();
+        assert_eq!(fd, FIRST_FILE_FD + index);
     }
-    check(sys_open(OPEN_PATH.as_ptr(), OPEN_PATH.len()) == EMFILE);
+    assert_eq!(File::open(OPEN_PATH).err(), Some(Errno(EMFILE)));
     for fd in FIRST_FILE_FD..FD_TABLE_LEN {
-        check(sys_close(fd) == 0);
+        File::from_raw_fd(fd).close().unwrap();
     }
 
-    check(sys_write(STDOUT, MESSAGE.as_ptr(), MESSAGE.len()) == MESSAGE.len() as isize);
-    sys_exit(SUCCESS_EXIT);
-}
-
-/// 初期`sp`はkernelが16 byte整列済み。`a0/a1`は第一・第二引数として
-/// そのまま`guest_main`へ流れるため、register操作は不要である。
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
-#[unsafe(naked)]
-unsafe extern "C" fn _start() -> ! {
-    naked_asm!(
-        "call {entry}",
-        "j .",
-        entry = sym guest_main,
-    )
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    sys_exit(FAILURE_EXIT);
+    println!("dup verified");
+    SUCCESS_EXIT
 }

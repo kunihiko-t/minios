@@ -4,24 +4,19 @@
 //! なること、置き換えられたfileを指すfdが`EBADF`で失効すること、
 //! directoryのrenameとdir/file組合せのerrno、別directoryへのmove
 //! （fd追従・`..`更新・cycle拒否・cross-dir置換）を確認し、42で終了する。
-//! 失敗時は70で終了する。E2Eのfile-rename検査が使う。
+//! 失敗時はpanicし、70で終了する。E2Eのfile-rename検査が使う。
 
 #![no_std]
 #![no_main]
 
-use core::arch::naked_asm;
-use minios_abi::syscall::{
-    EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, FIRST_FILE_FD, STDOUT,
-};
-use minios_guest::sys::{
-    sys_close, sys_create, sys_exit, sys_mkdir, sys_open, sys_read, sys_rename, sys_rmdir,
-    sys_unlink, sys_write,
+use minios_abi::syscall::{EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
+use minios_guest::{
+    Args, Errno,
+    fs::{File, mkdir, rename, rmdir, unlink},
+    println,
+    sys::sys_read,
 };
 
-/// exit異常の的内code。syscall失敗や契約違反、panicで使う。
-const FAILURE_EXIT: u32 = 70;
-/// 正常終了code。
-const SUCCESS_EXIT: u32 = 42;
 /// renameするfile名と内容。内容はguestが照合する。
 const OLD_PATH: &[u8] = b"RENAME.TXT";
 const NEW_PATH: &[u8] = b"RENAMED.TXT";
@@ -54,518 +49,144 @@ const EMPTYD_PATH: &[u8] = b"EMPTYD";
 const EMPTYD_INNER: &[u8] = b"EMPTYD/F.TXT";
 const FILE_PATH: &[u8] = b"HELLO.TXT";
 const PAYLOAD: &[u8] = b"renamed by guest\n";
-const MESSAGE: &[u8] = b"rename verified\n";
 const BUFFER_LEN: usize = 64;
 
-/// `_start`から呼ばれるRust本体。rename→fd継続→置き換え→errnoの契約を
-/// 順に確かめる。
-#[unsafe(no_mangle)]
-extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
-    // 作成して書き込み、閉じる。
-    let fd = sys_create(OLD_PATH.as_ptr(), OLD_PATH.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_write(fd as usize, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+/// `path`を作り、`payload`を書いて閉じる。
+fn create_with(path: &[u8], payload: &[u8]) {
+    let mut file = File::create(path).unwrap();
+    assert_eq!(file.write(payload), Ok(payload.len()));
+    file.close().unwrap();
+}
+
+/// `path`を開いて`len` byteを読み、`buffer`へ残して閉じる。
+fn read_back(path: &[u8], buffer: &mut [u8], len: usize) {
+    let mut file = File::open(path).unwrap();
+    assert_eq!(file.read(&mut buffer[..len]), Ok(len));
+    file.close().unwrap();
+}
+
+/// `path`が存在しないことを`open`の`ENOENT`で確かめる。
+fn assert_missing(path: &[u8]) {
+    assert_eq!(File::open(path).err(), Some(Errno(ENOENT)));
+}
+
+minios_guest::entry!(main);
+
+fn main(_args: Args) -> i32 {
+    let mut buffer = [0u8; BUFFER_LEN];
+    create_with(OLD_PATH, PAYLOAD);
 
     // 読み専用で開いたままrenameする。entryの位置は変わらないため、
     // 開いているfdはそのまま内容を読める。
-    let fd = sys_open(OLD_PATH.as_ptr(), OLD_PATH.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_rename(
-        OLD_PATH.as_ptr(),
-        OLD_PATH.len(),
-        NEW_PATH.as_ptr(),
-        NEW_PATH.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    let mut buffer = [0u8; BUFFER_LEN];
-    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if buffer[..PAYLOAD.len()] != *PAYLOAD {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    let mut file = File::open(OLD_PATH).unwrap();
+    rename(OLD_PATH, NEW_PATH).unwrap();
+    assert_eq!(file.read(&mut buffer[..PAYLOAD.len()]), Ok(PAYLOAD.len()));
+    assert_eq!(&buffer[..PAYLOAD.len()], PAYLOAD);
+    file.close().unwrap();
 
     // 旧名はENOENT、新名で開ける。同名へのrenameは成功のno-op。
-    if sys_open(OLD_PATH.as_ptr(), OLD_PATH.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        NEW_PATH.as_ptr(),
-        NEW_PATH.len(),
-        NEW_PATH.as_ptr(),
-        NEW_PATH.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
+    assert_missing(OLD_PATH);
+    rename(NEW_PATH, NEW_PATH).unwrap();
 
     // errno契約：不在source、dir→file、file→dir、別dir、非8.3名。
-    if sys_rename(
-        MISSING_PATH.as_ptr(),
-        MISSING_PATH.len(),
-        OLD_PATH.as_ptr(),
-        OLD_PATH.len(),
-    ) != ENOENT
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        DIR_PATH.as_ptr(),
-        DIR_PATH.len(),
-        FILE_PATH.as_ptr(),
-        FILE_PATH.len(),
-    ) != ENOTDIR
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        NEW_PATH.as_ptr(),
-        NEW_PATH.len(),
-        DIR_PATH.as_ptr(),
-        DIR_PATH.len(),
-    ) != EISDIR
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        NEW_PATH.as_ptr(),
-        NEW_PATH.len(),
-        LFN_PATH.as_ptr(),
-        LFN_PATH.len(),
-    ) != EINVAL
-    {
-        sys_exit(FAILURE_EXIT);
-    }
+    assert_eq!(rename(MISSING_PATH, OLD_PATH), Err(Errno(ENOENT)));
+    assert_eq!(rename(DIR_PATH, FILE_PATH), Err(Errno(ENOTDIR)));
+    assert_eq!(rename(NEW_PATH, DIR_PATH), Err(Errno(EISDIR)));
+    assert_eq!(rename(NEW_PATH, LFN_PATH), Err(Errno(EINVAL)));
 
     // 既存fileへのrenameは置き換える。target側のfdは失効し、
-    // target名で開くとsourceの内容が読める。
-    let fd = sys_create(VICTIM_PATH.as_ptr(), VICTIM_PATH.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    let victim = sys_open(VICTIM_PATH.as_ptr(), VICTIM_PATH.len());
-    if victim < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let victim = victim as usize;
-    if sys_rename(
-        NEW_PATH.as_ptr(),
-        NEW_PATH.len(),
-        VICTIM_PATH.as_ptr(),
-        VICTIM_PATH.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_read(victim, buffer.as_mut_ptr(), 8) != EBADF {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_open(NEW_PATH.as_ptr(), NEW_PATH.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(VICTIM_PATH.as_ptr(), VICTIM_PATH.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if buffer[..PAYLOAD.len()] != *PAYLOAD {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    // target名で開くとsourceの内容が読める。失効したfdは生のまま扱い、
+    // dropで閉じない。
+    File::create(VICTIM_PATH).unwrap().close().unwrap();
+    let victim = File::open(VICTIM_PATH).unwrap().into_raw_fd();
+    rename(NEW_PATH, VICTIM_PATH).unwrap();
+    assert_eq!(sys_read(victim, buffer.as_mut_ptr(), 8), EBADF);
+    assert_missing(NEW_PATH);
+    read_back(VICTIM_PATH, &mut buffer, PAYLOAD.len());
+    assert_eq!(&buffer[..PAYLOAD.len()], PAYLOAD);
 
     // directoryのrename：中のfileは新しいdir名で解決できる（`..`は
     // 親clusterを指すため更新不要）。旧名はENOENTになる。
-    if sys_mkdir(OLDDIR_PATH.as_ptr(), OLDDIR_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_create(OLDDIR_INNER.as_ptr(), OLDDIR_INNER.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_write(fd as usize, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        OLDDIR_PATH.as_ptr(),
-        OLDDIR_PATH.len(),
-        NEWDIR_PATH.as_ptr(),
-        NEWDIR_PATH.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_open(OLDDIR_INNER.as_ptr(), OLDDIR_INNER.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(NEWDIR_INNER.as_ptr(), NEWDIR_INNER.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if buffer[..PAYLOAD.len()] != *PAYLOAD {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    mkdir(OLDDIR_PATH).unwrap();
+    create_with(OLDDIR_INNER, PAYLOAD);
+    rename(OLDDIR_PATH, NEWDIR_PATH).unwrap();
+    assert_missing(OLDDIR_INNER);
+    read_back(NEWDIR_INNER, &mut buffer, PAYLOAD.len());
+    assert_eq!(&buffer[..PAYLOAD.len()], PAYLOAD);
 
     // errno契約：dir→fileはENOTDIR、file→dirはEISDIR、dir→非空dirは
     // ENOTEMPTY。
-    if sys_rename(
-        NEWDIR_PATH.as_ptr(),
-        NEWDIR_PATH.len(),
-        FILE_PATH.as_ptr(),
-        FILE_PATH.len(),
-    ) != ENOTDIR
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_mkdir(OTHERD_PATH.as_ptr(), OTHERD_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_create(OTHERD_INNER.as_ptr(), OTHERD_INNER.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        FILE_PATH.as_ptr(),
-        FILE_PATH.len(),
-        OTHERD_PATH.as_ptr(),
-        OTHERD_PATH.len(),
-    ) != EISDIR
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        NEWDIR_PATH.as_ptr(),
-        NEWDIR_PATH.len(),
-        OTHERD_PATH.as_ptr(),
-        OTHERD_PATH.len(),
-    ) != ENOTEMPTY
-    {
-        sys_exit(FAILURE_EXIT);
-    }
+    assert_eq!(rename(NEWDIR_PATH, FILE_PATH), Err(Errno(ENOTDIR)));
+    mkdir(OTHERD_PATH).unwrap();
+    File::create(OTHERD_INNER).unwrap().close().unwrap();
+    assert_eq!(rename(FILE_PATH, OTHERD_PATH), Err(Errno(EISDIR)));
+    assert_eq!(rename(NEWDIR_PATH, OTHERD_PATH), Err(Errno(ENOTEMPTY)));
 
     // dir→空dirは置換。targetのentryとchainが消え、sourceが名を継ぐ。
-    if sys_mkdir(EMPTYD_PATH.as_ptr(), EMPTYD_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        NEWDIR_PATH.as_ptr(),
-        NEWDIR_PATH.len(),
-        EMPTYD_PATH.as_ptr(),
-        EMPTYD_PATH.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_open(NEWDIR_INNER.as_ptr(), NEWDIR_INNER.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(EMPTYD_INNER.as_ptr(), EMPTYD_INNER.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    mkdir(EMPTYD_PATH).unwrap();
+    rename(NEWDIR_PATH, EMPTYD_PATH).unwrap();
+    assert_missing(NEWDIR_INNER);
+    File::open(EMPTYD_INNER).unwrap().close().unwrap();
 
     // cross-directory move：fileをDOCSへ移す。旧名はENOENT、新名で
     // 内容を照合し、rootへ戻す。
-    if sys_rename(
-        VICTIM_PATH.as_ptr(),
-        VICTIM_PATH.len(),
-        MOVE_TARGET.as_ptr(),
-        MOVE_TARGET.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_open(VICTIM_PATH.as_ptr(), VICTIM_PATH.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(MOVE_TARGET.as_ptr(), MOVE_TARGET.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if buffer[..PAYLOAD.len()] != *PAYLOAD {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        MOVE_TARGET.as_ptr(),
-        MOVE_TARGET.len(),
-        VICTIM_PATH.as_ptr(),
-        VICTIM_PATH.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_open(MOVE_TARGET.as_ptr(), MOVE_TARGET.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
+    rename(VICTIM_PATH, MOVE_TARGET).unwrap();
+    assert_missing(VICTIM_PATH);
+    read_back(MOVE_TARGET, &mut buffer, PAYLOAD.len());
+    assert_eq!(&buffer[..PAYLOAD.len()], PAYLOAD);
+    rename(MOVE_TARGET, VICTIM_PATH).unwrap();
+    assert_missing(MOVE_TARGET);
 
     // move中のfd追従：writable fdを開いたまま別dirへ移し、fd経由の追記が
     // 新しいdir entryへwrite-backされることをsizeで照合する。
-    let fd = sys_create(MOVFD_PATH.as_ptr(), MOVFD_PATH.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_write(fd, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        MOVFD_PATH.as_ptr(),
-        MOVFD_PATH.len(),
-        MOVFD_DOCS.as_ptr(),
-        MOVFD_DOCS.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_write(fd, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(MOVFD_DOCS.as_ptr(), MOVFD_DOCS.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len() * 2) != (PAYLOAD.len() * 2) as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_open(MOVFD_PATH.as_ptr(), MOVFD_PATH.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
+    let mut file = File::create(MOVFD_PATH).unwrap();
+    assert_eq!(file.write(PAYLOAD), Ok(PAYLOAD.len()));
+    rename(MOVFD_PATH, MOVFD_DOCS).unwrap();
+    assert_eq!(file.write(PAYLOAD), Ok(PAYLOAD.len()));
+    file.close().unwrap();
+    read_back(MOVFD_DOCS, &mut buffer, PAYLOAD.len() * 2);
+    assert_missing(MOVFD_PATH);
 
     // cross-dir置換：DOCS内の既存fileへfileを移すと、targetを指すfdは
     // EBADFで失効し、sourceの内容が新名で読める。
-    let fd = sys_create(TARG_DOCS.as_ptr(), TARG_DOCS.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    let victim = sys_open(TARG_DOCS.as_ptr(), TARG_DOCS.len());
-    if victim < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let victim = victim as usize;
-    if sys_rename(
-        MOVFD_DOCS.as_ptr(),
-        MOVFD_DOCS.len(),
-        TARG_DOCS.as_ptr(),
-        TARG_DOCS.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_read(victim, buffer.as_mut_ptr(), 8) != EBADF {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(TARG_DOCS.as_ptr(), TARG_DOCS.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len() * 2) != (PAYLOAD.len() * 2) as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    File::create(TARG_DOCS).unwrap().close().unwrap();
+    let victim = File::open(TARG_DOCS).unwrap().into_raw_fd();
+    rename(MOVFD_DOCS, TARG_DOCS).unwrap();
+    assert_eq!(sys_read(victim, buffer.as_mut_ptr(), 8), EBADF);
+    read_back(TARG_DOCS, &mut buffer, PAYLOAD.len() * 2);
 
     // directoryのcross-dir move：dirごとDOCSの中へ移し、中身を新pathで
     // 読んでからrootへ戻す（`..`が新parentへ更新される）。
-    if sys_mkdir(SRCDIR_PATH.as_ptr(), SRCDIR_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_create(SRCDIR_INNER.as_ptr(), SRCDIR_INNER.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_write(fd as usize, PAYLOAD.as_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        SRCDIR_PATH.as_ptr(),
-        SRCDIR_PATH.len(),
-        DOCS_SRCDIR.as_ptr(),
-        DOCS_SRCDIR.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_open(SRCDIR_INNER.as_ptr(), SRCDIR_INNER.len()) != ENOENT {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(DOCS_SRCDIR_INNER.as_ptr(), DOCS_SRCDIR_INNER.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = fd as usize;
-    if sys_read(fd, buffer.as_mut_ptr(), PAYLOAD.len()) != PAYLOAD.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        DOCS_SRCDIR.as_ptr(),
-        DOCS_SRCDIR.len(),
-        SRCDIR2_PATH.as_ptr(),
-        SRCDIR2_PATH.len(),
-    ) != 0
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    let fd = sys_open(SRCDIR2_INNER.as_ptr(), SRCDIR2_INNER.len());
-    if fd < FIRST_FILE_FD as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_close(fd as usize) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    mkdir(SRCDIR_PATH).unwrap();
+    create_with(SRCDIR_INNER, PAYLOAD);
+    rename(SRCDIR_PATH, DOCS_SRCDIR).unwrap();
+    assert_missing(SRCDIR_INNER);
+    read_back(DOCS_SRCDIR_INNER, &mut buffer, PAYLOAD.len());
+    rename(DOCS_SRCDIR, SRCDIR2_PATH).unwrap();
+    File::open(SRCDIR2_INNER).unwrap().close().unwrap();
 
     // cycle：dirを自身や子孫の中へ移す指定はEINVAL。不在の親dirへの
     // 移動はENOENT。
-    if sys_rename(
-        DIR_PATH.as_ptr(),
-        DIR_PATH.len(),
-        CYCLE_PATH.as_ptr(),
-        CYCLE_PATH.len(),
-    ) != EINVAL
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_mkdir(DDA_PATH.as_ptr(), DDA_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_mkdir(DDA_INNER_DIR.as_ptr(), DDA_INNER_DIR.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        DDA_PATH.as_ptr(),
-        DDA_PATH.len(),
-        DDA_CYCLE.as_ptr(),
-        DDA_CYCLE.len(),
-    ) != EINVAL
-    {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rename(
-        VICTIM_PATH.as_ptr(),
-        VICTIM_PATH.len(),
-        NOPARENT_PATH.as_ptr(),
-        NOPARENT_PATH.len(),
-    ) != ENOENT
-    {
-        sys_exit(FAILURE_EXIT);
-    }
+    assert_eq!(rename(DIR_PATH, CYCLE_PATH), Err(Errno(EINVAL)));
+    mkdir(DDA_PATH).unwrap();
+    mkdir(DDA_INNER_DIR).unwrap();
+    assert_eq!(rename(DDA_PATH, DDA_CYCLE), Err(Errno(EINVAL)));
+    assert_eq!(rename(VICTIM_PATH, NOPARENT_PATH), Err(Errno(ENOENT)));
 
     // moveで作ったfileとdirを片付ける。
-    if sys_unlink(TARG_DOCS.as_ptr(), TARG_DOCS.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_unlink(SRCDIR2_INNER.as_ptr(), SRCDIR2_INNER.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rmdir(SRCDIR2_PATH.as_ptr(), SRCDIR2_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rmdir(DDA_INNER_DIR.as_ptr(), DDA_INNER_DIR.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rmdir(DDA_PATH.as_ptr(), DDA_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    unlink(TARG_DOCS).unwrap();
+    unlink(SRCDIR2_INNER).unwrap();
+    rmdir(SRCDIR2_PATH).unwrap();
+    rmdir(DDA_INNER_DIR).unwrap();
+    rmdir(DDA_PATH).unwrap();
 
     // 片付け：中身のfileを消してから両dirをrmdirできる。
-    if sys_rmdir(EMPTYD_PATH.as_ptr(), EMPTYD_PATH.len()) != ENOTEMPTY {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_unlink(EMPTYD_INNER.as_ptr(), EMPTYD_INNER.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rmdir(EMPTYD_PATH.as_ptr(), EMPTYD_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_unlink(OTHERD_INNER.as_ptr(), OTHERD_INNER.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
-    if sys_rmdir(OTHERD_PATH.as_ptr(), OTHERD_PATH.len()) != 0 {
-        sys_exit(FAILURE_EXIT);
-    }
+    assert_eq!(rmdir(EMPTYD_PATH), Err(Errno(ENOTEMPTY)));
+    unlink(EMPTYD_INNER).unwrap();
+    rmdir(EMPTYD_PATH).unwrap();
+    unlink(OTHERD_INNER).unwrap();
+    rmdir(OTHERD_PATH).unwrap();
 
-    if sys_write(STDOUT, MESSAGE.as_ptr(), MESSAGE.len()) != MESSAGE.len() as isize {
-        sys_exit(FAILURE_EXIT);
-    }
-    sys_exit(SUCCESS_EXIT);
-}
-
-/// 初期`sp`はkernelが16 byte整列済み。`a0/a1`は第一・第二引数として
-/// そのまま`guest_main`へ流れるため、register操作は不要である。
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
-#[unsafe(naked)]
-unsafe extern "C" fn _start() -> ! {
-    naked_asm!(
-        "call {entry}",
-        "j .",
-        entry = sym guest_main,
-    )
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    sys_exit(FAILURE_EXIT);
+    println!("rename verified");
+    42
 }

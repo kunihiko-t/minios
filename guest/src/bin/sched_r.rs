@@ -7,32 +7,15 @@
 #![no_std]
 #![no_main]
 
-use core::arch::naked_asm;
-use minios_abi::syscall::{STDIN, STDOUT};
-use minios_guest::sys::{sys_exit, sys_read, sys_write};
+use minios_abi::syscall::STDIN;
+use minios_guest::{Args, io, print};
 
-#[unsafe(no_mangle)]
-extern "C" fn guest_main(_argc: usize, _argv: *const *const u8) -> ! {
-    sys_write(STDOUT, b"r1\n".as_ptr(), 3);
+minios_guest::entry!(main);
+
+fn main(_args: Args) -> i32 {
+    print!("r1\n");
     let mut buffer = [0u8; 16];
-    sys_read(STDIN, buffer.as_mut_ptr(), buffer.len());
-    sys_write(STDOUT, b"r2\n".as_ptr(), 3);
-    sys_exit(5);
-}
-
-/// 初期`sp`はkernelが16 byte整列済み。`a0/a1`はそのまま`guest_main`へ流れる。
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
-#[unsafe(naked)]
-unsafe extern "C" fn _start() -> ! {
-    naked_asm!(
-        "call {entry}",
-        "j .",
-        entry = sym guest_main,
-    )
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    sys_exit(70);
+    let _ = io::read(STDIN, &mut buffer);
+    print!("r2\n");
+    5
 }

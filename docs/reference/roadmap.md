@@ -101,8 +101,8 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
   open file数の上限は4から16へ上げ、`spawn`したchildは差し替えたfd 1をそのまま継承します。
 - **`spawn`への引数渡し**（完了）：`spawn`は`a2`と`a3`で`[pointer, length]`のentry配列を受け取り、manifestと同じ初期stack ABIでchildの`argv`を積みます（`cargo xtask test spawn-args`で検証）。
   `argc`が0なら従来どおりpathのbasenameだけを`argv[0]`にするため、既存の呼び出し側は変わりません。
-- **user library crate**：段階0で作った`minios_guest` libraryへ、`println!`、`File`、`Process`のような薄い型を加えます。
-  各sample guestはこのlibraryだけを使って書き直します。
+- **user library crate**（完了）：`minios_guest` libraryへ`entry!`、`println!`、`File`、`spawn`のような薄い型を加え、全sample guestを書き直しました。
+  `_start`と`panic_handler`は各programから消え、不正なpointer、失効したfd、型で表せない引数を渡す検査だけが生のsyscall wrapperを使います。
 - **user mode shell**：FAT32上の`SH.ELF`としてuser modeのshellを書き、path指定の起動、`|`によるpipe、`<`と`>`によるredirectを実装します。
   kernel shellは起動と診断に残し、通常の操作はuser shellへ移します。
 

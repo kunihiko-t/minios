@@ -175,7 +175,7 @@ decoderが再開可能でなければ、残りのbyteをheaderの先頭として
 
 ## 演習
 
-[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)の`sys_yield`の呼び出しを外し、`cargo xtask test sched`の出力で`b1`の位置がどう変わるかを観察してください。
+[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)の`yield_now`の呼び出しを外し、`cargo xtask test sched`の出力で`b1`の位置がどう変わるかを観察してください。
 `spin`は1 tickのうちに`a3`まで進むため、`a1 < b1 < a3`が崩れてtestが失敗します。
 確認後は呼び出しを元に戻します。
 
