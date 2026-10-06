@@ -85,7 +85,8 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 38. QEMU schedテスト
 39. QEMU sched-ioテスト
 40. QEMU sched-io-partialテスト
-41. QEMUシェルテスト
+41. QEMU proc-faultテスト
+42. QEMUシェルテスト
 
 速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
@@ -112,7 +113,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`spawn-args`、`user-shell`、`sched`、`sched-io`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`spawn-args`、`user-shell`、`sched`、`sched-io`、`proc-fault`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -267,7 +268,8 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 51. QEMU sched test
 52. QEMU sched-io test
 53. QEMU sched-io-partial test
-54. QEMU shell test
+54. QEMU proc-fault test
+55. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -306,12 +308,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/54] cargo fmt --all -- --check
-phase 1/54 passed (elapsed: ...s)
+[1/55] cargo fmt --all -- --check
+phase 1/55 passed (elapsed: ...s)
 ...
-[54/54] QEMU shell test
-phase 54/54 passed (elapsed: ...s)
-summary: PASSED all 54 phases (elapsed: ...s)
+[55/55] QEMU shell test
+phase 55/55 passed (elapsed: ...s)
+summary: PASSED all 55 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

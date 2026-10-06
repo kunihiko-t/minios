@@ -553,6 +553,9 @@ const USER_RUN_OUTCOME_NONE: usize = 0;
 const USER_RUN_OUTCOME_EXIT: usize = 1;
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_FATAL_TRAP: usize = 2;
+/// manifest v2のuser例外終了code。Rust guestのpanicと同じ失敗codeを使う。
+#[cfg(target_arch = "riscv64")]
+const USER_FAULT_EXIT_CODE: u32 = 70;
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_SINK_FAILURE: usize = 3;
 #[cfg(target_arch = "riscv64")]
@@ -2129,10 +2132,8 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     ))
 ))]
 fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
-    // fatal trapの診断はcontrol modeではGuestError frameとしてhostへ届く。
-    crate::console::emergency_print(format_args!(
-        "MiniOS user trap: scause={scause:#018x} stval={stval:#018x}\r\n"
-    ));
+    // schedulerへ戻してからmanifestの終了契約に応じた診断を送る。
+    // 複数imageのuser例外をGuestErrorにすると、hostが他のタスクまで停止してしまう。
     USER_FATAL_SCAUSE.store(scause, Ordering::Relaxed);
     USER_FATAL_STVAL.store(stval, Ordering::Relaxed);
     USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
@@ -2152,10 +2153,10 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
 ))]
 fn user_trap_timer() -> RunExit {
     if let Err(error) = time::handle_interrupt() {
-        // 再アームできない環境ではscheduleを続けられないため、実行中processの
-        // fatalとして扱う。timer欠損はhaltではなく診断で表す。
+        // timerの再アーム失敗はタスクのuser例外ではなくkernel側の障害である。
+        // 複数imageでも正常なタスク分離として扱わず、payload全体を失敗させる。
         crate::console::emergency_print(format_args!("MiniOS user timer: {error:?}\r\n"));
-        USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
+        USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SOURCE_FAILURE, Ordering::Relaxed);
         return RunExit::ReturnToKernel;
     }
     USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_PREEMPTED, Ordering::Relaxed);
@@ -2710,6 +2711,35 @@ fn reclaim_process_slot(table: &mut ProcessTable, pid: usize, frames: &mut dyn F
     }
 }
 
+/// statusを台帳へ記録して終了を通知し、waiterの起床後に所有resourceを回収する。
+/// statusなしは単一imageのfatalやkernel側障害であり、成功のExitを送らない。
+#[cfg(target_arch = "riscv64")]
+fn complete_process(
+    table: &mut ProcessTable,
+    pid: usize,
+    code: Option<u32>,
+    multi: bool,
+    sink: &mut control::UartControlSink,
+    frames: &mut dyn FrameSource,
+) {
+    if let Some(code) = code {
+        table.record_exit(pid, code);
+        use minios_kernel::user::syscall::ControlSink as _;
+        if multi {
+            let payload = minios_abi::control::ProcExitPayload {
+                pid: pid as u32,
+                code,
+            }
+            .encode();
+            let _ = sink.frame(minios_abi::control::FrameKind::ProcExit, &payload);
+        } else {
+            let _ = sink.frame(minios_abi::control::FrameKind::Exit, &code.to_le_bytes());
+        }
+    }
+    table.wake_on_exit(pid);
+    reclaim_process_slot(table, pid, frames);
+}
+
 /// tableに残る全processを回収する。spawn途中の失敗経路で使う。
 #[cfg(target_arch = "riscv64")]
 fn reclaim_process_table(table: &mut ProcessTable, frames: &mut dyn FrameSource) {
@@ -2916,35 +2946,39 @@ fn run_boot_payload(
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_EXIT) => {
                 let code = USER_EXIT_CODE.load(Ordering::Relaxed) as u32;
                 last_code = code;
-                // `waitpid`のreapより先にstatusを台帳へ記録し、待っている
-                // processをrunnableへ戻す。reclaimはledger消費を妨げない。
-                table.record_exit(pid, code);
-                table.wake_on_exit(pid);
+                complete_process(&mut table, pid, Some(code), multi, &mut sink, frames);
+            }
+            (RunExit::ReturnToKernel, USER_RUN_OUTCOME_FATAL_TRAP) => {
+                let scause = USER_FATAL_SCAUSE.load(Ordering::Relaxed);
+                let stval = USER_FATAL_STVAL.load(Ordering::Relaxed);
                 if multi {
-                    let payload = minios_abi::control::ProcExitPayload {
-                        pid: pid as u32,
-                        code,
-                    }
-                    .encode();
-                    use minios_kernel::user::syscall::ControlSink as _;
-                    let _ = sink.frame(minios_abi::control::FrameKind::ProcExit, &payload);
+                    // 故障したタスクだけを終了し、待っているタスクへstatusを渡す。
+                    crate::println!(
+                        "MiniOS sched: fault pid={pid} code={USER_FAULT_EXIT_CODE} scause={scause:#018x} stval={stval:#018x}"
+                    );
+                    complete_process(
+                        &mut table,
+                        pid,
+                        Some(USER_FAULT_EXIT_CODE),
+                        multi,
+                        &mut sink,
+                        frames,
+                    );
                 } else {
-                    use minios_kernel::user::syscall::ControlSink as _;
-                    let _ = sink.frame(minios_abi::control::FrameKind::Exit, &code.to_le_bytes());
+                    // 既存の単一image契約ではGuestErrorと異常shutdownを維持する。
+                    failed += 1;
+                    crate::console::emergency_print(format_args!(
+                        "MiniOS user trap: scause={scause:#018x} stval={stval:#018x}\r\n"
+                    ));
+                    complete_process(&mut table, pid, None, multi, &mut sink, frames);
                 }
-                reclaim_process_slot(&mut table, pid, frames);
             }
             (
                 RunExit::ReturnToKernel,
-                USER_RUN_OUTCOME_FATAL_TRAP
-                | USER_RUN_OUTCOME_SINK_FAILURE
-                | USER_RUN_OUTCOME_SOURCE_FAILURE,
+                USER_RUN_OUTCOME_SINK_FAILURE | USER_RUN_OUTCOME_SOURCE_FAILURE,
             ) => {
                 failed += 1;
-                // statusを持たない異常終了は台帳へ記録せず、waiterだけを
-                // 解放する。再dispatchした`waitpid`は`ECHILD`を得る。
-                table.wake_on_exit(pid);
-                reclaim_process_slot(&mut table, pid, frames);
+                complete_process(&mut table, pid, None, multi, &mut sink, frames);
             }
             // `ReturnToKernel`以外の戻りや、handlerがoutcomeを記録しないまま
             // 戻った場合は実装不変条件の破綻であり、静かに続行しない。

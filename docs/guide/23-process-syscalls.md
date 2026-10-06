@@ -69,6 +69,12 @@ pipe端だけはcopy先も同じpipe idを指すため、bufferは親子で共�
 
 ### waitpidと終了台帳
 
+manifest v2で複数のimageを実行する場合、ユーザー命令のfatal trapは対象タスクだけを終了code `70`（guestのpanicと同じ）で終了させます。
+`ProcExit`で通知し、終了台帳への記録、待機タスクの起床、ページとfdの回収を行うため、`waitpid`は`70`を一度だけ返します。
+単一imageのfatal trapは従来どおり`GuestError`とpayload全体の異常終了になります。kernelの入出力・timerの失敗も全体の失敗として扱います。
+`cargo xtask test proc-fault`は不正命令と未割り当てアドレスへのstore、待機後の`ECHILD`、正常タスクの継続とメモリ回収、および単一imageの異常終了をQEMUで確認します。
+
+
 processが`exit`すると、run loopは`ProcessTable::record_exit`で`(pid, code)`を台帳へ記録し、`wake_on_exit`で待っているprocessを起こしてから、そのprocessを回収します。
 台帳の上限は`MAX_PROCS`件で、超えると最古の記録を捨てます。
 
