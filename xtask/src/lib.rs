@@ -4,6 +4,7 @@ pub mod cli;
 pub mod disk;
 pub mod docs;
 pub mod guest;
+mod imem;
 pub mod qemu;
 pub mod tools;
 
@@ -15,6 +16,7 @@ use cli::{Command, TestFilter};
 pub enum XtaskError {
     Bundle(bundle::BundleError),
     Cargo(cargo::CargoError),
+    Imem(String),
     Docs(docs::DocsError),
     Qemu(qemu::QemuError),
     Tool(tools::ToolError),
@@ -25,6 +27,7 @@ impl fmt::Display for XtaskError {
         match self {
             Self::Bundle(error) => error.fmt(formatter),
             Self::Cargo(error) => error.fmt(formatter),
+            Self::Imem(error) => formatter.write_str(error),
             Self::Docs(error) => error.fmt(formatter),
             Self::Qemu(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
@@ -406,6 +409,19 @@ fn run_phases<E>(
 
 fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
     if let Some(args) = phase.cargo_args() {
+        if phase == Phase::BuildKernelRv32 {
+            // 環境のCARGO_TARGET_DIRにより古いELFを読むことを防ぐ。
+            let target = workspace_root().join("target");
+            let target_text = target.to_string_lossy();
+            let mut build_args = args.to_vec();
+            build_args.extend(["--target-dir", &target_text]);
+            let mut transcript = cargo::run(&build_args).map_err(XtaskError::Cargo)?;
+            transcript.push_str(
+                &imem::report(&target.join("riscv32im-unknown-none-elf/release/minios-kernel"))
+                    .map_err(XtaskError::Imem)?,
+            );
+            return Ok(transcript);
+        }
         return cargo::run(args).map_err(XtaskError::Cargo);
     }
     let workspace = workspace_root();
