@@ -205,3 +205,17 @@ path = "src/bin/echo.rs"
 test = false
 bench = false
 doctest = false
+
+[[bin]]
+name = "minios-guest-proc-fault"
+path = "src/bin/proc_fault.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-proc-fault-wait"
+path = "src/bin/proc_fault_wait.rs"
+test = false
+bench = false
+doctest = false
