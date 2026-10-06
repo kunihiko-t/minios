@@ -11,6 +11,10 @@ MEMORY
   DMEM (rwx) : ORIGIN = 0x80000000, LENGTH = 16192
 }
 
+/* gateが実際のリンカー容量をELFから参照する。配置は変えない。 */
+__imem_origin = ORIGIN(IMEM);
+__imem_capacity = LENGTH(IMEM);
+
 SECTIONS
 {
   .text : ALIGN(4)
