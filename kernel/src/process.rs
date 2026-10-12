@@ -85,6 +85,11 @@ pub enum ProcessState {
     /// syscallは0を書いてecallの次へ進めてあるため、早く起こすと短い
     /// sleepになる。そのためstdin到着の`wake_all_blocked`では起こさない。
     BlockedUntil(u64),
+    /// `kill`が終了を要求した。dispatchの対象にならず、run loopが
+    /// `complete_process`で`EXIT_CODE_KILLED`を台帳へ記録しframeを回収する。
+    /// tableから`take`しないまま残すのは、trap窓が他processへのraw pointerを
+    /// 持つ間に`Vec::remove`で要素をずらさないためである。
+    Killed,
 }
 
 /// `open`/`create`がprocessへ割り当てたfile descriptor 1個。
@@ -564,6 +569,20 @@ impl Process {
         self.state = ProcessState::BlockedUntil(deadline);
     }
 
+    /// `kill`の終了要求を記録する。どのblocked状態からも遷移でき、
+    /// `Runnable`からの遷移はそのまま回収待ちとなる。二度目の`kill`は
+    /// 状態が`Killed`のまま変わらないためidempotentである。
+    /// trap窓のtable経由でのみ呼ばれる。
+    pub fn mark_killed(&mut self) {
+        self.state = ProcessState::Killed;
+    }
+
+    /// `kill`済みでrun loopの回収を待つなら`true`。dispatch対象外の
+    /// 保証は`pick_next`が`is_runnable`だけを選ぶことに委ねる。
+    pub const fn is_killed(&self) -> bool {
+        matches!(self.state, ProcessState::Killed)
+    }
+
     /// fd tableのsnapshot。`spawn`がchildの初期tableとして引き継ぐため
     /// trap窓から呼ばれる。copyなのでcaller側tableへの影響はない。
     pub const fn file_fds_snapshot(&self) -> FileFdTable {
@@ -896,9 +915,14 @@ impl ProcessTable {
     /// pid待ちとpipe待ちのprocessも起こされるが、再dispatchで条件未達なら再び
     /// blockする（疑似wakeは許容する）。sleep中のprocessはecallを
     /// やり直さないため疑似wakeが短いsleepになってしまい、対象から外す。
+    /// `Killed`のprocessは起こさない。起こせばrun loopの回収を逃れて
+    /// zombieとして走り続けてしまうためである。
     pub fn wake_all_blocked(&mut self) {
         for process in self.procs.iter_mut() {
-            if !process.is_runnable() && !matches!(process.state, ProcessState::BlockedUntil(_)) {
+            if !process.is_runnable()
+                && !process.is_killed()
+                && !matches!(process.state, ProcessState::BlockedUntil(_))
+            {
                 process.wake();
             }
         }
@@ -1071,6 +1095,35 @@ impl ProcessTable {
             .expect("caller pid is live")
             .block_on_pid(target);
         Ok(())
+    }
+
+    /// `kill`の対象検査とmark。`ECHILD`は対象不在、`EINVAL`は自分自身
+    /// （終了は`exit`の役目）。`Killed`済みの対象への再`kill`はtableに
+    /// 残る間は成功とする（冪等）。回収はrun loop側がtrap窓の外で行い、
+    /// ここではmarkだけを行う。`waitpid`対象の`BlockedOnPid`やpipeの
+    /// `BlockedOnPipe`は`wake_on_exit`が起こすため、ここでwaiterを
+    /// 触る必要はない。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn mark_killed(&mut self, caller: usize, target: usize) -> Result<(), isize> {
+        use minios_abi::syscall::{ECHILD, EINVAL};
+
+        if caller == target {
+            return Err(EINVAL);
+        }
+        let Some(process) = self.get_mut(target) else {
+            return Err(ECHILD);
+        };
+        process.mark_killed();
+        Ok(())
+    }
+
+    /// `Killed`状態のprocessのpidを順に返す。run loopが回収対象を
+    /// 集めるための読み取りで、`take`はしない。
+    pub fn killed_pids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.procs
+            .iter()
+            .filter(|process| process.is_killed())
+            .map(Process::pid)
     }
 
     /// `(dir_cluster, dir_index)`のdir entryを指すfdを全processから閉じる。
@@ -1686,6 +1739,72 @@ mod tests {
         assert_eq!(table.block_waitpid(0, 0), Err(ECHILD));
         assert_eq!(table.block_waitpid(0, 99), Err(ECHILD));
         assert_eq!(table.get(0).unwrap().waiting_on(), Some(1));
+    }
+
+    // Catches kill taking the slot out inside the trap window (invalidating
+    // CURRENT_PROC-style pointers) or leaving it pickable: mark_killed must
+    // only flag the victim, keep it in the table for the run loop to drain,
+    // and reject self-kills and unknown pids.
+    #[test]
+    fn kill_marks_the_victim_and_reports_errno_rules() {
+        use minios_abi::syscall::{ECHILD, EINVAL};
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        table
+            .insert(fixture.spawn("killer"))
+            .expect("insert killer");
+        table
+            .insert(fixture.spawn("victim"))
+            .expect("insert victim");
+
+        // 自分自身はEINVAL（exitの役目）、不在pidはECHILD。
+        assert_eq!(table.mark_killed(0, 0), Err(EINVAL));
+        assert_eq!(table.mark_killed(0, 99), Err(ECHILD));
+
+        // 受理されたkillはmarkだけを残し、対象はtableに残る。
+        assert_eq!(table.mark_killed(0, 1), Ok(()));
+        assert!(table.get(1).unwrap().is_killed());
+        // 回収前の再killは冪等に成功する。
+        assert_eq!(table.mark_killed(0, 1), Ok(()));
+        assert!(table.get(1).is_some());
+
+        // killed processはpick対象外で、run loopはkilled_pidsで回収対象を得る。
+        assert_eq!(table.killed_pids().collect::<Vec<_>>(), [1]);
+        assert_eq!(table.pick_next(), Some(0));
+    }
+
+    // Catches a blocked victim surviving its kill: any wait state must yield
+    // to Killed so stdin/pid/pipe/timer waiters can all be terminated.
+    #[test]
+    fn kill_terminates_blocked_processes() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        table
+            .insert(fixture.spawn("killer"))
+            .expect("insert killer");
+        table
+            .insert(fixture.spawn("reader"))
+            .expect("insert reader");
+        table
+            .insert(fixture.spawn("waiter"))
+            .expect("insert waiter");
+
+        table.get_mut(1).unwrap().block_on_stdin();
+        table.get_mut(2).unwrap().block_until(100);
+
+        assert_eq!(table.mark_killed(0, 1), Ok(()));
+        assert_eq!(table.mark_killed(0, 2), Ok(()));
+        assert_eq!(table.killed_pids().count(), 2);
+        assert_eq!(table.pick_next(), Some(0));
+
+        // stdin到着やsleep deadlineが重なってもKilledは起きない。
+        table.wake_all_blocked();
+        table.wake_sleepers(100);
+        assert_eq!(table.killed_pids().count(), 2);
+        assert_eq!(table.pick_next(), Some(0));
     }
 
     // Catches a waiter never being released: when the target exits,

@@ -195,6 +195,14 @@ pub trait ControlSource {
         Err(ENOSYS)
     }
 
+    /// `pid`のprocessへ終了を要求する。`Ok(())`は要求を受理したことで、
+    /// 実際の回収と`waitpid`への終了code通知はrun loop側の契約である。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn kill(&mut self, pid: usize) -> Result<(), isize> {
+        let _ = pid;
+        Err(ENOSYS)
+    }
+
     /// `path`のfileまたはdirectoryのmetadataを返す。`Err`はそのまま
     /// `a0`へ返すerrnoである。default実装は`ENOSYS`。
     fn stat(&mut self, path: &str) -> Result<Stat, isize> {
@@ -399,6 +407,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         SyscallFlow::Yield
     } else if number == SyscallNumber::Dup2 as usize {
         dispatch_dup2(context, source)
+    } else if number == SyscallNumber::Kill as usize {
+        dispatch_kill(context, source)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -746,6 +756,25 @@ fn dispatch_waitpid<E, R: ControlSource>(
         Ok(None) => {
             context.set_sepc(context.sepc() - 4);
             SyscallFlow::Blocked
+        }
+        Err(errno) => {
+            context.set_register(10, errno as usize);
+            SyscallFlow::Resume
+        }
+    }
+}
+
+/// `kill` (`a0=pid`)。`Ok`は0を、`Err(errno)`は`ECHILD`/`EINVAL`等を
+/// そのまま`a0`へ返し、呼び出しprocessはblockせず継続する。
+/// 対象の回収自体はrun loop側が行う。
+fn dispatch_kill<E, R: ControlSource>(
+    context: &mut UserContext,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    match source.kill(context.register(10)) {
+        Ok(()) => {
+            context.set_register(10, 0);
+            SyscallFlow::Resume
         }
         Err(errno) => {
             context.set_register(10, errno as usize);
@@ -1252,6 +1281,7 @@ mod tests {
     const GETPID_NUMBER: usize = SyscallNumber::Getpid as usize;
     const SPAWN_NUMBER: usize = SyscallNumber::Spawn as usize;
     const WAITPID_NUMBER: usize = SyscallNumber::Waitpid as usize;
+    const KILL_NUMBER: usize = SyscallNumber::Kill as usize;
     const STAT_NUMBER: usize = SyscallNumber::Stat as usize;
     const FSTAT_NUMBER: usize = SyscallNumber::Fstat as usize;
     const READDIR_NUMBER: usize = SyscallNumber::Readdir as usize;
@@ -1534,6 +1564,9 @@ mod tests {
         waitpids: usize,
         seen_wait_pid: Option<usize>,
         waitpid_result: Result<Option<u32>, isize>,
+        kills: usize,
+        seen_kill_pid: Option<usize>,
+        kill_result: Result<(), isize>,
         stats: usize,
         stat_result: Result<Stat, isize>,
         fstats: usize,
@@ -1580,6 +1613,9 @@ mod tests {
                 waitpids: 0,
                 seen_wait_pid: None,
                 waitpid_result: Ok(Some(42)),
+                kills: 0,
+                seen_kill_pid: None,
+                kill_result: Ok(()),
                 stats: 0,
                 stat_result: Ok(Stat {
                     size: 18,
@@ -1724,6 +1760,12 @@ mod tests {
             self.waitpids += 1;
             self.seen_wait_pid = Some(pid);
             self.waitpid_result
+        }
+
+        fn kill(&mut self, pid: usize) -> Result<(), isize> {
+            self.kills += 1;
+            self.seen_kill_pid = Some(pid);
+            self.kill_result
         }
 
         fn stat(&mut self, path: &str) -> Result<Stat, isize> {
@@ -3584,6 +3626,59 @@ mod tests {
             &mut source,
             &mut scratch(),
         );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ENOSYS as usize);
+    }
+
+    // Catches kill dropping the result or resuming differently: an accepted
+    // request must write 0 to a0, pass a0's pid to the source once, and let
+    // the caller keep running without blocking.
+    #[test]
+    fn kill_returns_zero_and_keeps_the_caller_running() {
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        let (context, flow) =
+            dispatch_fixture(KILL_NUMBER, 3, 0, 0, &mut sink, &mut source, &mut scratch());
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), 0);
+        assert_eq!(source.kills, 1);
+        assert_eq!(source.seen_kill_pid, Some(3));
+    }
+
+    // Catches kill swallowing the source errno: ECHILD/EINVAL must pass
+    // through to a0 unchanged.
+    #[test]
+    fn kill_passes_the_source_errno_through() {
+        use minios_abi::syscall::ECHILD;
+
+        let mut sink = FakeSink::default();
+        let mut source = FileSource::serving(b"");
+        source.kill_result = Err(ECHILD);
+        let (context, flow) = dispatch_fixture(
+            KILL_NUMBER,
+            99,
+            0,
+            0,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), ECHILD as usize);
+        assert_eq!(source.seen_kill_pid, Some(99));
+    }
+
+    // Catches the default ControlSource::kill leaking a success: without a
+    // process context the guest must see ENOSYS.
+    #[test]
+    fn kill_without_process_context_returns_enosys() {
+        let mut sink = FakeSink::default();
+        let mut source = FakeSource::scripted(b"stdin only");
+        let (context, flow) =
+            dispatch_fixture(KILL_NUMBER, 1, 0, 0, &mut sink, &mut source, &mut scratch());
 
         assert_eq!(flow, SyscallFlow::Resume);
         assert_eq!(context.register(10), ENOSYS as usize);

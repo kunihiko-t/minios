@@ -181,6 +181,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 25 | `sleep` | `a0=milliseconds` | 少なくとも`a0`のmillisecondが経過してから0を返す。待つ間は他processが走る。0は`yield`と同じ |
 | 26 | `yield` | なし | 残りのtime sliceを手放して次のrunnable processへ順番を回し、再び選ばれると0を返す |
 | 27 | `dup2` | `a0=oldfd`、`a1=newfd` | `newfd`を閉じてから`oldfd`と同じentryを指させ、`newfd`を返す。`oldfd == newfd`は何も変えずに`newfd`を返す。負のerrnoは`EBADF` |
+| 28 | `kill` | `a0=pid` | `pid`のprocessの終了を要求し、0を返す。対象は再びdispatchされずに回収され、終了codeは`EXIT_CODE_KILLED`（75、`'K'`）として`waitpid`と`ProcExit` frameへ記録される。tableに残る間の再`kill`も0を返す。負のerrnoは`ECHILD`（対象不在）/`EINVAL`（自分自身） |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -231,6 +232,8 @@ kernelはprocessを作る前にentry配列と全文字列をkernel内へcopyし�
 `argc`が0の場合は`a2`を読まず、childは従来どおりpathのbasename（`DOCS/CHILD.ELF`なら`CHILD.ELF`）だけを`argv[0]`に持つ`argc=1`で起動します。
 argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたため、この規約で挙動は変わりません。
 `spawn`が失敗した場合、途中まで確保したframe・address space・imageはすべて解放され、新しいprocessは登録されません。pathがfileを指さない（`ENOENT`）、directoryを指す（`EISDIR`）、ELFとして受理できない（`EINVAL`）、process tableが満杯または資源が足りない（`ENOMEM`）場合がerrnoです。
+`kill`は`a0`のpidを持つprocessへ終了を要求し、成功時は0を返します。呼び出し側はblockせず、対象は`Killed`としてmarkされた後run loopが回収し、終了code`75`を`waitpid`から回収できます。対象がstdin・pid・pipe・timer待ちでも回収されるため、永久にblockしたprocessも終了できます。自分自身への`kill`は`exit`の役目として`EINVAL`、存在しないpidは`ECHILD`です。
+
 `waitpid`は`a0`のpidを持つprocessの終了codeを返します。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
 対象が自分自身・存在しない・既にreap済み・異常終了でstatusを持たない場合は`ECHILD`、wait連鎖が呼び出し側へ戻るcycleは`EINVAL`を返します。複数のprocessが同じpidを待つこともでき、終了時に全員がwakeしますが、codeを回収できるのは先に再実行された1つだけで、残りは`ECHILD`を受け取ります。kernelは終了codeをprocess数上限分だけ台帳へ保持し、超過分は最古からdropします。
 
@@ -266,7 +269,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-2` | `ENOENT` | fileが存在しない |
 | `-5` | `EIO` | storageの読み取りまたはfilesystem構造の失敗 |
 | `-9` | `EBADF` | fd tableの範囲外のfile descriptor、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`/`dup2`、範囲外の`newfd`への`dup2`、console入力への`write`とconsole出力への`read`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作 |
-| `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない |
+| `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない、`kill`の対象が存在しない |
 | `-11` | `EAGAIN` | pipeの`read`/`write`が条件未達でcallerをblockへ移したことを示すkernel内部のsignal。dispatchがecallを巻き戻して再実行するためguestへは返らない |
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足、同時にliveなpipe本数（4本）の枯渇、`sbrk`の上限超過やframe不足 |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
@@ -274,12 +277,12 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-19` | `ENODEV` | block deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
-| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement |
+| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement、`kill`の対象が自分自身 |
 | `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdとconsole entryへの`lseek`/`pread`/`pwrite` |
 | `-32` | `EPIPE` | read端がすべて閉じたpipeへの`write` |
-| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe`/`sbrk`/`sleep`/`dup2` |
+| `-38` | `ENOSYS` | 未知のsyscall番号、storageを持たない経路でのfile操作、process contextを持たない経路での`getpid`/`spawn`/`waitpid`/`fstat`/`pipe`/`sbrk`/`sleep`/`dup2`/`kill` |
 | `-39` | `ENOTEMPTY` | `rmdir`の対象directoryに`.`と`..`以外のentryが残っている |
 
 ## 初期スタック ABI v1

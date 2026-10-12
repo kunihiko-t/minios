@@ -219,3 +219,17 @@ path = "src/bin/proc_fault_wait.rs"
 test = false
 bench = false
 doctest = false
+
+[[bin]]
+name = "minios-guest-proc-kill"
+path = "src/bin/proc_kill.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-proc-kill-wait"
+path = "src/bin/proc_kill_wait.rs"
+test = false
+bench = false
+doctest = false
