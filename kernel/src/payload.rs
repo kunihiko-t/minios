@@ -221,19 +221,6 @@ pub(crate) fn run_boot_payload(
                 // timer割り込みだけが起床源となる。
                 unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
             }
-            #[cfg(feature = "qemu-test-irq-uart")]
-            {
-                // stdin待ちの起床が割り込み経由で起きたことの観測marker。
-                // claim回数が0のままbyteだけが見えた場合はpolling経由であり、
-                // その場合はmarkerを出さずtest側のtimeoutで検出する。
-                static IRQ_UART_MARKED: core::sync::atomic::AtomicBool =
-                    core::sync::atomic::AtomicBool::new(false);
-                if crate::drivers::plic::uart_irq_claims() > 0
-                    && !IRQ_UART_MARKED.swap(true, core::sync::atomic::Ordering::Relaxed)
-                {
-                    crate::println!("[MINIOS_TEST] irq-uart: ok");
-                }
-            }
             if time::interrupt_pending()
                 && let Err(error) = time::handle_interrupt()
             {
@@ -352,6 +339,16 @@ pub(crate) fn run_boot_payload(
         close_file_storage();
     }
 
+    #[cfg(feature = "qemu-test-irq-uart")]
+    {
+        // UART受信byteがPLIC claim経由で観測されたことのmarker。評価点を
+        // 終了時に置くのは、入力がreaderのblock前にstagingへ届いたrunでは
+        // blocked-loop自体に入らず評価がskipされるため。byte供給経路は全て
+        // claim-firstなので、受信があればclaimは必ず観測される。
+        if crate::drivers::plic::uart_irq_claims() > 0 {
+            crate::println!("[MINIOS_TEST] irq-uart: ok");
+        }
+    }
     #[cfg(feature = "qemu-test-irq-blk")]
     {
         // disk I/Oの完了がpollingではなくPLIC claim経由だったことの観測
