@@ -6,15 +6,25 @@ struct Usage {
     capacity: u32,
 }
 
+/// 残量がこの値を割るとphaseを失敗させる下限。linkで落ちる寸前まで共有codeが
+/// 増えても気付けないため、余裕が尽きる前にgateで止める。
+const MIN_IMEM_REMAINING: u32 = 4096;
+
 pub(crate) fn report(path: &std::path::Path) -> Result<String, String> {
     let elf = std::fs::read(path)
         .map_err(|error| format!("RV32 IMEM: {}を読めません: {error}", path.display()))?;
     let usage = inspect(&elf).map_err(|error| format!("RV32 IMEM: {}: {error}", path.display()))?;
+    let remaining = usage.capacity - usage.used;
+    if remaining < MIN_IMEM_REMAINING {
+        return Err(format!(
+            "RV32 IMEM: 残量 {remaining} byte が下限 {MIN_IMEM_REMAINING} byte を下回っています（使用量 {} / 容量 {}）。\
+             RV32では不要な経路をcfgで外すか、共有codeの削減が必要です",
+            usage.used, usage.capacity
+        ));
+    }
     Ok(format!(
-        "RV32 IMEM: 使用量 {} byte / 容量 {} byte、残量 {} byte（ロード領域の隙間を含む）\n",
-        usage.used,
-        usage.capacity,
-        usage.capacity - usage.used
+        "RV32 IMEM: 使用量 {} byte / 容量 {} byte、残量 {remaining} byte（ロード領域の隙間を含む、下限 {MIN_IMEM_REMAINING} byte）\n",
+        usage.used, usage.capacity
     ))
 }
 
@@ -187,6 +197,21 @@ mod tests {
         put32(&mut elf, 336, 32);
         put16(&mut elf, 346, 0xfff1);
         elf
+    }
+    #[test]
+    fn report_fails_below_the_remaining_floor_and_passes_above_it() {
+        let path = std::env::temp_dir().join(format!("minios-imem-test-{}", std::process::id()));
+        let mut elf = fixture();
+        put32(&mut elf, 336, MIN_IMEM_REMAINING - 1);
+        std::fs::write(&path, &elf).unwrap();
+        let error = report(&path).unwrap_err();
+        assert!(error.contains("下限"), "{error}");
+        let mut elf = fixture();
+        put32(&mut elf, 336, MIN_IMEM_REMAINING + 16);
+        std::fs::write(&path, &elf).unwrap();
+        let message = report(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(message.contains("下限"), "{message}");
     }
     #[test]
     fn counts_data_load_gaps_and_ignores_bss() {
