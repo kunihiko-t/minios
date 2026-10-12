@@ -2017,6 +2017,28 @@ unsafe fn wait_pid(target: usize) -> Result<Option<u32>, isize> {
     table.block_waitpid(caller, target).map(|()| None)
 }
 
+/// `kill`のtable側処理。`target`を`Killed`へmarkして`Ok(())`を返し、
+/// 実際の回収と`waitpid`への終了code通知はrun loopが行う。`ECHILD`は
+/// 対象不在、`EINVAL`は自分自身、process contextがなければ`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。`CURRENT_PROC`やdispatch中の
+/// 他processへのpointerが`Vec::remove`でずれないよう、ここではmark
+/// だけを行い`take`しない。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn kill_pid(target: usize) -> Result<(), isize> {
+    let Some(caller) = (unsafe { current_pid() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    let Some(table) = (unsafe { table.as_mut() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    table.mark_killed(caller, target)
+}
+
 /// 現在processのimageを`elf`で置き替える (`exec`)。kernel stackとfd
 /// tableは引き継ぎ、成功時は旧imageをprocessの`retired_image`へ退避して
 /// 新imageの初期contextを返す。旧imageの解放はkernel satpへ戻った後の
@@ -2940,6 +2962,21 @@ fn run_boot_payload(
         }
         // deadlineに達したsleep中processを選対象へ戻す。
         table.wake_sleepers(time::ticks());
+        // `kill`がmarkしたprocessをdispatchの外で回収する。trap窓の内側で
+        // `take`すると`Vec::remove`で他processへのpointerがずれるため、
+        // killは`Killed`のmarkだけを残して終了code`EXIT_CODE_KILLED`の
+        // 台帳記録・frame送信・waiter起床・resource回収をここへ委ねる。
+        let killed = table.killed_pids().collect::<alloc::vec::Vec<usize>>();
+        for killed_pid in killed {
+            complete_process(
+                &mut table,
+                killed_pid,
+                Some(minios_abi::syscall::EXIT_CODE_KILLED),
+                multi,
+                &mut sink,
+                frames,
+            );
+        }
         let Some(pid) = table.pick_next() else {
             // 占有slotが残るのに選べない＝全processがstdinかsleepなどで待っている。
             // ここはS-mode割り込みを遮断したままなので、timer割り込みは

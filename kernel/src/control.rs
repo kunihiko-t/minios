@@ -264,6 +264,15 @@ impl ControlSource for UartControlSource<'_> {
         unsafe { crate::wait_pid(pid) }
     }
 
+    /// guestの`kill`をprocess tableへ委譲する。`Err`は`ECHILD`/`EINVAL`
+    /// `ENOSYS`である。対象の回収と`waitpid`への終了code通知は
+    /// run loop側が行う。
+    #[cfg(target_arch = "riscv64")]
+    fn kill(&mut self, pid: usize) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::kill_pid(pid) }
+    }
+
     /// guestの`exec`をstorage sessionと現在processへ委譲する。`path`の
     /// fileをELFとして読み込み、basenameをprocess名として呼び出し
     /// processのimageを置き替える。成功時は新imageの初期contextを返し、

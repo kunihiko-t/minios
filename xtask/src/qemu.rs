@@ -179,6 +179,7 @@ pub enum TestKind {
     SchedIo,
     SchedIoPartial,
     ProcFault,
+    ProcKill,
     Shell,
 }
 
@@ -249,6 +250,7 @@ impl TestKind {
                 unreachable!("the sched-io-partial test boots the normal kernel")
             }
             Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
+            Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -325,6 +327,7 @@ impl TestKind {
                 unreachable!("the sched-io-partial test verifies a split frame's control frames")
             }
             Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
+            Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -928,6 +931,45 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
         bundle.remove();
         return verify_proc_fault_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::ProcKill {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let waiter = built_bin_elf_bytes("minios-guest-proc-kill-wait")?;
+        let victim = built_bin_elf_bytes(crate::guest::GUEST_SCHED_R)?;
+        let killer = built_bin_elf_bytes("minios-guest-proc-kill")?;
+        let images = [
+            crate::bundle::BundleImage {
+                name: "waiter",
+                args: &[],
+                elf: &waiter,
+            },
+            crate::bundle::BundleImage {
+                name: "blocked1",
+                args: &[],
+                elf: &victim,
+            },
+            crate::bundle::BundleImage {
+                name: "blocked2",
+                args: &[],
+                elf: &victim,
+            },
+            crate::bundle::BundleImage {
+                name: "killer",
+                args: &[],
+                elf: &killer,
+            },
+        ];
+        let bytes =
+            crate::bundle::build_multi_bundle(&images).map_err(|error| QemuError::Bundle {
+                stage: "proc-kill bundle",
+                error: error.to_string(),
+            })?;
+        let bundle = PayloadBundle::create_with(bytes.bytes().to_vec())?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_proc_kill_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Sched {
@@ -2350,6 +2392,66 @@ fn verify_proc_fault_result(
             .windows(b"fault waitpid verified\n".len())
             .any(|window| window == b"fault waitpid verified\n")
         || !stdout.windows(3).any(|window| window == b"b3\n")
+    {
+        return Err(invalid());
+    }
+    Ok(output.to_owned())
+}
+
+/// kill二件の終了通知、waitpidの回収、errno契約と全frame回収を検証する。
+fn verify_proc_kill_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let invalid = || QemuError::PayloadFrames {
+        command: command.to_owned(),
+        output: output.to_owned(),
+    };
+    let frames = collect_payload_frames(output.as_bytes()).ok_or_else(invalid)?;
+    let mut exits = Vec::new();
+    let mut stdout = Vec::new();
+    let mut recovered = false;
+    for (kind, payload) in &frames {
+        match kind {
+            FrameKind::Ready => {}
+            FrameKind::Stdout => stdout.extend_from_slice(payload),
+            FrameKind::ProcExit => {
+                let status = ProcExitPayload::decode(payload).map_err(|_| invalid())?;
+                exits.push((status.pid, status.code));
+            }
+            FrameKind::Diagnostic => {
+                let line = String::from_utf8_lossy(payload);
+                recovered |= line.starts_with("\r\nMiniOS payload: ok processes=4 switches=");
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    let original = exits.clone();
+    exits.sort_unstable();
+    let waiter = original.iter().position(|exit| *exit == (0, 42));
+    let waited_before_exit = [1, 2].iter().all(|pid| {
+        matches!(
+            (original.iter().position(|exit| *exit == (*pid, 75)), waiter),
+            (Some(killed), Some(waiter)) if killed < waiter
+        )
+    });
+    if exits != [(0, 42), (1, 75), (2, 75), (3, 7)]
+        || !recovered
+        || !waited_before_exit
+        || !stdout
+            .windows(b"kill waitpid verified\n".len())
+            .any(|window| window == b"kill waitpid verified\n")
+        || !stdout
+            .windows(b"kill syscalls verified\n".len())
+            .any(|window| window == b"kill syscalls verified\n")
     {
         return Err(invalid());
     }

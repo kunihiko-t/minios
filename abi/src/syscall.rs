@@ -60,6 +60,11 @@ pub enum SyscallNumber {
     /// `a0`が未割当、またはどちらかがfd tableの範囲外なら`EBADF`。
     /// `a0 == a1`は何も変えずに`a1`を返す。fd 0/1/2も対象になる。
     Dup2 = 27,
+    /// `a0`のpidを持つlive processの終了を要求し、0を返す。対象は
+    /// scheduleされずに回収され、終了codeは`EXIT_CODE_KILLED`（75、
+    /// `'K'`）として`waitpid`から回収できる。対象不在は`ECHILD`、
+    /// 自分自身（`exit`を使うこと）は`EINVAL`。
+    Kill = 28,
 }
 
 pub const STDIN: usize = 0;
@@ -193,6 +198,11 @@ pub const EPIPE: isize = -32;
 pub const ENOSYS: isize = -38;
 pub const ENOTEMPTY: isize = -39;
 
+/// `kill`で終了させたprocessが`waitpid`と`PROC_EXIT` frameへ記録する
+/// 終了code。fatal trapの`USER_FAULT_EXIT_CODE` (70、`'F'`) と同じく
+/// 原因を一字で表す約束で、guestの`exit`が取りうる値と区別できる。
+pub const EXIT_CODE_KILLED: u32 = 75;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +236,7 @@ mod tests {
         assert_eq!(SyscallNumber::Sleep as usize, 25);
         assert_eq!(SyscallNumber::Yield as usize, 26);
         assert_eq!(SyscallNumber::Dup2 as usize, 27);
+        assert_eq!(SyscallNumber::Kill as usize, 28);
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);

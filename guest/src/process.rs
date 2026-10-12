@@ -32,6 +32,12 @@ pub fn wait(pid: Pid) -> Result<i32> {
     check(sys::sys_waitpid(pid)).map(|code| code as i32)
 }
 
+/// `pid`のprocessへ終了を要求する。回収されたprocessは`wait`から
+/// `EXIT_CODE_KILLED` (75) として回収できる。
+pub fn kill(pid: Pid) -> Result<()> {
+    check(sys::sys_kill(pid)).map(|_| ())
+}
+
 /// 呼び出しprocessのimageを`path`のELFで置き換える。成功時は戻らないため、
 /// 戻り値は常に失敗のerrnoである。
 pub fn exec(path: impl AsRef<[u8]>) -> Errno {

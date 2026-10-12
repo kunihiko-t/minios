@@ -1,9 +1,10 @@
-# 23. spawn、waitpid、exec
+# 23. spawn、waitpid、exec、kill
 
 ## 学習目標
 
 `spawn`がFAT32上のELFを読み込み、単調に採番したpidでprocess tableへ登録する流れを説明できるようになります。
 `waitpid`が終了codeの台帳と`BlockedOnPid`を使い、対象の終了まで呼び出し側を止める仕組みを追います。
+`kill`が対象を`Killed`へmarkし、run loopがdispatchの外で回収する形で、trap窓が生きているpointerを壊さずにprocessを終了できることを確認します。
 `exec`がpid、kernel trap stack、fd tableを保ったままimageだけを差し替える手順と、旧imageの解放を遅らせる理由を確認します。
 
 ## 背景
@@ -20,7 +21,7 @@ UNIXでは`fork`でaddress spaceを複製してから`exec`で置き換えます
 
 ### 番号とdispatch
 
-[`dispatch_syscall`](../../kernel/src/user/syscall.rs)は`a7`の番号（[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`SyscallNumber::Getpid`、`Spawn`、`Waitpid`、`Exec`）を`dispatch_getpid`、`dispatch_spawn`、`dispatch_waitpid`、`dispatch_exec`へ振り分けます。
+[`dispatch_syscall`](../../kernel/src/user/syscall.rs)は`a7`の番号（[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`SyscallNumber::Getpid`、`Spawn`、`Waitpid`、`Exec`、`Kill`）を`dispatch_getpid`、`dispatch_spawn`、`dispatch_waitpid`、`dispatch_exec`、`dispatch_kill`へ振り分けます。
 
 `dispatch_spawn`と`dispatch_exec`は、process生成やimage差し替えの前に`copy_user_path`でpathを検証します。
 長さ0か`MAX_PATH_LEN`（256）超は`EINVAL`、読めないuser rangeは`EFAULT`、UTF-8でないpathは`EINVAL`です。
@@ -86,6 +87,17 @@ blockした場合、`dispatch_waitpid`は`sepc`を4 byte戻して`SyscallFlow::B
 対象が終了して`wake_on_exit`がprocessを`Runnable`へ戻すと、同じecallが再実行され、今度は台帳からcodeを得ます。
 run loopは`Blocked`を受けると`block_on_stdin`を呼びますが、この関数はrunnableのときだけ遷移するため、`BlockedOnPid`は上書きされません。
 MiniOSのprocessには親子関係の記録がなく、liveなpidであれば自分以外のどのprocessでも待てます。
+
+### killと`Killed` mark
+
+`kill(pid)`は対象の`ProcessState`を`Killed`へ書き換えるだけで戻り、呼び出し側はblockしません。
+自分自身への`kill`は`exit`の役目として`EINVAL`、存在しないpidは`ECHILD`、tableに残る間の再`kill`は冪等に0を返します。
+
+trap窓の内側で`Vec::remove`すれば要素がずれて、dispatch中のprocessを指す`CURRENT_PROC`やfd走査中のpointerが別要素を指します。
+そのため`ProcessTable::mark_killed`はmarkだけを行い、run loopは各巡回の先頭で`killed_pids`を集めてから`complete_process`を呼びます。
+回収は`exit`やfatal trapと同じ経路を通るため、終了code`EXIT_CODE_KILLED`（75、`'K'`）の台帳記録、`ProcExit` frame、`wake_on_exit`での`BlockedOnPid`とpipe waiterの起床、pageとfdの解放がすべて既存どおりに働きます。
+`Killed`は`is_runnable`を満たさないためpick対象外であり、stdin・pid・pipe・timer待ちのprocessでも回収できます。
+`cargo xtask test proc-kill`は、stdin待ちで止まった二つのvictimへのkill、waitpidでのcode75の回収と`ECHILD`、errno契約（self`EINVAL`・不在`ECHILD`・再kill`Ok`）をQEMUで確認します。
 
 ### exec
 
