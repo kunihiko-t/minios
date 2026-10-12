@@ -34,7 +34,8 @@ impl MappingRange {
 pub struct KernelMapPlan {
     /// 0..7は既定mapping、7以降はdevice MMIOの1page mapping
     /// (`with_device_pages`が順に埋める。空rangeはmappingを生まない)。
-    ranges: [MappingRange; 7 + VIRTIO_MMIO_MAX],
+    /// 末尾1枠は`with_plic_page`が使うPLIC専用slotである。
+    ranges: [MappingRange; 8 + VIRTIO_MMIO_MAX],
 }
 
 impl KernelMapPlan {
@@ -97,6 +98,8 @@ impl KernelMapPlan {
                 MappingRange::empty(),
                 MappingRange::empty(),
                 MappingRange::empty(),
+                MappingRange::empty(),
+                // PLICのMMIO page用slot。`with_plic_page`だけが使う。
                 MappingRange::empty(),
             ],
         })
@@ -170,6 +173,32 @@ impl KernelMapPlan {
                 flags: PageFlags::supervisor_rw(),
             };
         }
+        Ok(self)
+    }
+
+    /// PLICのMMIO窓 (4 KiB整列のベース) をS-mode R+Wで追加する。
+    /// `MachineSpec::plic_base`を渡し、device slotsとは別の末尾slotへ置く。
+    /// PLICのregisterは散在しており、優先度 (先頭4 KiB) とenable bitmap
+    /// (0x2000付近)、context 1のthreshold/claim block (0x20_1000付近) までを
+    /// 連続した窓としてmapする。既存mappingとの重複は拒否する。
+    pub fn with_plic_page(mut self, base: usize) -> Result<Self, KernelMapError> {
+        /// driverが触れるPLIC registerを全て含む窓の長さ。
+        /// context 1のclaim block末尾 (base + 0x20_2000) までを含める。
+        const PLIC_WINDOW_LEN: usize = 0x20_2000;
+        if base == 0 || !base.is_multiple_of(PAGE_SIZE) {
+            return Err(KernelMapError::InvalidDeviceRange);
+        }
+        let range = base..base + PLIC_WINDOW_LEN;
+        let overlaps = self.ranges.iter().any(|existing| {
+            existing.addresses.start < range.end && range.start < existing.addresses.end
+        });
+        if overlaps {
+            return Err(KernelMapError::InvalidDeviceRange);
+        }
+        self.ranges[7 + VIRTIO_MMIO_MAX] = MappingRange {
+            addresses: range,
+            flags: PageFlags::supervisor_rw(),
+        };
         Ok(self)
     }
 

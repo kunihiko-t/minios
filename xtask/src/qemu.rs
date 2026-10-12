@@ -178,6 +178,7 @@ pub enum TestKind {
     Sched,
     SchedIo,
     SchedIoPartial,
+    IrqUart,
     ProcFault,
     ProcKill,
     Shell,
@@ -249,6 +250,7 @@ impl TestKind {
             Self::SchedIoPartial => {
                 unreachable!("the sched-io-partial test boots the normal kernel")
             }
+            Self::IrqUart => "qemu-test-irq-uart",
             Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
             Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
@@ -325,6 +327,9 @@ impl TestKind {
             }
             Self::SchedIoPartial => {
                 unreachable!("the sched-io-partial test verifies a split frame's control frames")
+            }
+            Self::IrqUart => {
+                unreachable!("the irq-uart test verifies control frames and the irq marker")
             }
             Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
             Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
@@ -997,6 +1002,15 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let completed = run_sched_io_partial_command(command, command_line.clone(), deadline)?;
         bundle.remove();
         return verify_sched_io_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::IrqUart {
+        let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_sched_io()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_sched_io_command(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_irq_uart_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Shell {
@@ -2616,6 +2630,27 @@ fn verify_sched_io_result(
         });
     }
     Ok(output.to_owned())
+}
+
+/// irq-uart検査: sched-ioと同じblocked readerのframe列に加えて、stdin待ちの
+/// 起床がUART RX割り込みのclaim経由で起きたことを示すmarkerを要求する。
+/// markerが無いまま全frameが揃う場合はpollingだけで起床しており、割り込み
+/// 経路は検証できていないため失敗とする。
+const IRQ_UART_MARKER: &str = "[MINIOS_TEST] irq-uart: ok";
+
+fn verify_irq_uart_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    let output = verify_sched_io_result(command, status, output)?;
+    if !output.contains(IRQ_UART_MARKER) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output)
 }
 
 fn verify_payload_args_result(

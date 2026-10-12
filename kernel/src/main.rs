@@ -683,6 +683,14 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     let plan = plan
         .with_device_pages(&machine.virtio_mmio[..machine.virtio_mmio_count])
         .unwrap_or_else(|error| panic!("invalid device mapping plan: {error:?}"));
+    // PLICのMMIO pageはUART割り込みのclaim/completeに必要なため、device
+    // slotとは別の専用slotでS-mode R+Wとしてmapする。
+    let plan = if machine.plic_base != 0 {
+        plan.with_plic_page(machine.plic_base)
+            .unwrap_or_else(|error| panic!("invalid plic mapping plan: {error:?}"))
+    } else {
+        plan
+    };
     // Safety: QEMU virt exposes managed_memory_start..machine.managed_end()
     // as valid RAM. Bare translation reaches it by identity before satp
     // changes, and `plan` identity-maps the complete range afterward. This
@@ -720,6 +728,22 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
 
     if let Err(error) = time::init(machine.timebase_hz) {
         fatal_timer_error("initial schedule", error);
+    }
+    // PLICを持つmachine記述ではUARTの受信割り込みをS-modeへ配送し、
+    // 待機窓を`wfi`で眠らせられるようにする。PLICの無いmachineでは
+    // 割り込み経路を立てず、全てpollingのまま動く。
+    if machine.plic_base != 0 {
+        drivers::plic::init(machine.plic_base);
+        drivers::plic::enable(drivers::plic::UART_IRQ);
+        drivers::uart::Uart::for_target().enable_rx_interrupt();
+        const SIE_SEIE: usize = 1 << 9;
+        // Safety: claim/dispatchの経路は`trap::init`のkernel handlerと
+        // `handle_user_trap`のExternal分岐に揃っている。既存ビットを保った
+        // ままSEIE（ビット9）だけを有効にする。
+        unsafe {
+            let sie = arch::riscv64::csr::read_sie();
+            arch::riscv64::csr::write_sie(sie | SIE_SEIE);
+        }
     }
     crate::println!("[ok] timer");
     crate::println!("[ok] memory");

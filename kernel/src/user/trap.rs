@@ -10,22 +10,29 @@ pub enum TrapAction {
     /// U-mode実行中のsupervisor timer割り込み。`sepc`とregisterは変更しない
     /// (割り込みはskipする命令ではない)。schedulerが次のprocessを選ぶ。
     Timer,
+    /// U-mode実行中のsupervisor external割り込み。contextは変更せず、
+    /// kernel側でPLICのclaim/dispatchを済ませてから同じprocessへ戻る。
+    External,
     /// 継続できない例外または割り込み。原因CSR値をそのまま保持する。
     Fatal { scause: usize, stval: usize },
 }
 
-/// U-mode `ecall`とsupervisor timer割り込みだけを継続可能と判定し、
+/// U-mode `ecall`とsupervisor timer/external割り込みだけを継続可能と判定し、
 /// それ以外を`Fatal`へ分類する。
 ///
 /// 割り込みbitなし・原因code 8・保存済み`sstatus.SPP=0`の三つが揃った場合だけ
 /// `sepc`を4 byte進めて`SystemCall`を返す。U-modeからのsupervisor timer
-/// 割り込み (interrupt bit付き原因code 5) はcontextを触らず`Timer`を返す。
+/// 割り込み (interrupt bit付き原因code 5) はcontextを触らず`Timer`を返し、
+/// supervisor external割り込み (原因code 9) は`External`を返す。
 /// それ以外の例外と割り込みは、CSR値を変更せずに`Fatal`へ渡す。
 pub fn classify_user_trap(context: &mut UserContext, scause: usize, stval: usize) -> TrapAction {
     let interrupt = 1_usize << (usize::BITS - 1);
     let from_user = context.sstatus() & SSTATUS_SPP == 0;
     if scause == interrupt | 5 && from_user {
         return TrapAction::Timer;
+    }
+    if scause == interrupt | 9 && from_user {
+        return TrapAction::External;
     }
     if scause & interrupt == 0 && scause & !interrupt == 8 && from_user {
         let resumed = context
@@ -79,8 +86,8 @@ mod tests {
             assert_eq!(context.registers_for_test(), before);
         }
 
-        // supervisor timer以外の割り込み (software / external) はFatalのまま。
-        for cause in [1_usize, 9] {
+        // supervisor timerとexternal以外の割り込み (software等) はFatalのまま。
+        for cause in [1_usize] {
             let scause = (1_usize << (usize::BITS - 1)) | cause;
             let mut context = UserContext::patterned_for_test(0x0010_0300);
             assert_eq!(
@@ -126,6 +133,35 @@ mod tests {
             classify_user_trap(&mut context, timer, 0),
             TrapAction::Fatal {
                 scause: timer,
+                stval: 0
+            }
+        );
+    }
+
+    // Catches external interrupts advancing sepc or touching registers: like
+    // the timer they arrive between instructions, so the context must be
+    // resumed unchanged after the kernel claims the IRQ.
+    #[test]
+    fn user_external_interrupt_preserves_context() {
+        let external = (1_usize << (usize::BITS - 1)) | 9;
+        let mut context = UserContext::patterned_for_test(0x0010_0a00);
+        let before = context.registers_for_test();
+
+        assert_eq!(
+            classify_user_trap(&mut context, external, 0),
+            TrapAction::External
+        );
+        assert_eq!(context.sepc(), 0x0010_0a00);
+        assert_eq!(context.registers_for_test(), before);
+
+        // S-mode (SPP=1) からのexternalはkernel trap経路の仕事であり、
+        // この入口では無条件に再開させずFatalへ回す。
+        let mut context = UserContext::patterned_for_test(0x0010_0b00);
+        context.set_sstatus_for_test(context.sstatus() | SSTATUS_SPP);
+        assert_eq!(
+            classify_user_trap(&mut context, external, 0),
+            TrapAction::Fatal {
+                scause: external,
                 stval: 0
             }
         );

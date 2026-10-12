@@ -30,7 +30,8 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
   共通の`SbiRet`と`SbiError`には、ホストでテストできるlibrary型を再利用します。
 - `user.S`：`sscratch`と`sp`を交換して専用kernel trap stackへ全registerを保存し、`sret`でU-modeと往復します。
 - `trap.S`：S-modeで発生したtimerなどのtrapを保存し、既存のS-mode handlerへ渡します。
-- `trap.rs`：`scause`を`Interrupt`と`Exception`へ分け、Direct modeの`stvec`初期化、timerの振り分け、breakpointの受け入れテスト、予期しないtrapの診断を担当します。
+- `trap.rs`：`scause`を`Interrupt`と`Exception`へ分け、Direct modeの`stvec`初期化、timerとexternal割り込みの振り分け、breakpointの受け入れテスト、予期しないtrapの診断を担当します。
+  external割り込みはPLICの`claim`でsourceを確定し、UART sourceは`drivers::uart`の受信処理へ渡してから`complete`で締めます。
 
 ### 機器とコンソール
 
@@ -116,6 +117,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   正常終了したprocessの`(pid, code)`は`MAX_PROCS`件上限の終了台帳へ記録され、`waitpid`が1回だけ消費します。
 - `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
   processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
+  全processが待ちへ入ったidleでは、dispatch loopがtimerとexternalのpendingを確認してから`wfi`で眠り、UART受信割り込みか次のtickで起床します。
   `waitpid`も同じBlocked再実行モデルで、対象processがliveなら呼び出しprocessを`BlockedOnPid`へ移し、対象の終了で起こして終了codeを返します。
   `pipe`の`read`/`write`も同じモデルで、空のread（write端がlive）と満杯のwrite（read端がlive）は呼び出しprocessを`BlockedOnPipe`へ移し、同pipeへのdata到着・空き発生・端のclose・process終了で起こしてecallをやり直します。
   Stdin frameの受信は`StdinStaging`内の再開可能なdecoderがbyte単位で蓄積し、frame途中でbyteが尽きた再試行は`WouldBlock`として再び`Blocked`へ戻るため、受信途中の間も他processが進み続けます。

@@ -130,8 +130,25 @@ pub fn emergency_sbi_error(error: isize) {
 }
 
 pub fn read_byte() -> u8 {
-    // UARTの状態レジスターを繰り返し読み、受信を待つ。
-    // 割り込みは有効なため、待機中もSupervisorタイマーのトラップを処理できる。
+    #[cfg(target_arch = "riscv64")]
+    if crate::drivers::uart::rx_interrupt_active() {
+        // UARTの受信割り込みが生きている経路では、FIFOにbyteが届くまで
+        // `wfi`で眠る。ISRがmaskしたdevice側割り込みを毎周rearmしてから
+        // 寝るため、FIFOが空の間に届いた次のburstも取りこぼさない。
+        let mut uart = Backend::for_target();
+        loop {
+            if uart.has_byte() {
+                return uart.read_byte();
+            }
+            uart.rearm_rx_interrupt();
+            // pendingしたexternal割り込みをclaimしてdevice状態を整えてから寝る。
+            crate::drivers::plic::handle_external_pending();
+            // Safety: STIE/SEIEを立てた`wfi`であり、UART受信かtimerの
+            // pending割り込みが起床させる。
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        }
+    }
+    // 割り込み経路の無い経路 (NEORV32やPLIC未初期化) は従来どおりpollingする。
     Backend::for_target().read_byte()
 }
 
@@ -139,7 +156,14 @@ pub fn read_byte() -> u8 {
 /// byteは消費しない (frame streamは`read_byte`が順に引く)。
 #[cfg(target_arch = "riscv64")]
 pub fn stdin_pending() -> bool {
-    Backend::for_target().has_byte()
+    let mut uart = Backend::for_target();
+    if uart.has_byte() {
+        return true;
+    }
+    // ISRにmaskされた受信割り込みを、FIFOが空になったこの機会に再開し、
+    // 次の受信burstを割り込みで拾えるようにする。
+    uart.rearm_rx_interrupt();
+    false
 }
 
 pub fn write_byte(byte: u8) {

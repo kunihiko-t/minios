@@ -50,6 +50,13 @@ pub extern "C" fn rust_trap_handler() {
         return;
     }
 
+    // Supervisor external割り込み (原因コード9) はPLICのclaim/dispatchを
+    // 済ませて通常実行へ戻る。PLIC未初期化のmachineでは発生しない。
+    if cause == TrapCause::Interrupt(9) {
+        crate::drivers::plic::handle_external_pending();
+        return;
+    }
+
     #[cfg(feature = "qemu-test-trap")]
     // RISC-V特権仕様では、同期ブレークポイント例外の原因コードが3に固定されているため、テスト成功分岐はこの値だけを受ける。
     if cause == TrapCause::Exception(3) {

@@ -90,6 +90,11 @@ unsafe fn rust_user_trap_handler_impl(context: *mut UserContext) -> RunExit {
     match minios_kernel::user::trap::handle_user_trap(context, scause, stval) {
         TrapAction::SystemCall => user_trap_system_call(context),
         TrapAction::Timer => user_trap_timer(),
+        // PLICのclaim/dispatchだけを済ませ、同じuser contextへそのまま戻す。
+        TrapAction::External => {
+            crate::drivers::plic::handle_external_pending();
+            RunExit::Resume
+        }
         TrapAction::Fatal { scause, stval } => user_trap_fatal(scause, stval),
     }
 }
