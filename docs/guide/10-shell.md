@@ -135,8 +135,8 @@ shutdown  Halt the CPU
 minios> echo hello
 hello
 minios> memory
-imem: 15240 / 32768 bytes
-dmem: 1096 / 16192 bytes
+imem: 24500 / 32768 bytes
+dmem: 4 / 16192 bytes
 ```
 
 IMEM/DMEMの占有量は、カーネルイメージの大きさによって変わります。
