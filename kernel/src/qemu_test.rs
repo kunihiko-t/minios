@@ -5,7 +5,8 @@
     feature = "qemu-test-vm",
     feature = "qemu-test-elf",
     feature = "qemu-test-memory",
-    feature = "qemu-test-net-arp"
+    feature = "qemu-test-net-arp",
+    feature = "qemu-test-net-ping"
 ))]
 use super::*;
 
@@ -115,23 +116,29 @@ pub(crate) fn run_virtio_test(
     successful_qemu_test_shutdown()
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
-// FDTが報告するvirtio-mmio slotからnet deviceをprobeし、QEMU user-netの
-// gateway (10.0.2.2) へARP requestを送ってreplyを受け取る。TX/RXの両
-// queueが実際にframeを運んだことと、used-buffer割り込みがPLIC経由で
-// claimできたことをmarkerで観測する。
-pub(crate) fn run_net_arp_test(
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-net-arp", feature = "qemu-test-net-ping")
+))]
+type NetDevice = minios_kernel::net::virtio_net::VirtioNet<
+    drivers::virtio_mmio::MmioRegs,
+    FrameRegion<minios_kernel::net::virtio_net::NetQueueRegion>,
+    FrameRegion<minios_kernel::net::virtio_net::NetRxBufPage>,
+>;
+
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-net-arp", feature = "qemu-test-net-ping")
+))]
+// FDTが報告するvirtio-mmio slotからnet deviceをprobeし、deviceとその
+// PLIC sourceを返す。queue領域とrx pageはframe poolから取り、初期化できた
+// deviceを見つけるまでslotを順に試す。
+fn probe_net_device(
     spec: &minios_kernel::fdt::MachineSpec,
     frames: &mut dyn FrameSource,
-) {
-    use minios_kernel::net::arp;
+) -> (NetDevice, u32) {
     use minios_kernel::net::virtio_net::{NetError, NetQueueRegion, NetRxBufPage, VirtioNet};
 
-    const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
-    const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
-
-    let mut net = None;
-    let mut net_irq = 0u32;
     for (slot, &base) in spec.virtio_mmio[..spec.virtio_mmio_count]
         .iter()
         .enumerate()
@@ -157,9 +164,11 @@ pub(crate) fn run_net_arp_test(
                     "[MINIOS_TEST] net: virtio-net at 0x{base:x} mac={:02x?}",
                     device.mac()
                 );
-                net = Some(device);
-                net_irq = spec.virtio_mmio_irq[slot];
-                break;
+                let irq = spec.virtio_mmio_irq[slot];
+                if irq != 0 {
+                    drivers::plic::enable(irq);
+                }
+                return (device, irq);
             }
             // 空slotかnet以外のdeviceなら次のslotを試す。
             Err(
@@ -170,12 +179,24 @@ pub(crate) fn run_net_arp_test(
             }
         }
     }
-    let Some(mut net) = net else {
-        fatal_qemu_test(format_args!("net: no net device found"));
-    };
-    if net_irq != 0 {
-        drivers::plic::enable(net_irq);
-    }
+    fatal_qemu_test(format_args!("net: no net device found"));
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+// FDTが報告するvirtio-mmio slotからnet deviceをprobeし、QEMU user-netの
+// gateway (10.0.2.2) へARP requestを送ってreplyを受け取る。TX/RXの両
+// queueが実際にframeを運んだことと、used-buffer割り込みがPLIC経由で
+// claimできたことをmarkerで観測する。
+pub(crate) fn run_net_arp_test(
+    spec: &minios_kernel::fdt::MachineSpec,
+    frames: &mut dyn FrameSource,
+) {
+    use minios_kernel::net::arp;
+
+    const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+    const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
+
+    let (mut net, net_irq) = probe_net_device(spec, frames);
 
     let mut request = [0u8; arp::ARP_FRAME_LEN];
     arp::encode_request(&mut request, net.mac(), GUEST_IP, GATEWAY_IP);
@@ -221,6 +242,44 @@ pub(crate) fn run_net_arp_test(
         ));
     }
     crate::println!("[MINIOS_TEST] net-arp: ok");
+    successful_qemu_test_shutdown()
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-ping"))]
+// virtio-netの上に最小network stackを載せ、QEMU user-netのgateway
+// (10.0.2.2) へICMP echo requestを投げてreplyを受け取る。stack内の
+// ARP解決・IPv4/ICMP codec・RX demuxが実deviceで動くことと、used-buffer
+// 割り込みがPLIC経由でclaimできたことを観測する。
+pub(crate) fn run_net_ping_test(
+    spec: &minios_kernel::fdt::MachineSpec,
+    frames: &mut dyn FrameSource,
+) {
+    use minios_kernel::net::stack::Stack;
+
+    const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+    const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
+
+    let (net, net_irq) = probe_net_device(spec, frames);
+    let mut stack = Stack::new(net, GUEST_IP);
+    if let Err(error) = stack.ping(GATEWAY_IP, 0x4d53, 1, b"minios-ping") {
+        fatal_qemu_test(format_args!("net-ping: ping failed: {error:?}"));
+    }
+    crate::println!(
+        "[MINIOS_TEST] net-ping: gateway {}.{}.{}.{} replied",
+        GATEWAY_IP[0],
+        GATEWAY_IP[1],
+        GATEWAY_IP[2],
+        GATEWAY_IP[3]
+    );
+    // stackの待機loopはused ringを直接pollするため、積まれたpending分を
+    // 最後にまとめてclaimし、deviceのinterrupt lineが上がったことを確認する。
+    drivers::plic::handle_external_pending();
+    if net_irq != 0 && drivers::plic::virtio_irq_claims_for(net_irq) == 0 {
+        fatal_qemu_test(format_args!(
+            "net-ping: echo reply arrived without a virtio interrupt claim"
+        ));
+    }
+    crate::println!("[MINIOS_TEST] net-ping: ok");
     successful_qemu_test_shutdown()
 }
 

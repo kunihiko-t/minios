@@ -20,6 +20,7 @@ use minios_abi::{
 };
 
 mod io;
+mod net;
 mod path;
 mod proc;
 mod seek;

@@ -98,7 +98,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 - `user/context.rs`：entry、user stack、`sstatus.SPP=0`を持つ`UserContext`を定義します。
 - `user/memory.rs`：user pointerを参照として解釈せず、pageごとに`U=1`とread権限を確認してcopyします。
-- `user/syscall/`（`mod.rs`と`dispatch.rs`）：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`をdispatchします。
+- `user/syscall/`（`mod.rs`と`dispatch.rs`）：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`、`socket`、`sendto`、`recvfrom`をdispatchします。
 - `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
 - `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 
@@ -226,7 +226,12 @@ queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`と�
 - `net/virtio_net.rs`：virtio-mmioのnetwork device driverであり、`VIRTIO_NET_F_MAC`+`VIRTIO_NET_F_MRG_RXBUF`+`VIRTIO_F_VERSION_1`をnegotiateし、rx(queue 0)・tx(queue 1)の二つのqueueでethernet frameを送受します。
   rx bufferはMTU+headerを収めるpageを常時deviceへpostしておき、usedの完了を`drain_rx`がframeとして引き渡してから同じdescへ再postします。txは1件ずつsubmitし、used完了をboundedに待ちます。
   virtio_net_hdrはmergeableでnegotiateした12 byte layoutであり、QEMUがTX/RX両方向で同じ長さを仮定することを`net-arp`検査で確認しています。
-- `net/arp.rs`：ARP requestの組み立てとreplyの検証を行う最小codecであり、後の最小network stackでも使います。
+- `net/arp.rs`：ARP request/replyのcodecであり、requestへの応答組み立ても含みます。
+- `net/ipv4.rs`・`net/icmp.rs`・`net/udp.rs`：IPv4 header（checksum付き）、ICMP echo、UDP datagramのcodec。TCPは対象外で、UDPのIPv4 checksumは0として送ります。
+- `net/stack.rs`：`Link` traitでframeの送受を抽象化した最小network stackです。ARP cacheと自分宛ARP requestへのreply、ICMP echoへのreply、socket table（4個、各4 datagram queue）を持ち、`poll`がrxをdrainしてsocket queueへdemuxします。大きなstaging bufferはheapへ置き、`Stack`自体のby-value構築は小さいためsyscall経路でもkernel stackを溢れさせません。
+  guestからは`socket`/`sendto`/`recvfrom`で触れ、`recvfrom`の未受信は`BlockedOnIo`へmarkして`EAGAIN`でecallを巻き戻します。virtio-netのused-buffer割り込みがPLIC経由でclaimされるとblkと同じ通知flagでwakeし、再実行された`recvfrom`が`poll`で新着frameをqueueへ取り込みます。stack本体は`proc_runtime.rs`の`borrow_net_stack`が初回syscall時にFDTのslotからprobeし、QEMU user-net既定のguest IP 10.0.2.15で作ります。
 - `cargo xtask test net-arp`：`-netdev user`を持つ`virtio-net-device`を起動し、仮想networkのgateway 10.0.2.2へARP requestを送ってreplyを受け取ります。reply到達とdeviceのused-buffer割り込みがPLIC経由でclaimされたことを併せて検証します。
+- `cargo xtask test net-ping`：同じ構成でstackをkernel上で組み、ARP解決からICMP echo往復を行います。
+- `cargo xtask test net-udp`：payload経由のguestがsocket syscallsで`10.0.2.2`（slirpのhost alias）:7777のechoと往復します。harness側は`127.0.0.1:7777`でUDP echoを返し、`recvfrom`が実際に割り込み起床でdatagramを受け取ることを検証します。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

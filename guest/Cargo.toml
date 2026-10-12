@@ -233,3 +233,9 @@ path = "src/bin/proc_kill_wait.rs"
 test = false
 bench = false
 doctest = false
+[[bin]]
+name = "minios-guest-net-udp"
+path = "src/bin/net_udp.rs"
+test = false
+bench = false
+doctest = false

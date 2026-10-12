@@ -3,7 +3,10 @@ use std::{
     io::{self, Read, Write},
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -33,6 +36,7 @@ const FDT_MARKER: &str =
 const HEAP_MARKER: &str = "[MINIOS_TEST] heap: ok";
 const VIRTIO_MARKER: &str = "[MINIOS_TEST] virtio: ok";
 const NET_ARP_MARKER: &str = "[MINIOS_TEST] net-arp: ok";
+const NET_PING_MARKER: &str = "[MINIOS_TEST] net-ping: ok";
 const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
 /// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
 const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
@@ -85,6 +89,10 @@ const USER_DUP_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2a\0\0\0MiniOS sched: spawned pid=0 name=user-dup\n";
 const SPAWN_ARGS_SPAWNED_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x2c\0\0\0MiniOS sched: spawned pid=0 name=spawn-args\n";
+const NET_UDP_SPAWNED_FRAME: &[u8] =
+    b"MCF1\x06\0\0\0\x29\0\0\0MiniOS sched: spawned pid=0 name=net-udp\n";
+const NET_UDP_STDOUT_FRAME: &[u8] =
+    b"MCF1\x02\0\0\0\x2a\0\0\0net-udp: echo 16 bytes from 10.0.2.2:7777\n";
 const FILE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0note inside docs\n";
 const FILE_WRITE_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x11\0\0\0written by guest\n";
 const FILE_UNLINK_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0file removed\n";
@@ -182,6 +190,8 @@ pub enum TestKind {
     IrqUart,
     IrqBlk,
     NetArp,
+    NetPing,
+    NetUdp,
     ProcFault,
     ProcKill,
     Shell,
@@ -256,6 +266,8 @@ impl TestKind {
             Self::IrqUart => "qemu-test-irq-uart",
             Self::IrqBlk => "qemu-test-irq-blk",
             Self::NetArp => "qemu-test-net-arp",
+            Self::NetPing => "qemu-test-net-ping",
+            Self::NetUdp => unreachable!("the net-udp test boots the normal kernel"),
             Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
             Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
@@ -340,6 +352,10 @@ impl TestKind {
                 unreachable!("the irq-blk test verifies control frames and the irq marker")
             }
             Self::NetArp => NET_ARP_MARKER,
+            Self::NetPing => NET_PING_MARKER,
+            Self::NetUdp => {
+                unreachable!("the net-udp test verifies raw control frames")
+            }
             Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
             Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
@@ -1037,10 +1053,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         return verify_irq_blk_result(&command_line, completed.status.code(), &completed.output);
     }
 
-    if kind == TestKind::NetArp {
+    if matches!(kind, TestKind::NetArp | TestKind::NetPing) {
         let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
         let (command, command_line) = qemu_command_with_net(&kernel);
         return run_marker_test(kind, command, command_line, deadline);
+    }
+
+    if kind == TestKind::NetUdp {
+        let echo = UdpEcho::start()?;
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_net_udp()?;
+        let (command, command_line) = qemu_command_with_payload_and_net(&kernel, bundle.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        echo.stop();
+        return verify_net_udp_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Shell {
@@ -1655,6 +1682,16 @@ const PAYLOAD_STDIN_EXPECTED_FRAMES: [&[u8]; 6] = [
     PAYLOAD_DIAGNOSTIC_FRAME,
 ];
 
+/// net-udp検査で期待されるcontrol frame列。guestがUDP socketを開いて
+/// host側echo（`UdpEcho`）と往復し、payloadと送信元を検証してから出力する。
+const NET_UDP_EXPECTED_FRAMES: [&[u8]; 5] = [
+    PAYLOAD_READY_FRAME,
+    NET_UDP_SPAWNED_FRAME,
+    NET_UDP_STDOUT_FRAME,
+    PAYLOAD_EXIT_FRAME,
+    PAYLOAD_DIAGNOSTIC_FRAME,
+];
+
 /// file検査で期待されるcontrol frame列 (Ready→spawned→file内容→Exit→cleanup)。
 const FILE_EXPECTED_FRAMES: [&[u8]; 5] = [
     PAYLOAD_READY_FRAME,
@@ -1970,6 +2007,27 @@ fn verify_file_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &FILE_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+fn verify_net_udp_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !has_exact_payload_frames(output.as_bytes(), &NET_UDP_EXPECTED_FRAMES) {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -2939,6 +2997,13 @@ impl PayloadBundle {
         Self::create_with(assemble_test_bundle(b"version=1\nname=sh\n", &elf)?)
     }
 
+    /// net-udp検査用bundle。UDP socket syscallを実device経由で試すguest
+    /// binaryをboot payloadにする。
+    fn create_net_udp() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_NET_UDP)?;
+        Self::create_with(assemble_test_bundle(b"version=1\nname=net-udp\n", &elf)?)
+    }
+
     fn create_sched() -> Result<Self, QemuError> {
         let spin = built_bin_elf_bytes(crate::guest::GUEST_SCHED_A)?;
         let quick = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
@@ -3332,6 +3397,80 @@ fn qemu_command_with_payload_and_disk(
 /// network stackが処理するので、外部host無しでARP replyを受け取れる。
 fn qemu_command_with_net(kernel: &Path) -> (Command, String) {
     let mut args = qemu_args(kernel);
+    args.push("-global".to_owned());
+    args.push("virtio-mmio.force-legacy=false".to_owned());
+    args.push("-netdev".to_owned());
+    args.push("user,id=net0".to_owned());
+    args.push("-device".to_owned());
+    args.push("virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0".to_owned());
+    let command_line = render_command(QEMU_PROGRAM, &args);
+    let mut command = Command::new(QEMU_PROGRAM);
+    command.args(&args);
+    (command, command_line)
+}
+
+/// net-udp検査で使うhost側UDP echo。`127.0.0.1:7777`へbindし、受け取った
+/// datagramを送信元へそのまま返す。QEMUのslirpはguest→`10.0.2.2`の
+/// datagramをhost loopback上のこのsocketへ届ける。`stop`でthreadを閉じて
+/// portを解放する。
+struct UdpEcho {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl UdpEcho {
+    fn start() -> Result<Self, QemuError> {
+        let socket =
+            std::net::UdpSocket::bind("127.0.0.1:7777").map_err(|error| QemuError::Bundle {
+                stage: "net-udp echo bind",
+                error: error.to_string(),
+            })?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .map_err(|error| QemuError::Bundle {
+                stage: "net-udp echo timeout",
+                error: error.to_string(),
+            })?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while !running.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf) {
+                    Ok((len, peer)) => {
+                        let _ = socket.send_to(&buf[..len], peer);
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.kind() == io::ErrorKind::TimedOut => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// payload bundleとQEMU user-mode networkingを両方載せた構成。guestは
+/// `10.0.2.2`（slirpのhost alias）の7777番へdatagramを送り、
+/// `UdpEcho::start`が`127.0.0.1:7777`で返すechoを`recvfrom`で待つ。
+fn qemu_command_with_payload_and_net(kernel: &Path, bundle: &Path) -> (Command, String) {
+    let mut args = qemu_args(kernel);
+    args.push("-device".to_owned());
+    args.push(format!(
+        "loader,file={},addr=0x87800000,force-raw=on",
+        bundle.display()
+    ));
     args.push("-global".to_owned());
     args.push("virtio-mmio.force-legacy=false".to_owned());
     args.push("-netdev".to_owned());

@@ -53,6 +53,9 @@ pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";
 pub const GUEST_SCHED_B: &str = "minios-guest-sched-b";
 /// scheduler検証のstdin待ち側bin名。
 pub const GUEST_SCHED_R: &str = "minios-guest-sched-r";
+
+/// guestのUDP echo検査binary。`sendto`/`recvfrom`を実device経由で試す。
+pub const GUEST_NET_UDP: &str = "minios-guest-net-udp";
 /// guest build target。
 pub const GUEST_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// linker scriptが_startへ置くentry address (=USER_START)。

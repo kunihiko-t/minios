@@ -45,6 +45,60 @@ pub fn encode_request(
     frame[38..42].copy_from_slice(&target_ip);
 }
 
+/// `frame`を検査し、`our_ip`を問い合わせるARP requestなら送信者情報を返す。
+/// ARP以外のframe、request以外、他のIP宛、不正な長さは`None`。
+pub fn parse_request(frame: &[u8], our_ip: [u8; 4]) -> Option<ArpReply> {
+    if frame.len() < ARP_FRAME_LEN {
+        return None;
+    }
+    if u16::from_be_bytes([frame[12], frame[13]]) != ETH_TYPE_ARP {
+        return None;
+    }
+    // broadcastまたは自分宛のrequestだけを受け付ける。
+    if frame[0..6] != BROADCAST_MAC[..] {
+        return None;
+    }
+    if u16::from_be_bytes([frame[20], frame[21]]) != ARP_OP_REQUEST {
+        return None;
+    }
+    // 問い合わせ対象が自分のIPであること。
+    if frame[38..42] != our_ip[..] {
+        return None;
+    }
+    Some(ArpReply {
+        sender_mac: frame[22..28].try_into().ok()?,
+        sender_ip: frame[28..32].try_into().ok()?,
+    })
+}
+
+/// `out`へARP `request`へのunicast replyを組み立てる。requestのsender
+/// addressをreplyのtargetへ写し、opをreplyへ変える。`out`は
+/// `ARP_FRAME_LEN`以上であること。失敗時は`None`。
+pub fn build_reply(
+    request: &[u8],
+    our_mac: [u8; 6],
+    our_ip: [u8; 4],
+    out: &mut [u8],
+) -> Option<usize> {
+    if request.len() < ARP_FRAME_LEN || out.len() < ARP_FRAME_LEN {
+        return None;
+    }
+    out[..ARP_FRAME_LEN].fill(0);
+    // ethernet: dst=送信者、src=自分、type=ARP
+    out[0..6].copy_from_slice(&request[6..12]);
+    out[6..12].copy_from_slice(&our_mac);
+    out[12..14].copy_from_slice(&ETH_TYPE_ARP.to_be_bytes());
+    // ARP payloadはrequestのレイアウトを写してopとaddressを差し替える。
+    out[14..ARP_FRAME_LEN].copy_from_slice(&request[14..ARP_FRAME_LEN]);
+    out[20..22].copy_from_slice(&ARP_OP_REPLY.to_be_bytes());
+    out[22..28].copy_from_slice(&our_mac);
+    out[28..32].copy_from_slice(&our_ip);
+    // target hardware/protocolはrequestのsender。
+    out[32..38].copy_from_slice(&request[22..28]);
+    out[38..42].copy_from_slice(&request[28..32]);
+    Some(ARP_FRAME_LEN)
+}
+
 /// `frame`を検査し、`our_mac`宛のARP replyなら送信者情報を返す。
 /// ARP以外のframe、他者宛、request、不正な長さは`None`。
 pub fn parse_reply(frame: &[u8], our_mac: &[u8; 6]) -> Option<ArpReply> {

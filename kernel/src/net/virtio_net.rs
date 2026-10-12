@@ -381,6 +381,25 @@ impl<M: Mmio, R: DerefMut<Target = NetQueueRegion>, B: DerefMut<Target = NetRxBu
     }
 }
 
+/// 最小network stackのlink層抽象を`VirtioNet`へ接続する。`stack`自体と
+/// 同じく、allocをlinkしないRV32 buildからは外す。
+#[cfg(not(target_arch = "riscv32"))]
+impl<M: Mmio, R: DerefMut<Target = NetQueueRegion>, B: DerefMut<Target = NetRxBufPage>>
+    crate::net::stack::Link for VirtioNet<M, R, B>
+{
+    fn mac(&self) -> [u8; 6] {
+        VirtioNet::mac(self)
+    }
+
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
+        VirtioNet::transmit(self, frame)
+    }
+
+    fn drain_rx(&mut self, sink: &mut impl FnMut(&[u8])) -> Result<usize, NetError> {
+        VirtioNet::drain_rx(self, sink)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
