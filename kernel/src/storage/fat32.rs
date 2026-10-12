@@ -65,6 +65,13 @@ pub struct Fat32<R> {
     /// FATの面数（1か2）。readは第1 FATだけを使い、writeは全面へ写す。
     #[cfg(not(target_arch = "riscv32"))]
     fat_count: u32,
+    /// BPBが指すFSInfo sectorの絶対LBA。0は「FSInfo無し」。
+    #[cfg(not(target_arch = "riscv32"))]
+    fsinfo_lba: u32,
+    /// FSInfoをこのsessionで既に「不明」へ揃えたか。最初のFAT更新でのみ
+    /// sectorへ触れるためのflag。
+    #[cfg(not(target_arch = "riscv32"))]
+    fsinfo_marked: bool,
     data_start: u32,
     sectors_per_cluster: u8,
     root_cluster: u32,
@@ -161,6 +168,9 @@ struct Geometry {
     /// FATの面数（1か2）。readは第1 FATだけを使い、writeは全面へ写す。
     #[cfg(not(target_arch = "riscv32"))]
     fat_count: u32,
+    /// BPBが指すFSInfo sectorの絶対LBA。0は「FSInfo無し」。
+    #[cfg(not(target_arch = "riscv32"))]
+    fsinfo_lba: u32,
     data_start: u32,
     sectors_per_cluster: u8,
     root_cluster: u32,
@@ -239,6 +249,10 @@ impl<R: SectorReader> Fat32<R> {
             fat_sectors: geometry.fat_sectors,
             #[cfg(not(target_arch = "riscv32"))]
             fat_count: geometry.fat_count,
+            #[cfg(not(target_arch = "riscv32"))]
+            fsinfo_lba: geometry.fsinfo_lba,
+            #[cfg(not(target_arch = "riscv32"))]
+            fsinfo_marked: false,
             data_start: geometry.data_start,
             sectors_per_cluster: geometry.sectors_per_cluster,
             root_cluster: geometry.root_cluster,
@@ -693,6 +707,23 @@ impl<R: SectorReader> Fat32<R> {
 #[cfg(not(target_arch = "riscv32"))]
 const FAT_EOC: u32 = 0x0fff_ffff;
 
+/// FSInfo sectorの先頭signature `RRaA`。
+#[cfg(not(target_arch = "riscv32"))]
+const FSINFO_LEAD_SIG: u32 = 0x4161_5252;
+
+/// FSInfo sectorの構造signature `rrAa`（offset 484）。
+#[cfg(not(target_arch = "riscv32"))]
+const FSINFO_STRUCT_SIG: u32 = 0x6141_7272;
+
+/// FSInfo sectorの末尾signature（offset 508）。
+#[cfg(not(target_arch = "riscv32"))]
+const FSINFO_TRAIL_SIG: u32 = 0xaa55_0000;
+
+/// FSInfoのfree cluster数・next候補に使う「不明」値。spec上の合法値で、
+/// 保持しない代わりに古い実測値を残さないための印。
+#[cfg(not(target_arch = "riscv32"))]
+const FSINFO_UNKNOWN: u32 = 0xffff_ffff;
+
 /// file作成時に使うarchive attribute。
 #[cfg(not(target_arch = "riscv32"))]
 const DIR_ATTR_FILE: u8 = 0x20;
@@ -1108,6 +1139,39 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         Err(FatError::NoSpace)
     }
 
+    /// BPBのFSInfo欄がvolume内を指すなら、そのsectorを「free/next不明」の
+    /// 正しいFSInfoへ一度だけ揃える。このdriverはFSInfoを一切読まずfree
+    /// clusterをFAT走査で決めるため、実値を維持するcostを払わない。
+    /// 古い実測値を残すと他のreaderや`fsck`へ誤情報を配り続けるため、
+    /// 最初のFAT更新でunknownへ揃える。signatureが欠けるsector（専用領域の
+    /// 未初期化を含む）へは正しいFSInfoをまるごと書く。
+    fn mark_fsinfo_unknown(&mut self, scratch: &mut [u8; 512]) -> Result<(), FatError<R::Error>> {
+        if self.fsinfo_marked || self.fsinfo_lba == 0 {
+            return Ok(());
+        }
+        if let Ok(()) = self.reader.read_sector(self.fsinfo_lba, scratch)
+            && read_u32(scratch, 0) == FSINFO_LEAD_SIG
+            && read_u32(scratch, 484) == FSINFO_STRUCT_SIG
+            && read_u32(scratch, 488) == FSINFO_UNKNOWN
+            && read_u32(scratch, 492) == FSINFO_UNKNOWN
+            && read_u32(scratch, 508) == FSINFO_TRAIL_SIG
+        {
+            self.fsinfo_marked = true;
+            return Ok(());
+        }
+        scratch.fill(0);
+        write_u32(scratch, 0, FSINFO_LEAD_SIG);
+        write_u32(scratch, 484, FSINFO_STRUCT_SIG);
+        write_u32(scratch, 488, FSINFO_UNKNOWN);
+        write_u32(scratch, 492, FSINFO_UNKNOWN);
+        write_u32(scratch, 508, FSINFO_TRAIL_SIG);
+        self.reader
+            .write_sector(self.fsinfo_lba, scratch)
+            .map_err(FatError::Read)?;
+        self.fsinfo_marked = true;
+        Ok(())
+    }
+
     /// FATの`cluster`番目のentryへ`value`を書く。上位4 bitの予約位は
     /// 保持する。第1 FATのsectorを読んで書き換え、同じsectorを全FAT面の
     /// 同位置へ書く。第1面の書き込み後に第2面で失敗するとエラーを返すが、
@@ -1118,6 +1182,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         value: u32,
         scratch: &mut [u8; 512],
     ) -> Result<(), FatError<R::Error>> {
+        self.mark_fsinfo_unknown(scratch)?;
         let entry_offset = cluster.checked_mul(4).ok_or(FatError::CorruptChain)?;
         let fat_sector = entry_offset / 512;
         let byte_offset = (entry_offset % 512) as usize;
@@ -2079,6 +2144,18 @@ fn parse_boot_sector(
         return Err(ParseError::InvalidFilesystem);
     }
 
+    // FSInfo欄はadvisory。0または予約領域外を指す場合は「無し」(0)として
+    // mountを拒否はしない。
+    #[cfg(not(target_arch = "riscv32"))]
+    let fsinfo_lba = {
+        let fsinfo_sector = read_u16(sector, 48) as u32;
+        if fsinfo_sector != 0 && fsinfo_sector < reserved_sectors {
+            partition_start.checked_add(fsinfo_sector).unwrap_or(0)
+        } else {
+            0
+        }
+    };
+
     let fat_total_sectors = (fat_count as u32)
         .checked_mul(fat_sectors)
         .ok_or(ParseError::InvalidFilesystem)?;
@@ -2144,6 +2221,8 @@ fn parse_boot_sector(
         fat_sectors,
         #[cfg(not(target_arch = "riscv32"))]
         fat_count: fat_count as u32,
+        #[cfg(not(target_arch = "riscv32"))]
+        fsinfo_lba,
         data_start,
         sectors_per_cluster,
         root_cluster,
@@ -3005,7 +3084,7 @@ mod tests {
 
     /// root: [0]=HELLO.TXT(cluster 4, 11B), [1]=SUBDIR(cluster 5),
     /// [2]=終端。cluster 3と6以降はfree。
-    fn mounted_writable_fixture() -> Fat32<MemoryReader<10>> {
+    fn writable_sectors() -> [(u32, [u8; 512]); 10] {
         let mut root = [0; 512];
         write_directory_entry(&mut root, 0, b"HELLO   TXT", 0x20, 4, 11);
         write_directory_entry(&mut root, 1, b"SUBDIR     ", 0x10, 5, 0);
@@ -3017,7 +3096,7 @@ mod tests {
         write_directory_entry(&mut subdir, 0, b".          ", 0x10, 5, 0);
         write_directory_entry(&mut subdir, 1, b"..         ", 0x10, 2, 0);
 
-        Fat32::mount(MemoryReader::with_sectors([
+        [
             (0, writable_boot_sector()),
             (32, writable_fat()),
             (33, root),
@@ -3028,8 +3107,35 @@ mod tests {
             (38, [0; 512]),
             (39, [0; 512]),
             (40, [0; 512]),
-        ]))
-        .unwrap()
+        ]
+    }
+
+    fn mounted_writable_fixture() -> Fat32<MemoryReader<10>> {
+        Fat32::mount(MemoryReader::with_sectors(writable_sectors())).unwrap()
+    }
+
+    /// FSInfo sector。`unknown`ならfree/nextを規定の「不明」値、違えば
+    /// 正しい形だが内容の古い値を持たせる。
+    fn fsinfo_sector(unknown: bool) -> [u8; 512] {
+        let mut sector = [0; 512];
+        write_u32(&mut sector, 0, 0x4161_5252);
+        write_u32(&mut sector, 484, 0x6141_7272);
+        write_u32(&mut sector, 488, if unknown { 0xffff_ffff } else { 61 });
+        write_u32(&mut sector, 492, if unknown { 0xffff_ffff } else { 3 });
+        write_u32(&mut sector, 508, 0xaa55_0000);
+        sector
+    }
+
+    /// BPBがsector 1をFSInfoとして指すwritable fixture。
+    fn mounted_fsinfo_fixture(fsinfo: [u8; 512]) -> Fat32<MemoryReader<11>> {
+        let base = writable_sectors();
+        let mut boot = base[0].1;
+        write_u16(&mut boot, 48, 1);
+        let mut sectors = [(0, [0; 512]); 11];
+        sectors[0] = (0, boot);
+        sectors[1] = (1, fsinfo);
+        sectors[2..].copy_from_slice(&base[1..]);
+        Fat32::mount(MemoryReader::with_sectors(sectors)).unwrap()
     }
 
     fn sector_of<const N: usize>(fs: &Fat32<MemoryReader<N>>, lba: u32) -> &[u8; 512] {
@@ -3321,6 +3427,79 @@ mod tests {
         assert_eq!(fs.write_range(&mut desc, 0, b"new data").unwrap(), 8);
         fs.rename("OLD.TXT", "HELLO.TXT").unwrap();
         assert_eq!(read_u32(sector_of(&fs, 32), 4 * 4) & 0x0fff_ffff, 0);
+        assert_fats_mirrored(&fs);
+    }
+
+    // Catches the first FAT mutation leaving a stale-but-valid FSInfo
+    // untouched: the kernel never reads it, so it must be normalized to the
+    // spec-legal "unknown" instead of publishing old counts forever.
+    #[test]
+    fn first_fat_mutation_marks_stale_fsinfo_unknown() {
+        let mut fs = mounted_fsinfo_fixture(fsinfo_sector(false));
+        fs.create_dir("NEWDIR").unwrap();
+        let fsinfo = sector_of(&fs, 1);
+        assert_eq!(read_u32(fsinfo, 0), 0x4161_5252);
+        assert_eq!(read_u32(fsinfo, 484), 0x6141_7272);
+        assert_eq!(read_u32(fsinfo, 488), 0xffff_ffff);
+        assert_eq!(read_u32(fsinfo, 492), 0xffff_ffff);
+        assert_eq!(read_u32(fsinfo, 508), 0xaa55_0000);
+    }
+
+    // Catches a BPB that points at a sector never initialized as FSInfo
+    // (e.g. a freshly formatted image): the first mutation must write a
+    // complete valid FSInfo, signatures included.
+    #[test]
+    fn first_fat_mutation_repairs_an_uninitialized_fsinfo_sector() {
+        let mut fs = mounted_fsinfo_fixture([0; 512]);
+        fs.create_dir("NEWDIR").unwrap();
+        let fsinfo = sector_of(&fs, 1);
+        assert_eq!(read_u32(fsinfo, 0), 0x4161_5252);
+        assert_eq!(read_u32(fsinfo, 484), 0x6141_7272);
+        assert_eq!(read_u32(fsinfo, 488), 0xffff_ffff);
+        assert_eq!(read_u32(fsinfo, 508), 0xaa55_0000);
+    }
+
+    // Catches the mark reaching volumes without an FSInfo pointer: writes
+    // must proceed without touching any extra sector (lba 1 is absent from
+    // the fixture, so a stray write would fail with MissingSector).
+    #[test]
+    fn volume_without_fsinfo_still_writes_normally() {
+        let mut fs = mounted_writable_fixture();
+        fs.create_dir("NEWDIR").unwrap();
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, &[0xab; 600]).unwrap(), 600);
+        fs.unlink_file("NEW.TXT").unwrap();
+    }
+
+    // Catches allocation dropping a freed cluster: after unlink, the next
+    // file's growth must reuse free entries rather than skipping them.
+    #[test]
+    fn freed_cluster_is_reused_by_the_next_allocation() {
+        let mut fs = mounted_writable_fixture();
+        fs.unlink_file("HELLO.TXT").unwrap();
+        assert_eq!(read_u32(sector_of(&fs, 32), 4 * 4) & 0x0fff_ffff, 0);
+        let mut desc = fs.create_file("NEW.TXT").unwrap();
+        assert_eq!(fs.write_range(&mut desc, 0, &[0xab; 600]).unwrap(), 600);
+        assert_eq!(read_u32(sector_of(&fs, 32), 3 * 4) & 0x0fff_ffff, 4);
+        assert_eq!(
+            read_u32(sector_of(&fs, 32), 4 * 4) & 0x0fff_ffff,
+            0x0fff_ffff
+        );
+    }
+
+    // Catches a power-loss-mid-mirror image: FAT2 lost its copy while FAT1
+    // kept it. Mount must read FAT1's view, and the next mutation resyncs
+    // both copies instead of failing on the divergence.
+    #[test]
+    fn divergent_fat_mirror_still_reads_and_resyncs() {
+        let mut sectors = mirrored_sectors();
+        sectors[2] = (33, [0; 512]);
+        let mut fs = Fat32::mount(MemoryReader::with_sectors(sectors)).unwrap();
+        let mut out = Vec::new();
+        fs.read_file("HELLO.TXT", |chunk| out.extend_from_slice(chunk))
+            .unwrap();
+        assert_eq!(out, b"hello world");
+        fs.create_dir("NEWDIR").unwrap();
         assert_fats_mirrored(&fs);
     }
 
