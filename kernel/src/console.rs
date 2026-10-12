@@ -137,12 +137,14 @@ pub fn read_byte() -> u8 {
         // 寝るため、FIFOが空の間に届いた次のburstも取りこぼさない。
         let mut uart = Backend::for_target();
         loop {
+            // UARTの受信割り込みはlevel-triggerであり、byteを消費すると
+            // deviceのirq lineが落ちてpendingも消える。claimがdrainより先に
+            // 走るよう、この判定の前にpending処理を置く。
+            crate::drivers::plic::handle_external_pending();
             if uart.has_byte() {
                 return uart.read_byte();
             }
             uart.rearm_rx_interrupt();
-            // pendingしたexternal割り込みをclaimしてdevice状態を整えてから寝る。
-            crate::drivers::plic::handle_external_pending();
             // Safety: STIE/SEIEを立てた`wfi`であり、UART受信かtimerの
             // pending割り込みが起床させる。
             unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
@@ -156,6 +158,11 @@ pub fn read_byte() -> u8 {
 /// byteは消費しない (frame streamは`read_byte`が順に引く)。
 #[cfg(target_arch = "riscv64")]
 pub fn stdin_pending() -> bool {
+    // UARTの受信割り込みはlevel-triggerであり、stagingがbyteを消費すると
+    // lineが落ちてclaimすべきpendingも消える。消費経路は必ずこの判定か
+    // `read_byte`を通るため、先にpendingをclaimしておけばbyte到着のたびに
+    // 割り込みを確実に観測できる。
+    crate::drivers::plic::handle_external_pending();
     let mut uart = Backend::for_target();
     if uart.has_byte() {
         return true;
