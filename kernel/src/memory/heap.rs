@@ -15,6 +15,8 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
+use crate::memory::frame::PAGE_SIZE;
+
 /// headerと空きブロックnodeの最小サイズを兼ねる割り当て粒度。
 /// `Span`も`FreeNode`も2ワードを要するため16バイトが下限である。
 const GRANULE: usize = 16;
@@ -71,6 +73,9 @@ pub struct Heap {
     start: usize,
     end: usize,
     allocated: usize,
+    /// `init`時点の下端。これより低位の領域は`extend_down`で取り込んだ
+    /// 成長分であり、空きができれば`release_grown_pages`で切り離せる。
+    init_start: usize,
 }
 
 impl Heap {
@@ -81,6 +86,7 @@ impl Heap {
             start: 0,
             end: 0,
             allocated: 0,
+            init_start: 0,
         }
     }
 
@@ -110,6 +116,7 @@ impl Heap {
         self.start = start;
         self.end = end;
         self.allocated = 0;
+        self.init_start = start;
         Ok(())
     }
 
@@ -202,6 +209,51 @@ impl Heap {
         self.insert_free(new_start, new_start + len)?;
         self.start = new_start;
         Ok(())
+    }
+
+    /// `init`時点の下端より下へ成長した領域について、下端の空きブロックが
+    /// page全体を覆うかぎり切り離し、各pageの先頭番地を`release`へ渡す。
+    /// 戻り値は切り離したpage数。
+    ///
+    /// 初期領域は呼び出し側の規約で必ず残すため、`init_start`より上は
+    /// 切り離さない。成長時にframe供給元から借りたpageだけが戻り対象に
+    /// なる。領域内で空いたが下端に達しないpageは連続領域の内部なので
+    /// 切り離せず、そのままlistへ残る。
+    pub fn release_grown_pages(&mut self, mut release: impl FnMut(usize)) -> usize {
+        let mut released = 0;
+        while self.start < self.init_start
+            && self.start.is_multiple_of(PAGE_SIZE)
+            && self
+                .head
+                .is_some_and(|head| head.as_ptr() as usize == self.start)
+        {
+            let head_ptr = self.head.expect("head checked above");
+            // Safety: list上のnodeは有効な空きブロックを指す。
+            let head = unsafe { head_ptr.as_ref() };
+            if head.size < PAGE_SIZE {
+                break;
+            }
+            let remainder = head.size - PAGE_SIZE;
+            let next = head.next;
+            let old_start = self.start;
+            self.start += PAGE_SIZE;
+            if remainder >= GRANULE {
+                // Safety: 切り離し後の`self.start`は残存ブロックの先頭で、
+                // `remainder`は粒度の倍数かつ`GRANULE`以上である。
+                unsafe {
+                    (self.start as *mut FreeNode).write(FreeNode {
+                        size: remainder,
+                        next,
+                    });
+                }
+                self.head = NonNull::new(self.start as *mut FreeNode);
+            } else {
+                self.head = next;
+            }
+            release(old_start);
+            released += 1;
+        }
+        released
     }
 
     pub fn stats(&self) -> HeapStats {
@@ -545,6 +597,21 @@ mod tests {
         (heap, backing)
     }
 
+    /// page整列を保証するheap裏付け領域。`release_grown_pages`は
+    /// `start`のpage整列を要求するため、成長の再現にはpage境界が要る。
+    #[repr(align(4096))]
+    struct PageRegion([u8; 3 * 4096]);
+
+    /// 初期領域を最上位page、成長余地を残り二pageとするheapを作る。
+    fn growable_page_heap() -> (Heap, Box<PageRegion>) {
+        let mut heap = Heap::empty();
+        let backing = Box::new(PageRegion([0; 3 * 4096]));
+        let base = backing.0.as_ptr() as usize;
+        // Safety: `backing`はこのヒープだけが使う排他的領域である。
+        unsafe { heap.init(base + 2 * 4096, 4096) }.unwrap();
+        (heap, backing)
+    }
+
     #[test]
     fn extend_down_grows_the_region_contiguously() {
         let (mut heap, backing) = splittable_heap();
@@ -594,6 +661,84 @@ mod tests {
         unsafe { heap.dealloc(used) }.unwrap();
         assert_eq!(heap.stats().free_blocks, 1);
         assert_eq!(heap.stats().free, 4096);
+    }
+
+    // Catches grown pages leaking out of the frame pool forever: once the
+    // heap's bottom free block covers whole pages below init_start,
+    // release_grown_pages must detach them and shrink the region back.
+    #[test]
+    fn release_grown_pages_returns_free_bottom_pages() {
+        let (mut heap, backing) = growable_page_heap();
+        let base = backing.0.as_ptr() as usize;
+
+        heap.extend_down(base + 4096, 4096).unwrap();
+        heap.extend_down(base, 4096).unwrap();
+        assert_eq!(heap.stats().total, 3 * 4096);
+
+        let mut released = Vec::new();
+        let count = heap.release_grown_pages(|start| released.push(start));
+        assert_eq!(count, 2);
+        assert_eq!(released, [base, base + 4096]);
+        assert_eq!(heap.start(), base + 2 * 4096);
+        let stats = heap.stats();
+        assert_eq!(stats.total, 4096);
+        assert_eq!(stats.free, 4096);
+        assert_eq!(stats.free_blocks, 1);
+    }
+
+    // Catches the initial region itself being handed back: the pool never
+    // owned those pages, so a free bottom edge at init_start must stop the
+    // release even when it is page-aligned and fully free.
+    #[test]
+    fn release_grown_pages_keeps_the_initial_region() {
+        let (mut heap, _backing) = growable_page_heap();
+
+        let mut released = Vec::new();
+        let count = heap.release_grown_pages(|start| released.push(start));
+        assert_eq!(count, 0);
+        assert!(released.is_empty());
+        assert_eq!(heap.stats().total, 4096);
+    }
+
+    // Catches a live span pinning the bottom edge: while the lowest grown
+    // page is in use, only the boundary can shrink, so nothing is returned
+    // even though higher grown pages are free.
+    #[test]
+    fn release_grown_pages_stops_at_a_used_bottom_page() {
+        let (mut heap, backing) = growable_page_heap();
+        let base = backing.0.as_ptr() as usize;
+
+        heap.extend_down(base + 4096, 4096).unwrap();
+        heap.extend_down(base, 4096).unwrap();
+        // 最初の割り当ては最下位の空きブロック（成長分の下端）から切られる。
+        let pinned = heap.alloc(layout(64)).unwrap();
+        let mut released = Vec::new();
+        assert_eq!(heap.release_grown_pages(|s| released.push(s)), 0);
+        assert_eq!(heap.stats().total, 3 * 4096);
+
+        // 解放して下端が併合されると、成長分はまとめて返される。
+        unsafe { heap.dealloc(pinned) }.unwrap();
+        assert_eq!(heap.release_grown_pages(|s| released.push(s)), 2);
+        assert_eq!(heap.start(), base + 2 * 4096);
+    }
+
+    // Catches spans parked in the grown region holding it hostage: while
+    // any span lives below the free space, the bottom free block cannot
+    // start at the boundary, so no grown page may detach.
+    #[test]
+    fn release_grown_pages_needs_a_full_free_page() {
+        let (mut heap, backing) = growable_page_heap();
+        let base = backing.0.as_ptr() as usize;
+
+        heap.extend_down(base + 4096, 4096).unwrap();
+        heap.extend_down(base, 4096).unwrap();
+        // 成長分の内部を埋めて下端の空きを1 page未満にする。
+        let _a = heap.alloc(layout(2048)).unwrap();
+        let _b = heap.alloc(layout(2048)).unwrap();
+        let _c = heap.alloc(layout(2048)).unwrap();
+        let mut released = Vec::new();
+        assert_eq!(heap.release_grown_pages(|s| released.push(s)), 0);
+        assert!(released.is_empty());
     }
 
     #[test]
