@@ -13,56 +13,20 @@ use core::ops::DerefMut;
 use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use crate::storage::SectorReader;
+pub use crate::virtio::Mmio;
+use crate::virtio::{
+    AvailRing, DESC_NEXT, DESC_WRITE, Desc, FEATURE_VERSION_1_HI, POLL_LIMIT, QUEUE_LEN,
+    STATUS_ACK, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, UsedRing, reg,
+};
+#[cfg(test)]
+use crate::virtio::{MMIO_MAGIC, MMIO_VERSION, UsedElem};
 
-const MMIO_MAGIC: u32 = 0x7472_6976;
-const MMIO_VERSION: u32 = 2;
 const DEVICE_ID_BLOCK: u32 = 2;
-
-mod reg {
-    pub const MAGIC: usize = 0x00;
-    pub const VERSION: usize = 0x04;
-    pub const DEVICE_ID: usize = 0x08;
-    pub const DEVICE_FEATURES: usize = 0x10;
-    pub const DEVICE_FEATURES_SEL: usize = 0x14;
-    pub const DRIVER_FEATURES: usize = 0x20;
-    pub const DRIVER_FEATURES_SEL: usize = 0x24;
-    pub const QUEUE_SEL: usize = 0x30;
-    pub const QUEUE_NUM_MAX: usize = 0x34;
-    pub const QUEUE_NUM: usize = 0x38;
-    pub const QUEUE_READY: usize = 0x44;
-    pub const QUEUE_NOTIFY: usize = 0x50;
-    pub const INTERRUPT_STATUS: usize = 0x60;
-    pub const INTERRUPT_ACK: usize = 0x64;
-    pub const STATUS: usize = 0x70;
-    pub const QUEUE_DESC_LO: usize = 0x80;
-    pub const QUEUE_DESC_HI: usize = 0x84;
-    pub const QUEUE_DRIVER_LO: usize = 0x90;
-    pub const QUEUE_DRIVER_HI: usize = 0x94;
-    pub const QUEUE_DEVICE_LO: usize = 0xa0;
-    pub const QUEUE_DEVICE_HI: usize = 0xa4;
-    pub const CONFIG: usize = 0x100;
-}
-
-const STATUS_ACK: u32 = 1;
-const STATUS_DRIVER: u32 = 2;
-const STATUS_DRIVER_OK: u32 = 4;
-const STATUS_FEATURES_OK: u32 = 8;
-
-/// VIRTIO_F_VERSION_1。features high wordのbit 0 (=bit 32)。
-const FEATURE_VERSION_1_HI: u32 = 1;
-
-const QUEUE_LEN: usize = 8;
-const DESC_NEXT: u16 = 1;
-const DESC_WRITE: u16 = 2;
 
 const BLK_REQUEST_IN: u32 = 0;
 #[cfg(not(target_arch = "riscv32"))]
 const BLK_REQUEST_OUT: u32 = 1;
 const BLK_STATUS_OK: u8 = 0;
-
-/// device応答を待つpollの上限。QEMU上では即応答するので、これは
-/// device故障時の暴走防止である。
-const POLL_LIMIT: u32 = 5_000_000;
 
 /// `io_block_allowed`時の短期poll上限。これだけ待ってもusedが進まない
 /// requestは`WouldBlock`を返し、呼び出し側がprocessを`BlockedOnIo`へ
@@ -84,52 +48,6 @@ pub fn set_io_block_allowed(allowed: bool) {
 /// `without_io_block`が保存/復帰に使う。
 pub fn io_block_allowed() -> bool {
     IO_BLOCK_ALLOWED.load(Ordering::Relaxed)
-}
-
-/// device MMIO register fileへのアクセスを抽象化する。実機側はvolatile
-/// 32-bit load/store、host testはregister配列+queue消化を真似る。
-pub trait Mmio {
-    fn read32(&self, offset: usize) -> u32;
-    fn write32(&mut self, offset: usize, value: u32);
-
-    /// deviceが立てたused-buffer割り込みをackする。割り込みを使う経路
-    /// (PLIC claim) だけが呼び、polling経路では不要である。
-    fn interrupt_ack(&mut self) {
-        let status = self.read32(reg::INTERRUPT_STATUS);
-        self.write32(reg::INTERRUPT_ACK, status);
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Desc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
-
-#[repr(C)]
-struct AvailRing {
-    flags: u16,
-    idx: u16,
-    ring: [u16; QUEUE_LEN],
-    used_event: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct UsedElem {
-    id: u32,
-    len: u32,
-}
-
-#[repr(C)]
-struct UsedRing {
-    flags: u16,
-    idx: u16,
-    elems: [UsedElem; QUEUE_LEN],
-    avail_event: u16,
 }
 
 #[repr(C)]
@@ -181,6 +99,19 @@ pub enum VirtioError {
     DeviceStatus(u8),
 }
 
+impl From<crate::virtio::InitError> for VirtioError {
+    fn from(error: crate::virtio::InitError) -> Self {
+        match error {
+            crate::virtio::InitError::BadMagic => Self::BadMagic,
+            crate::virtio::InitError::UnsupportedVersion(version) => {
+                Self::UnsupportedVersion(version)
+            }
+            crate::virtio::InitError::WrongDeviceId(id) => Self::NotBlockDevice(id),
+            crate::virtio::InitError::Timeout => Self::Timeout,
+        }
+    }
+}
+
 /// queueへ投入してまだused ringへ戻っていないrequest。
 #[derive(Clone, Copy)]
 struct PendingRequest {
@@ -216,29 +147,7 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
         if !region.base().is_multiple_of(4096) {
             return Err(VirtioError::MisalignedRegion);
         }
-        if mmio.read32(reg::MAGIC) != MMIO_MAGIC {
-            return Err(VirtioError::BadMagic);
-        }
-        let version = mmio.read32(reg::VERSION);
-        if version != MMIO_VERSION {
-            return Err(VirtioError::UnsupportedVersion(version));
-        }
-        let device_id = mmio.read32(reg::DEVICE_ID);
-        if device_id != DEVICE_ID_BLOCK {
-            return Err(VirtioError::NotBlockDevice(device_id));
-        }
-
-        // reset → ACK → DRIVER
-        mmio.write32(reg::STATUS, 0);
-        let mut spins = 0u32;
-        while mmio.read32(reg::STATUS) != 0 {
-            spins += 1;
-            if spins > POLL_LIMIT {
-                return Err(VirtioError::Timeout);
-            }
-        }
-        mmio.write32(reg::STATUS, STATUS_ACK);
-        mmio.write32(reg::STATUS, STATUS_ACK | STATUS_DRIVER);
+        crate::virtio::begin_init(&mut mmio, DEVICE_ID_BLOCK)?;
 
         // feature negotiation: VERSION_1だけを要求する。
         mmio.write32(reg::DEVICE_FEATURES_SEL, 0);
@@ -258,39 +167,16 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
         }
 
         // queue 0を登録する。requestには3 descあれば足りる。
-        mmio.write32(reg::QUEUE_SEL, 0);
-        let max = mmio.read32(reg::QUEUE_NUM_MAX) as usize;
-        if max < 3 {
-            return Err(VirtioError::QueueTooSmall);
-        }
-        let queue_len = max.min(QUEUE_LEN);
-        mmio.write32(reg::QUEUE_NUM, queue_len as u32);
-        let base = region.base() as u64;
-        let write_addr = |mmio: &mut M, lo: usize, hi: usize, addr: u64| {
-            mmio.write32(lo, addr as u32);
-            mmio.write32(hi, (addr >> 32) as u32);
-        };
-        write_addr(
+        let region_ref: &VirtioRegion = &region;
+        let queue_len = crate::virtio::setup_queue(
             &mut mmio,
-            reg::QUEUE_DESC_LO,
-            reg::QUEUE_DESC_HI,
-            base + offset_of!(VirtioRegion, desc) as u64,
-        );
-        write_addr(
-            &mut mmio,
-            reg::QUEUE_DRIVER_LO,
-            reg::QUEUE_DRIVER_HI,
-            base + offset_of!(VirtioRegion, avail) as u64,
-        );
-        write_addr(
-            &mut mmio,
-            reg::QUEUE_DEVICE_LO,
-            reg::QUEUE_DEVICE_HI,
-            base + offset_of!(VirtioRegion, used) as u64,
-        );
-        // 領域の初期化内容をdeviceのqueue読み取りより先に可視化する。
-        fence(Ordering::SeqCst);
-        mmio.write32(reg::QUEUE_READY, 1);
+            0,
+            region_ref.desc.as_ptr(),
+            &region_ref.avail,
+            &region_ref.used,
+            3,
+        )
+        .ok_or(VirtioError::QueueTooSmall)?;
 
         // block config: capacity (sectors) が先頭8 byte。
         let capacity =
@@ -304,7 +190,7 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
         Ok(Self {
             mmio,
             region,
-            queue_len: queue_len as u16,
+            queue_len,
             capacity,
             next_avail: 0,
             last_used: 0,

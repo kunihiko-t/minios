@@ -4,7 +4,8 @@
     feature = "qemu-test-heap",
     feature = "qemu-test-vm",
     feature = "qemu-test-elf",
-    feature = "qemu-test-memory"
+    feature = "qemu-test-memory",
+    feature = "qemu-test-net-arp"
 ))]
 use super::*;
 
@@ -111,6 +112,115 @@ pub(crate) fn run_virtio_test(
         fatal_qemu_test(format_args!("virtio: HELLO.TXT content mismatch len={len}"));
     }
     crate::println!("[MINIOS_TEST] virtio: ok");
+    successful_qemu_test_shutdown()
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+// FDTが報告するvirtio-mmio slotからnet deviceをprobeし、QEMU user-netの
+// gateway (10.0.2.2) へARP requestを送ってreplyを受け取る。TX/RXの両
+// queueが実際にframeを運んだことと、used-buffer割り込みがPLIC経由で
+// claimできたことをmarkerで観測する。
+pub(crate) fn run_net_arp_test(
+    spec: &minios_kernel::fdt::MachineSpec,
+    frames: &mut dyn FrameSource,
+) {
+    use minios_kernel::net::arp;
+    use minios_kernel::net::virtio_net::{NetError, NetQueueRegion, NetRxBufPage, VirtioNet};
+
+    const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+    const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
+
+    let mut net = None;
+    let mut net_irq = 0u32;
+    for (slot, &base) in spec.virtio_mmio[..spec.virtio_mmio_count]
+        .iter()
+        .enumerate()
+    {
+        // Safety: `base`はFDTが報告したMMIO領域で、`with_device_pages`が
+        // S-mode R+Wとしてmap済み。
+        let mmio = unsafe { drivers::virtio_mmio::MmioRegs::new(base) };
+        let Some(queue_frame) = frames.allocate() else {
+            fatal_qemu_test(format_args!("net: queue frame allocation failed"));
+        };
+        let region = FrameRegion::<NetQueueRegion>::new(queue_frame);
+        let mut rx_slots = [None, None, None, None];
+        for slot in &mut rx_slots {
+            let Some(frame) = frames.allocate() else {
+                fatal_qemu_test(format_args!("net: rx frame allocation failed"));
+            };
+            *slot = Some(FrameRegion::<NetRxBufPage>::new(frame));
+        }
+        let rx_pages = rx_slots.map(|page| page.expect("rx page slots are all populated above"));
+        match VirtioNet::init(mmio, region, rx_pages) {
+            Ok(device) => {
+                crate::println!(
+                    "[MINIOS_TEST] net: virtio-net at 0x{base:x} mac={:02x?}",
+                    device.mac()
+                );
+                net = Some(device);
+                net_irq = spec.virtio_mmio_irq[slot];
+                break;
+            }
+            // 空slotかnet以外のdeviceなら次のslotを試す。
+            Err(
+                NetError::BadMagic | NetError::NotNetDevice(_) | NetError::UnsupportedVersion(_),
+            ) => {}
+            Err(error) => {
+                fatal_qemu_test(format_args!("net: init failed at 0x{base:x}: {error:?}"));
+            }
+        }
+    }
+    let Some(mut net) = net else {
+        fatal_qemu_test(format_args!("net: no net device found"));
+    };
+    if net_irq != 0 {
+        drivers::plic::enable(net_irq);
+    }
+
+    let mut request = [0u8; arp::ARP_FRAME_LEN];
+    arp::encode_request(&mut request, net.mac(), GUEST_IP, GATEWAY_IP);
+    if let Err(error) = net.transmit(&request) {
+        fatal_qemu_test(format_args!("net: transmit failed: {error:?}"));
+    }
+
+    // replyをdeadlineまでpollする。used-buffer割り込みはPLIC claimで
+    // 処理し、claim回数が割り込み経路の稼働証拠になる。
+    let deadline = time::ticks() + 100;
+    let mac = net.mac();
+    let mut reply = None;
+    while time::ticks() < deadline && reply.is_none() {
+        drivers::plic::handle_external_pending();
+        let mut found = None;
+        match net.drain_rx(&mut |frame| {
+            if let Some(candidate) = arp::parse_reply(frame, &mac) {
+                found = Some(candidate);
+            }
+        }) {
+            Ok(_) => reply = found,
+            Err(error) => fatal_qemu_test(format_args!("net: drain failed: {error:?}")),
+        }
+    }
+    let Some(reply) = reply else {
+        let (rx_avail, rx_used, tx_used, queue_len, istatus) = net.debug_state();
+        fatal_qemu_test(format_args!(
+            "net: no ARP reply within deadline rx_avail={rx_avail} rx_used={rx_used} tx_used={tx_used} qlen={queue_len} istatus={istatus}"
+        ));
+    };
+    crate::println!(
+        "[MINIOS_TEST] net-arp: gateway {}.{}.{}.{} at {:02x?}",
+        reply.sender_ip[0],
+        reply.sender_ip[1],
+        reply.sender_ip[2],
+        reply.sender_ip[3],
+        reply.sender_mac
+    );
+    // claimが一度も無ければdeviceのinterrupt lineが動いていない。
+    if net_irq != 0 && drivers::plic::virtio_irq_claims_for(net_irq) == 0 {
+        fatal_qemu_test(format_args!(
+            "net: ARP reply arrived without a virtio interrupt claim"
+        ));
+    }
+    crate::println!("[MINIOS_TEST] net-arp: ok");
     successful_qemu_test_shutdown()
 }
 

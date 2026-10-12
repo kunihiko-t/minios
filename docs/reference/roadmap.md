@@ -142,7 +142,9 @@ networkを扱うには、外部割り込みでdeviceの完了を受け取る基�
 - **virtio-blkの割り込み化**（完了）：deviceのused-buffer完了をPLIC経由のvirtio割り込みで受け取り、I/O完了待ちのprocessを`BlockedOnIo`で退避させます。
   virtio-mmioのsource番号はFDT nodeの`interrupts`宣言から取り（node列挙順はslot順とは限らないため）、claimがdeviceのinterrupt lineをackします。
   requestは`in_flight`/`done`の状態機械で追跡し、retryが同じ完了をused ringから回収します（`cargo xtask test irq-blk`で検証）。
-- **virtio-net driver**：frameの送受信をringで扱い、hostの`-netdev user`で疎通を確認します。
+- **virtio-net driver**（完了）：`kernel/src/net/virtio_net.rs`がrx/txの二つのvirtqueueでethernet frameを送受し、`-netdev user`のgateway 10.0.2.2へARP requestを送ってreplyを受け取ります（`cargo xtask test net-arp`で検証）。
+  virtio-mmioのregister/queue共通部は`kernel/src/virtio.rs`へ集約してblockとnetの両driverが共有し、net deviceのused-buffer割り込みもblkと同じPLIC claim経路で受けます。
+  virtio_net_hdrは`VIRTIO_NET_F_MRG_RXBUF`をnegotiateした12 byte layoutで統一し、rx bufferは常時deviceへpostしたまま`drain_rx`が回収・再postします。
 - **最小のnetwork stack**：ARP、IPv4、ICMP echo、UDPまでを実装し、TCPは対象外とします。
   guestへは`socket`、`sendto`、`recvfrom`の三つのsyscallで公開します。
 

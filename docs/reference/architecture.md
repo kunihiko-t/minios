@@ -208,7 +208,7 @@ IMEM契約は実効32 KiBであり、RV32 buildは`opt-level=z`で収めます�
 ## QEMU storage
 
 - `storage/virtio_blk.rs`：virtio-mmio v2のblock driverであり、feature negotiation、単一queue、3-desc chainによるsector読み取りと書き込み、used ringのpollを行います。
-- `drivers/virtio_mmio.rs`：register fileへのvolatile 32-bitアクセスを`Mmio` traitとして実装し、host testはfake deviceへ差し替えます。
+- `drivers/virtio_mmio.rs`：register fileへのvolatile 32-bitアクセスを`virtio::Mmio` traitとして実装し、host testはfake deviceへ差し替えます。
 - `MachineSpec::virtio_mmio`：FDTの`virtio,mmio` nodeからMMIOベースを発見し、`with_device_pages`でS-modeの`R+W`へ写像します。
 - `cargo xtask test virtio`：FAT32 disk imageを`virtio-blk-device`として接続し、`HELLO.TXT`のmount・列挙・読み取りをQEMU上で検証します。
 
@@ -219,5 +219,14 @@ queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`と�
 `rename`はentryを別のpathへ移します。同一directory内では8.3名をin-placeに書き換え、別directoryを指定した場合はrecordを新しい親のslotへ複写してsource側を削除する移動になります。fileでもdirectoryでも使え、cluster chainと内容は変わりません。in-place改名ではentryの物理位置が不変なので開いているfdは有効なままです。移動ではentryの物理位置が変わるため、kernelは全processの該当fdのwrite-back先を新しい位置へ追従させ（`relocate_file_fds`）、POSIXの「open fileはrenameしても有効」をmoveでも維持します。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。directoryのtargetは空に限り置き換えられ、fileへのdir改名は`NotDirectory`、非空dirへの改名は`NotEmpty`です。移したdirectoryの`..`は新しい親のcluster番号（root親なら0）へ更新し、directoryを自身または子孫の中へ移す指定は`MoveIntoItself`として`EINVAL`で拒否します。
 `create_dir`は新しいclusterを`.`と`..`のentryで初期化してから親directoryへentryを公開し、途中の失敗では割り当てたclusterを解放してから失敗を返します。
 `remove_dir`は`.`と`..`以外のentryがないことを確かめてから、`unlink_file`と同じくentry削除とchain解放を行います。
+
+## QEMU network
+
+- `virtio.rs`：virtio-mmio v2のregister offset、`Mmio` trait、desc/avail/used ringとfeature/statusの定数、`begin_init`と`setup_queue`の共通手順を置くshared moduleであり、`virtio_blk`と`virtio_net`の両driverが使います。
+- `net/virtio_net.rs`：virtio-mmioのnetwork device driverであり、`VIRTIO_NET_F_MAC`+`VIRTIO_NET_F_MRG_RXBUF`+`VIRTIO_F_VERSION_1`をnegotiateし、rx(queue 0)・tx(queue 1)の二つのqueueでethernet frameを送受します。
+  rx bufferはMTU+headerを収めるpageを常時deviceへpostしておき、usedの完了を`drain_rx`がframeとして引き渡してから同じdescへ再postします。txは1件ずつsubmitし、used完了をboundedに待ちます。
+  virtio_net_hdrはmergeableでnegotiateした12 byte layoutであり、QEMUがTX/RX両方向で同じ長さを仮定することを`net-arp`検査で確認しています。
+- `net/arp.rs`：ARP requestの組み立てとreplyの検証を行う最小codecであり、後の最小network stackでも使います。
+- `cargo xtask test net-arp`：`-netdev user`を持つ`virtio-net-device`を起動し、仮想networkのgateway 10.0.2.2へARP requestを送ってreplyを受け取ります。reply到達とdeviceのused-buffer割り込みがPLIC経由でclaimされたことを併せて検証します。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。

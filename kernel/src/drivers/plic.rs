@@ -34,7 +34,9 @@ const CLAIM_OFFSET: usize = 0x4;
 // claim/completeへのアクセスは行われない。
 static PLIC_BASE: AtomicUsize = AtomicUsize::new(0);
 static UART_IRQ_CLAIMS: AtomicUsize = AtomicUsize::new(0);
-static VIRTIO_IRQ_CLAIMS: AtomicUsize = AtomicUsize::new(0);
+/// virtio source (1..=8) ごとのclaim回数。indexがsource番号そのもの。
+static VIRTIO_IRQ_CLAIMS: [AtomicUsize; (VIRTIO_IRQ_LAST + 1) as usize] =
+    [const { AtomicUsize::new(0) }; (VIRTIO_IRQ_LAST + 1) as usize];
 
 /// virtioのused-buffer割り込みがclaimされたことをrun loopへ伝えるedge flag。
 /// `BlockedOnIo`の起床はこのflagを消費したdispatch loopが行う。
@@ -121,7 +123,7 @@ pub fn handle_external_pending() {
             // 終わるまでdevice側の割り込みをmaskして暴走を止める。
             crate::drivers::uart::Uart::for_target().mask_rx_interrupt();
         } else if (VIRTIO_IRQ_FIRST..=VIRTIO_IRQ_LAST).contains(&source) {
-            VIRTIO_IRQ_CLAIMS.fetch_add(1, Ordering::Relaxed);
+            VIRTIO_IRQ_CLAIMS[source as usize].fetch_add(1, Ordering::Relaxed);
             // `BlockedOnIo`で寝ているprocessをrun loopへ起こすedgeを立てる。
             BLK_IO_NOTIFIED.store(true, Ordering::Relaxed);
             // virtioのused-buffer割り込みはlevelであり、device側をackして
@@ -156,7 +158,20 @@ pub fn blk_io_notified() -> bool {
 /// disk I/Oの完了がpollingではなく割り込み経由だったことを観測する。
 #[cfg(feature = "qemu-test-irq-blk")]
 pub fn virtio_irq_claims() -> usize {
-    VIRTIO_IRQ_CLAIMS.load(Ordering::Relaxed)
+    VIRTIO_IRQ_CLAIMS
+        .iter()
+        .map(|claims| claims.load(Ordering::Relaxed))
+        .sum()
+}
+
+/// `source`番のvirtio割り込みをこれまでにclaimした回数。`net-arp`検査が
+/// net deviceのused-buffer割り込みが実際にPLIC経由で届いたことを観測する。
+#[cfg(feature = "qemu-test-net-arp")]
+pub fn virtio_irq_claims_for(source: u32) -> usize {
+    if !(VIRTIO_IRQ_FIRST..=VIRTIO_IRQ_LAST).contains(&source) {
+        return 0;
+    }
+    VIRTIO_IRQ_CLAIMS[source as usize].load(Ordering::Relaxed)
 }
 
 /// `irq-uart`診断用のread-back。base、S-mode contextのenable word 0、

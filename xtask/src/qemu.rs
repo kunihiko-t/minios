@@ -32,6 +32,7 @@ const FDT_MARKER: &str =
 // `-m 128M`ではヒープ領域は`0x8770_0000..0x8780_0000`の1 MiBである。
 const HEAP_MARKER: &str = "[MINIOS_TEST] heap: ok";
 const VIRTIO_MARKER: &str = "[MINIOS_TEST] virtio: ok";
+const NET_ARP_MARKER: &str = "[MINIOS_TEST] net-arp: ok";
 const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
 /// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
 const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
@@ -180,6 +181,7 @@ pub enum TestKind {
     SchedIoPartial,
     IrqUart,
     IrqBlk,
+    NetArp,
     ProcFault,
     ProcKill,
     Shell,
@@ -253,6 +255,7 @@ impl TestKind {
             }
             Self::IrqUart => "qemu-test-irq-uart",
             Self::IrqBlk => "qemu-test-irq-blk",
+            Self::NetArp => "qemu-test-net-arp",
             Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
             Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
@@ -336,6 +339,7 @@ impl TestKind {
             Self::IrqBlk => {
                 unreachable!("the irq-blk test verifies control frames and the irq marker")
             }
+            Self::NetArp => NET_ARP_MARKER,
             Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
             Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
@@ -1031,6 +1035,12 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         bundle.remove();
         disk.remove();
         return verify_irq_blk_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::NetArp {
+        let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
+        let (command, command_line) = qemu_command_with_net(&kernel);
+        return run_marker_test(kind, command, command_line, deadline);
     }
 
     if kind == TestKind::Shell {
@@ -3311,6 +3321,23 @@ fn qemu_command_with_payload_and_disk(
     args.push("virtio-mmio.force-legacy=false".to_owned());
     args.push("-device".to_owned());
     args.push("virtio-blk-device,drive=blk0,bus=virtio-mmio-bus.0".to_owned());
+    let command_line = render_command(QEMU_PROGRAM, &args);
+    let mut command = Command::new(QEMU_PROGRAM);
+    command.args(&args);
+    (command, command_line)
+}
+
+/// QEMU user-mode networking (`-netdev user`) を持つvirtio-net deviceを
+/// 1台だけ載せた構成。guestからのframeはgateway 10.0.2.2を持つ仮想
+/// network stackが処理するので、外部host無しでARP replyを受け取れる。
+fn qemu_command_with_net(kernel: &Path) -> (Command, String) {
+    let mut args = qemu_args(kernel);
+    args.push("-global".to_owned());
+    args.push("virtio-mmio.force-legacy=false".to_owned());
+    args.push("-netdev".to_owned());
+    args.push("user,id=net0".to_owned());
+    args.push("-device".to_owned());
+    args.push("virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0".to_owned());
     let command_line = render_command(QEMU_PROGRAM, &args);
     let mut command = Command::new(QEMU_PROGRAM);
     command.args(&args);

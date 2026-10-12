@@ -468,6 +468,66 @@ impl Drop for VirtioRegionPage {
     }
 }
 
+/// virtioのqueue/buffer領域の汎用wrapper。frame poolの1 pageを所有し、
+/// dropで返す。`T`は`align(4096)`を持つ4 KiB以内のregion型
+/// (`NetQueueRegion`や`NetRxBufPage`) で、managed RAMは恒等map済み
+/// なのでframeの物理アドレスがそのままdeviceへ渡すDMAアドレスになる。
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+struct FrameRegion<T> {
+    frame: Option<PhysFrame>,
+    _target: core::marker::PhantomData<T>,
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+impl<T> FrameRegion<T> {
+    fn new(frame: PhysFrame) -> Self {
+        // Safety: frame poolが管理する物理pageは`KernelMapPlan`で恒等map
+        // 済み。queue/bufferの初期値が不定だと完了判定を誤るため、page全域を
+        // 0で初期化してから`T`として使う。
+        unsafe { core::ptr::write_bytes(frame.start() as *mut u8, 0, PAGE_SIZE) };
+        Self {
+            frame: Some(frame),
+            _target: core::marker::PhantomData,
+        }
+    }
+
+    fn start(&self) -> usize {
+        self.frame
+            .as_ref()
+            .expect("region frame is held until drop")
+            .start()
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+impl<T> core::ops::Deref for FrameRegion<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // Safety: `frame.start()`は4 KiB整列の恒等map済みpageであり、
+        // `new`で全byteを初期化済み。`T`は`align(4096)`かつ1 page以内。
+        unsafe { &*(self.start() as *const T) }
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+impl<T> core::ops::DerefMut for FrameRegion<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Safety: `deref`と同じ領域。driverが生存中はこのwrapperが領域の
+        // 唯一のaliasである。
+        unsafe { &mut *(self.start() as *mut T) }
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+impl<T> Drop for FrameRegion<T> {
+    fn drop(&mut self) {
+        if let Some(frame) = self.frame.take() {
+            let _ = GlobalFrames.deallocate(frame);
+        }
+    }
+}
+
 #[cfg(target_arch = "riscv64")]
 // Safety: `GlobalAlloc`の契約により、返すポインターはlayoutの整列を満たす
 // 有効な領域であり、`dealloc`は`alloc`が返したポインターだけを受け取る。
@@ -802,6 +862,11 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         qemu_test::run_virtio_test(machine, &mut frames);
     }
 
+    #[cfg(feature = "qemu-test-net-arp")]
+    {
+        qemu_test::run_net_arp_test(machine, &mut frames);
+    }
+
     if let Some(payload) = payload {
         payload::run_boot_payload(&kernel_space, &plan, &mut frames, &mut memory, payload);
     }
@@ -905,7 +970,8 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
         feature = "qemu-test-user-exit",
         feature = "qemu-test-fdt",
         feature = "qemu-test-heap",
-        feature = "qemu-test-virtio"
+        feature = "qemu-test-virtio",
+        feature = "qemu-test-net-arp"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -925,7 +991,8 @@ fn successful_qemu_test_shutdown() -> ! {
         feature = "qemu-test-user-syscall",
         feature = "qemu-test-user-exit",
         feature = "qemu-test-heap",
-        feature = "qemu-test-virtio"
+        feature = "qemu-test-virtio",
+        feature = "qemu-test-net-arp"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {
