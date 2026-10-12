@@ -201,7 +201,7 @@ use minios_kernel::user::syscall::{SyscallFlow, complete_read, dispatch_syscall}
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::user::trap::TrapAction;
 #[cfg(target_arch = "riscv64")]
-use minios_kernel::user::{RunExit, SSTATUS_SIE, SSTATUS_SUM, UserContext};
+use minios_kernel::user::{RunExit, SSTATUS_SIE, UserContext};
 #[cfg(target_arch = "riscv64")]
 use minios_kernel::vm::AddressSpace;
 #[cfg(target_arch = "riscv64")]
@@ -2147,20 +2147,21 @@ unsafe fn sleep_current_process(millis: usize) -> Result<(), isize> {
 }
 
 /// `ReadComplete`の受信済みbyteをguestへ届け、`a0`へ長さを書く。
+/// copyは`copy_to_user`が`check_user_writable_range`と同じpage walkで
+/// U/Wを再検査しながら物理frameへ書くため、検査経路と書き込み経路が
+/// ずれない。S-modeからU pageへのSUM書き込みは不要になった。
 #[cfg(target_arch = "riscv64")]
-fn complete_user_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
-    // S-modeのhandlerがU pageへ書くため、SUMを立ててcopy後に元へ戻す。
-    // trap中はSIEが落ちており、実行窓ではSTIEも無効なため、SUM立て中の
-    // 割り込みで変わる共有状態はない。
-    let sstatus = arch::riscv64::csr::read_sstatus();
-    // Safety: S-modeでSUM bitだけを立て、copy後に保存値を書き戻す。
-    // `complete_read`の契約（dispatch返却値のそのまま受け渡し、user satp
-    // 有効、guest停止中）は呼び出し側handlerが満たす。
-    unsafe {
-        arch::riscv64::csr::write_sstatus(sstatus | SSTATUS_SUM);
-        complete_read(context, start, len, data);
-        arch::riscv64::csr::write_sstatus(sstatus);
-    }
+fn complete_user_read(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    start: u64,
+    len: usize,
+    data: &[u8],
+) {
+    // Safety: `USER_SYSCALL_PROBE_MEMORY`を指す共有参照はdispatchの
+    // 呼び出しで返却済みであり、実行窓の排他契約で`&mut`へ変換できる。
+    let memory = unsafe { &mut *(USER_SYSCALL_PROBE_MEMORY as *mut IdentityFrameStore) };
+    complete_read(context, space, memory, start, len, data);
 }
 
 #[cfg(all(
@@ -2204,7 +2205,7 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
         SyscallFlow::ReadComplete { start, len } => {
-            complete_user_read(context, start, len, &read_scratch[..len]);
+            complete_user_read(context, space, start, len, &read_scratch[..len]);
             RunExit::Resume
         }
         SyscallFlow::Exit(code) => {
@@ -2339,7 +2340,7 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
         SyscallFlow::ReadComplete { start, len } => {
-            complete_user_read(context, start, len, &read_scratch[..len]);
+            complete_user_read(context, space, start, len, &read_scratch[..len]);
             RunExit::Resume
         }
         SyscallFlow::Exit(code) => {
@@ -2417,7 +2418,7 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
         SyscallFlow::ReadComplete { start, len } => {
-            complete_user_read(context, start, len, &read_scratch[..len]);
+            complete_user_read(context, space, start, len, &read_scratch[..len]);
             RunExit::Resume
         }
         SyscallFlow::Exit(code) => {

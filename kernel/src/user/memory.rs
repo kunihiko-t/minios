@@ -100,13 +100,59 @@ pub fn copy_from_user<M: FrameStore>(
     Ok(())
 }
 
+/// kernel bufferの先頭`bytes.len()`byteを、pageごとの検証を通して
+/// user仮想rangeへcopyする。
+///
+/// `copy_from_user`と同じwalk順で各pageの`U`と`W`を確認してから、その
+/// page内のbyteだけ`FrameStore::copy_into`する。user pointerがRustの
+/// 参照やraw pointerとして解されることは決してない。
+/// syscall側では、副作用の前に`EFAULT`を確定させる必要がある場合は
+/// 先に`check_user_writable_range`を呼び、実際のcopyをこの関数へ任せる。
+/// copyが検査と同じpage walkを通るため、検査経路と書き込み経路が
+/// ずれて見逃すことがない。
+pub fn copy_to_user<M: FrameStore>(
+    space: &AddressSpace,
+    memory: &mut M,
+    start: u64,
+    bytes: &[u8],
+) -> Result<(), UserMemoryError<M::Error>> {
+    let length = u64::try_from(bytes.len()).map_err(|_| UserMemoryError::AddressOverflow)?;
+    // rangeを先に確定させ、以降のpage walkがこの中に収まるようにする。
+    start
+        .checked_add(length)
+        .ok_or(UserMemoryError::AddressOverflow)?;
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let address = start + copied as u64;
+        let page_offset = address as usize % PAGE_SIZE;
+        let chunk = core::cmp::min(PAGE_SIZE - page_offset, bytes.len() - copied);
+        let virtual_address = VirtAddr::try_new(address).map_err(|_| UserMemoryError::Unmapped)?;
+        let (physical, flags) =
+            space
+                .translate(memory, virtual_address)
+                .map_err(|error| match error {
+                    VmError::Store(store) => UserMemoryError::Store(store),
+                    _ => UserMemoryError::Unmapped,
+                })?;
+        if !flags.user() || !flags.write() {
+            return Err(UserMemoryError::Permission);
+        }
+        let frame_start = (physical.as_u64() - page_offset as u64) as usize;
+        memory
+            .copy_into(frame_start, page_offset, &bytes[copied..copied + chunk])
+            .map_err(UserMemoryError::Store)?;
+        copied += chunk;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
 
     use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
-    use super::{UserMemoryError, check_user_writable_range, copy_from_user};
+    use super::{UserMemoryError, check_user_writable_range, copy_from_user, copy_to_user};
     use crate::{
         memory::frame::{FrameAllocator, PAGE_SIZE},
         vm::{AddressSpaceBuilder, FrameStore, PageFlags, PhysAddr, VirtPage},
@@ -362,6 +408,85 @@ mod tests {
     fn writable_check_rejects_ranges_that_overflow_the_address_space() {
         assert_eq!(
             check_fixture(u64::MAX - 1, 4),
+            Err(UserMemoryError::AddressOverflow)
+        );
+    }
+
+    // copy_fixtureと同じ空間配置で、user rangeへの書き込みを実行して
+    // 結果をstoreから読み戻す。空きpageは全てゼロ初期化済みである。
+    fn write_fixture(start: u64, bytes: &[u8]) -> Result<Vec<u8>, UserMemoryError<TestStoreError>> {
+        let mut allocator = unsafe { FrameAllocator::<16>::new(0x1000, 0x41_000) }.unwrap();
+        let mut memory = TestFrameStore::default();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
+        let user_flags = PageFlags::new(true, true, false, true).unwrap();
+        builder
+            .map_new_zeroed(VirtPage::from_start(FIRST_USER_PAGE).unwrap(), user_flags)
+            .unwrap();
+        builder
+            .map_new_zeroed(VirtPage::from_start(USER_PAGE_END).unwrap(), user_flags)
+            .unwrap();
+        builder
+            .map_borrowed(
+                VirtPage::from_start(SUPERVISOR_PAGE).unwrap(),
+                PhysAddr::try_new(SUPERVISOR_PAGE).unwrap(),
+                PageFlags::supervisor_r(),
+            )
+            .unwrap();
+        let space = builder.finish();
+
+        copy_to_user(&space, &mut memory, start, bytes)?;
+        let mut output = vec![0u8; bytes.len()];
+        copy_from_user(&space, &memory, start, &mut output).map(|()| output)
+    }
+
+    // Catches a page-crossing write stopping at the first page or landing
+    // at the wrong offset.
+    #[test]
+    fn copy_to_user_writes_across_two_writable_user_pages() {
+        assert_eq!(
+            write_fixture(USER_PAGE_END - 2, b"wxyz"),
+            Ok(b"wxyz".to_vec())
+        );
+    }
+
+    // Catches granting write access to supervisor or unmapped pages.
+    #[test]
+    fn copy_to_user_rejects_supervisor_and_unmapped_pages() {
+        assert_eq!(
+            write_fixture(SUPERVISOR_PAGE, b"x"),
+            Err(UserMemoryError::Permission)
+        );
+        assert_eq!(
+            write_fixture(UNMAPPED_PAGE, b"x"),
+            Err(UserMemoryError::Unmapped)
+        );
+    }
+
+    // Catches treating a read-only user page as writable.
+    #[test]
+    fn copy_to_user_rejects_user_pages_without_write_permission() {
+        let mut allocator = unsafe { FrameAllocator::<8>::new(0x1000, 0x21_000) }.unwrap();
+        let mut memory = TestFrameStore::default();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut memory).unwrap();
+        builder
+            .map_new_zeroed(
+                VirtPage::from_start(FIRST_USER_PAGE).unwrap(),
+                PageFlags::new(true, false, false, true).unwrap(),
+            )
+            .unwrap();
+        let space = builder.finish();
+
+        assert_eq!(
+            copy_to_user(&space, &mut memory, FIRST_USER_PAGE, b"x"),
+            Err(UserMemoryError::Permission)
+        );
+    }
+
+    // Catches wrapping the end address instead of rejecting the range.
+    #[test]
+    fn copy_to_user_rejects_ranges_that_overflow_the_address_space() {
+        assert_eq!(
+            write_fixture(u64::MAX - 1, b"wxyz"),
             Err(UserMemoryError::AddressOverflow)
         );
     }
