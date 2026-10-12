@@ -113,11 +113,13 @@ impl ControlSource for UartControlSource<'_> {
     /// writableなfdを割り当てる。
     #[cfg(target_arch = "riscv64")]
     fn create_file(&mut self, path: &str) -> Result<usize, isize> {
-        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let desc = session.create_file(path).map_err(fat_errno)?;
-        // Safety: 同上。借用はこの呼び出し内で完結する。
-        unsafe { crate::alloc_file_fd(desc, true) }
+        without_io_block(|| {
+            // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            let desc = session.create_file(path).map_err(fat_errno)?;
+            // Safety: 同上。借用はこの呼び出し内で完結する。
+            unsafe { crate::alloc_file_fd(desc, true) }
+        })
     }
 
     /// guestの`read`を開いたfdの現在offsetから読み、offsetを進める。
@@ -168,12 +170,14 @@ impl ControlSource for UartControlSource<'_> {
     /// fdを残すと他fileのentryや内容を壊し得る。
     #[cfg(target_arch = "riscv64")]
     fn unlink(&mut self, path: &str) -> Result<(), isize> {
-        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let (dir_cluster, dir_index) = session.unlink_file(path).map_err(fat_errno)?;
-        // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
-        unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
-        Ok(())
+        without_io_block(|| {
+            // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            let (dir_cluster, dir_index) = session.unlink_file(path).map_err(fat_errno)?;
+            // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
+            unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
+            Ok(())
+        })
     }
 
     /// guestの`rename`をstorage sessionへ委譲する。in-place改名では
@@ -182,18 +186,20 @@ impl ControlSource for UartControlSource<'_> {
     /// 置き換えられたtargetのclusterは解放されるため、そのfdは失効。
     #[cfg(target_arch = "riscv64")]
     fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
-        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let outcome = session.rename(old_path, new_path).map_err(fat_errno)?;
-        if let Some(((oc, oi), (nc, ni))) = outcome.moved {
-            // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
-            unsafe { crate::relocate_file_fds(oc, oi, nc, ni) };
-        }
-        if let Some((dir_cluster, dir_index)) = outcome.replaced {
-            // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
-            unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
-        }
-        Ok(())
+        without_io_block(|| {
+            // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            let outcome = session.rename(old_path, new_path).map_err(fat_errno)?;
+            if let Some(((oc, oi), (nc, ni))) = outcome.moved {
+                // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
+                unsafe { crate::relocate_file_fds(oc, oi, nc, ni) };
+            }
+            if let Some((dir_cluster, dir_index)) = outcome.replaced {
+                // Safety: 同上。fd tableの走査はこの呼び出し内で完結する。
+                unsafe { crate::revoke_file_fds(dir_cluster, dir_index) };
+            }
+            Ok(())
+        })
     }
 
     /// guestの`getpid`を現在processへ委譲する。trap中のprocessが
@@ -389,19 +395,23 @@ impl ControlSource for UartControlSource<'_> {
     /// 失効させるfdもない。
     #[cfg(target_arch = "riscv64")]
     fn make_dir(&mut self, path: &str) -> Result<(), isize> {
-        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        session.create_dir(path).map_err(fat_errno)
+        without_io_block(|| {
+            // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            session.create_dir(path).map_err(fat_errno)
+        })
     }
 
     /// guestの`rmdir`をstorage sessionへ委譲する。dirはfdを持てないため
     /// 戻り値の削除位置に失効させる対象はない。
     #[cfg(target_arch = "riscv64")]
     fn remove_dir(&mut self, path: &str) -> Result<(), isize> {
-        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
-        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        session.remove_dir(path).map_err(fat_errno)?;
-        Ok(())
+        without_io_block(|| {
+            // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            session.remove_dir(path).map_err(fat_errno)?;
+            Ok(())
+        })
     }
 
     /// guestの`lseek`をfdのoffset更新として処理する。`SEEK_END`は
@@ -463,11 +473,13 @@ impl ControlSource for UartControlSource<'_> {
         if !entry.writable() {
             return Err(EBADF);
         }
-        // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
-        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        session
-            .write_range(entry.desc_mut(), offset, data)
-            .map_err(fat_errno)
+        without_io_block(|| {
+            // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            session
+                .write_range(entry.desc_mut(), offset, data)
+                .map_err(fat_errno)
+        })
     }
 
     /// guestの`write`をwritableなfdの現在offsetから書き、offsetを進める。
@@ -491,14 +503,16 @@ impl ControlSource for UartControlSource<'_> {
         if !file.writable() {
             return Err(EBADF);
         }
-        // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
-        let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let offset = file.offset();
-        let count = session
-            .write_range(file.desc_mut(), offset, data)
-            .map_err(fat_errno)?;
-        file.advance(count as u64);
-        Ok(count)
+        without_io_block(|| {
+            // Safety: 同上。session借用とfd借用は同じtrap窓内で完結する。
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            let offset = file.offset();
+            let count = session
+                .write_range(file.desc_mut(), offset, data)
+                .map_err(fat_errno)?;
+            file.advance(count as u64);
+            Ok(count)
+        })
     }
 
     /// guestの`pipe`をpipe tableとfd tableへ委譲する。両端のfdを
@@ -530,6 +544,19 @@ impl ControlSource for UartControlSource<'_> {
     }
 }
 
+/// FSを変更するopは`WouldBlock`で途中退避できない。部分commitを残した
+/// ままsyscallをやり直すと、二回目が初回の成果物を見て失敗するため、
+/// opの間だけ`io_block_allowed`を下げてdriverがrequestをinlineで完結
+/// させる。戻り値を返す前にflagを復帰する。
+#[cfg(target_arch = "riscv64")]
+fn without_io_block<T>(op: impl FnOnce() -> T) -> T {
+    let prev = crate::storage::virtio_blk::io_block_allowed();
+    crate::storage::virtio_blk::set_io_block_allowed(false);
+    let out = op();
+    crate::storage::virtio_blk::set_io_block_allowed(prev);
+    out
+}
+
 /// probe/mountの失敗をguest向けerrnoへ写像する。
 #[cfg(target_arch = "riscv64")]
 fn storage_errno(error: crate::shell::Rv64StorageError) -> isize {
@@ -559,6 +586,14 @@ fn fat_errno(
         FatError::Exists => minios_abi::syscall::EEXIST,
         FatError::NotEmpty => minios_abi::syscall::ENOTEMPTY,
         FatError::NoSpace => minios_abi::syscall::ENOSPC,
+        // `WouldBlock`はin-flightなdisk I/Oの完了待ち。callerを
+        // `BlockedOnIo`へmarkして`EAGAIN`を返し、dispatchの`Blocked`
+        // 経路でecallをやり直す。guestへ`EAGAIN`自体が返ることはない。
+        FatError::Read(crate::storage::virtio_blk::VirtioError::WouldBlock) => {
+            // Safety: trap handlerの実行窓から呼ばれる。
+            unsafe { crate::block_current_on_io() };
+            minios_abi::syscall::EAGAIN
+        }
         FatError::Read(_)
         | FatError::Unsupported
         | FatError::InvalidFilesystem

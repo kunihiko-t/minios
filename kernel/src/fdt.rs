@@ -43,6 +43,10 @@ pub struct MachineSpec {
     /// `compatible="virtio,mmio"`の各nodeのregベース（発見順、最大
     /// [`VIRTIO_MMIO_MAX`]個）。
     pub virtio_mmio: [usize; VIRTIO_MMIO_MAX],
+    /// `virtio_mmio`の各nodeの`interrupts`先頭cell（PLIC source番号）。
+    /// nodeが`interrupts`を持たないslotは0であり、そのdeviceの割り込みは
+    /// 有効化されない。
+    pub virtio_mmio_irq: [u32; VIRTIO_MMIO_MAX],
     /// `virtio_mmio`の有効個数。
     pub virtio_mmio_count: usize,
     /// `sifive,plic-1.0.0`/`riscv,plic0`互換の先頭nodeのregベース。
@@ -78,6 +82,7 @@ struct NodeScan {
     has_plic: bool,
     reg_cells: (u32, u32),
     reg_first: Option<(u64, u64)>,
+    irq_first: Option<u32>,
     timebase: Option<u32>,
 }
 
@@ -225,6 +230,7 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
     let mut uart: Option<u64> = None;
     let mut timebase: Option<u32> = None;
     let mut virtio_mmio = [0usize; VIRTIO_MMIO_MAX];
+    let mut virtio_mmio_irq = [0u32; VIRTIO_MMIO_MAX];
     let mut virtio_mmio_count = 0usize;
     let mut plic: Option<u64> = None;
 
@@ -283,7 +289,11 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                     && let Some((base, _)) = scan.reg_first
                     && let Ok(base) = usize::try_from(base)
                 {
+                    // `interrupts`の先頭cellがdeviceのPLIC source番号。FDTの
+                    // node列挙順はaddress順とは限らないため、indexからirqを
+                    // 推測せず宣言値をそのまま採る。
                     virtio_mmio[virtio_mmio_count] = base;
+                    virtio_mmio_irq[virtio_mmio_count] = scan.irq_first.unwrap_or(0);
                     virtio_mmio_count += 1;
                 }
             }
@@ -313,6 +323,7 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                         scan.has_plic = compatible_has_plic(value);
                     }
                     "timebase-frequency" => scan.timebase = Some(read_be32(value, 0)?),
+                    "interrupts" => scan.irq_first = Some(read_be32(value, 0)?),
                     _ => {}
                 }
             }
@@ -338,6 +349,7 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
             .map_err(|_| FdtError::BadStructure)?,
         timebase_hz: u64::from(timebase.ok_or(FdtError::MissingTimebase)?),
         virtio_mmio,
+        virtio_mmio_irq,
         virtio_mmio_count,
         // PLICは必須ではない。見つからないmachineでは0のまま返し、
         // kernel側が割り込み経路を立てずpollingだけで動く。
@@ -409,6 +421,7 @@ mod tests {
             props: std::vec![
                 prop("reg", reg((2, 2), 0x1000_1000, 0x1000)),
                 prop("compatible", b"virtio,mmio\0".to_vec()),
+                prop("interrupts", be32(1)),
             ],
             children: std::vec![],
         });
@@ -556,6 +569,7 @@ mod tests {
         assert_eq!(spec.uart_base, 0x1000_0000);
         assert_eq!(spec.timebase_hz, 10_000_000);
         assert_eq!(spec.virtio_mmio[..spec.virtio_mmio_count], [0x1000_1000]);
+        assert_eq!(spec.virtio_mmio_irq[..spec.virtio_mmio_count], [1]);
         assert_eq!(spec.plic_base, 0x0c00_0000);
     }
 

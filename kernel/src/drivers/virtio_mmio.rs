@@ -26,3 +26,20 @@ impl Mmio for MmioRegs {
         unsafe { ((self.base + offset) as *mut u32).write_volatile(value) }
     }
 }
+
+/// source番号に対応するvirtio deviceのinterrupt lineをackする。
+/// PLICのclaimハンドラが使う。範囲外のsourceでは何もしない。
+#[cfg(target_arch = "riscv64")]
+pub fn ack_irq_source(source: u32) {
+    let spec = crate::machine::spec();
+    let Some(idx) = spec.virtio_mmio_irq[..spec.virtio_mmio_count]
+        .iter()
+        .position(|&irq| irq == source)
+    else {
+        return;
+    };
+    let base = spec.virtio_mmio[idx];
+    // Safety: `base`はFDTが報告し`with_device_pages`でmap済みのMMIO領域。
+    let mut regs = unsafe { MmioRegs::new(base) };
+    regs.interrupt_ack();
+}

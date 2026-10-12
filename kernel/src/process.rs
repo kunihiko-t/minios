@@ -80,6 +80,9 @@ pub enum ProcessState {
     /// 到着・端のclose・いずれかのprocessのexitで`Runnable`へ戻る。
     /// 値は待つ対象のpipe id。
     BlockedOnPipe(usize),
+    /// file I/Oがdevice完了待ちで中断した。virtioのused-buffer割り込みで
+    /// 起こされ、同じsyscallの再実行がin-flight requestの完了を回収する。
+    BlockedOnIo,
     /// `sleep`が経過待ちで中断した。値は起床するtick番号で、run loopが
     /// `wake_sleepers`へ渡す現在tickがこれに達すると`Runnable`へ戻る。
     /// syscallは0を書いてecallの次へ進めてあるため、早く起こすと短い
@@ -535,6 +538,13 @@ impl Process {
         if self.is_runnable() {
             self.state = ProcessState::BlockedOnStdin;
         }
+    }
+
+    /// file I/Oの完了待ちへ移す。storage errno写像が`WouldBlock`を
+    /// `EAGAIN`へ変える直前に、trap窓から`block_current_on_io`経由で呼ぶ。
+    /// `BlockedOnStdin`と同じく、同じecallの再試行が完了を回収する。
+    pub fn block_on_io(&mut self) {
+        self.state = ProcessState::BlockedOnIo;
     }
 
     /// `waitpid`で`pid`の終了待ちへ移す。trap窓のtable経由でのみ呼ばれる。

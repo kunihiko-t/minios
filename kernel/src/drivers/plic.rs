@@ -6,10 +6,15 @@
 //! 任せる。PLICが無いmachine (`MachineSpec::plic_base == 0`) ではこのdriverは
 //! 初期化されず、全経路がpollingのまま動く。
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// QEMU `virt`のUART0が接続されるPLIC source番号。
 pub const UART_IRQ: u32 = 10;
+
+/// QEMU `virt`のvirtio-mmio device (最大8 slot) が接続されるsource範囲。
+/// slot iの割り込みはsource i+1へ接続される。
+pub const VIRTIO_IRQ_FIRST: u32 = 1;
+pub const VIRTIO_IRQ_LAST: u32 = 8;
 
 /// QEMU `virt`ではcontext 0がM-mode hart 0、context 1がS-mode hart 0である。
 const S_MODE_CONTEXT: usize = 1;
@@ -29,6 +34,11 @@ const CLAIM_OFFSET: usize = 0x4;
 // claim/completeへのアクセスは行われない。
 static PLIC_BASE: AtomicUsize = AtomicUsize::new(0);
 static UART_IRQ_CLAIMS: AtomicUsize = AtomicUsize::new(0);
+static VIRTIO_IRQ_CLAIMS: AtomicUsize = AtomicUsize::new(0);
+
+/// virtioのused-buffer割り込みがclaimされたことをrun loopへ伝えるedge flag。
+/// `BlockedOnIo`の起床はこのflagを消費したdispatch loopが行う。
+static BLK_IO_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
 fn plic() -> *mut u8 {
     PLIC_BASE.load(Ordering::Relaxed) as *mut u8
@@ -49,7 +59,11 @@ pub fn init(base: usize) {
 }
 
 /// sourceをS-mode contextへ配送するよう優先度とenable bitを立てる。
+/// PLIC未初期化のmachineでは何もしない。
 pub fn enable(source: u32) {
+    if PLIC_BASE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
     // Safety: `plic()`は`init`済みの有効なPLIC MMIOを指し、優先度とenable
     // bitmapは規定のoffsetにある。bit単位のread-modify-writeは他sourceの
     // enable状態を保つ。
@@ -106,6 +120,13 @@ pub fn handle_external_pending() {
             // し続ける。byteの消費はconsumerのpollへ任せるため、drainが
             // 終わるまでdevice側の割り込みをmaskして暴走を止める。
             crate::drivers::uart::Uart::for_target().mask_rx_interrupt();
+        } else if (VIRTIO_IRQ_FIRST..=VIRTIO_IRQ_LAST).contains(&source) {
+            VIRTIO_IRQ_CLAIMS.fetch_add(1, Ordering::Relaxed);
+            // `BlockedOnIo`で寝ているprocessをrun loopへ起こすedgeを立てる。
+            BLK_IO_NOTIFIED.store(true, Ordering::Relaxed);
+            // virtioのused-buffer割り込みはlevelであり、device側をackして
+            // lineを下げる。ringの消費自体はcallerのdrainに任せる。
+            crate::drivers::virtio_mmio::ack_irq_source(source);
         }
         complete(source);
     }
@@ -116,6 +137,26 @@ pub fn handle_external_pending() {
 #[cfg(feature = "qemu-test-irq-uart")]
 pub fn uart_irq_claims() -> usize {
     UART_IRQ_CLAIMS.load(Ordering::Relaxed)
+}
+
+/// virtio deviceのused-buffer割り込み通知をedgeとして消費する。
+/// `BlockedOnIo`で寝ているprocessをrun loopが起こすための通知であり、
+/// 値そのものではなく一度だけ`true`を返す。PLIC未初期化では常に`false`。
+pub fn take_blk_io_notified() -> bool {
+    BLK_IO_NOTIFIED.swap(false, Ordering::Relaxed)
+}
+
+/// `BLK_IO_NOTIFIED`を消費せず読む。blocked待機loopのbreak条件に使い、
+/// flagの消費自体は起床判定を行うdispatch loopへ委ねる。
+pub fn blk_io_notified() -> bool {
+    BLK_IO_NOTIFIED.load(Ordering::Relaxed)
+}
+
+/// これまでにclaimしたvirtio割り込みの回数。`irq-blk`検査が、
+/// disk I/Oの完了がpollingではなく割り込み経由だったことを観測する。
+#[cfg(feature = "qemu-test-irq-blk")]
+pub fn virtio_irq_claims() -> usize {
+    VIRTIO_IRQ_CLAIMS.load(Ordering::Relaxed)
 }
 
 /// `irq-uart`診断用のread-back。base、S-mode contextのenable word 0、

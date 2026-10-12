@@ -15,6 +15,7 @@ static mut MACHINE: MachineSpec = MachineSpec {
     uart_base: 0x1000_0000,
     timebase_hz: 10_000_000,
     virtio_mmio: [0; minios_kernel::fdt::VIRTIO_MMIO_MAX],
+    virtio_mmio_irq: [0; minios_kernel::fdt::VIRTIO_MMIO_MAX],
     virtio_mmio_count: 0,
     plic_base: 0x0c00_0000,
 };

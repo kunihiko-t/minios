@@ -1,6 +1,8 @@
 //! virtio-mmio block device (modern interface v2)。sector単位の読み書き
 //! （書き込みはRV32 build以外）・単一queue・完了はused ringのpollで待つ。
-//! PLICを必要としない。
+//! PLIC経由のused-buffer割り込みはkernel側がenableしており、process実行窓
+//! では完了が短期poll内に来なければ`WouldBlock`を返してcallerを退避させ、
+//! 割り込みで起きたretryが同じrequestの完了を回収する。PLICを必要としない。
 //!
 //! register fileは[`Mmio`] traitで抽象化し、queue/request領域は呼び出し側が
 //! 所有する4 KiB整列の[`VirtioRegion`]とする。kernelはmanaged RAMを恒等map
@@ -8,7 +10,7 @@
 
 use core::mem::offset_of;
 use core::ops::DerefMut;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use crate::storage::SectorReader;
 
@@ -62,11 +64,40 @@ const BLK_STATUS_OK: u8 = 0;
 /// device故障時の暴走防止である。
 const POLL_LIMIT: u32 = 5_000_000;
 
+/// `io_block_allowed`時の短期poll上限。これだけ待ってもusedが進まない
+/// requestは`WouldBlock`を返し、呼び出し側がprocessを`BlockedOnIo`へ
+/// 退避させてdeviceのused-buffer割り込みで再試行する。
+const QUICK_POLL_LIMIT: u32 = 4_096;
+
+/// guest実行窓 (`__run_user`内) でfile I/Oの完了待ちを`WouldBlock`として
+/// 返してよいか。kernel shellやprobe等、schedulerに退避先のprocessが無い
+/// 文脈では従来どおり`POLL_LIMIT`までpollして完結または`Timeout`になる。
+static IO_BLOCK_ALLOWED: AtomicBool = AtomicBool::new(false);
+
+/// process実行窓への出入りで呼び、I/O完了待ちの`WouldBlock`可否を切り替える。
+/// kernel側はdispatch loopが`__run_user`直前にtrue、戻ったらfalseへ戻す。
+pub fn set_io_block_allowed(allowed: bool) {
+    IO_BLOCK_ALLOWED.store(allowed, Ordering::Relaxed);
+}
+
+/// `io_block_allowed`の現在値。mutating opがop中だけflagを下げて戻す
+/// `without_io_block`が保存/復帰に使う。
+pub fn io_block_allowed() -> bool {
+    IO_BLOCK_ALLOWED.load(Ordering::Relaxed)
+}
+
 /// device MMIO register fileへのアクセスを抽象化する。実機側はvolatile
 /// 32-bit load/store、host testはregister配列+queue消化を真似る。
 pub trait Mmio {
     fn read32(&self, offset: usize) -> u32;
     fn write32(&mut self, offset: usize, value: u32);
+
+    /// deviceが立てたused-buffer割り込みをackする。割り込みを使う経路
+    /// (PLIC claim) だけが呼び、polling経路では不要である。
+    fn interrupt_ack(&mut self) {
+        let status = self.read32(reg::INTERRUPT_STATUS);
+        self.write32(reg::INTERRUPT_ACK, status);
+    }
 }
 
 #[repr(C)]
@@ -141,10 +172,30 @@ pub enum VirtioError {
     BadLba,
     /// used ringが`POLL_LIMIT`回のpoll内に進まなかった。
     Timeout,
+    /// requestをqueueへ投入済みだが短期の完了待機でusedが進まなかった。
+    /// process実行窓だけが返し、callerは同じsyscallを再試行する。
+    WouldBlock,
     /// deviceがqueueへ期待と違うdescriptor idを返した。
     BadUsedId(u32),
     /// request status byteが0以外 (1=IOERR, 2=UNSUPPORTED)。
     DeviceStatus(u8),
+}
+
+/// queueへ投入してまだused ringへ戻っていないrequest。
+#[derive(Clone, Copy)]
+struct PendingRequest {
+    lba: u32,
+    write: bool,
+}
+
+/// used ringから回収した完了。`region.data`は次のsubmitで上書きされる
+/// まで保持されるため、readの完了dataはここを指して再利用できる。
+#[derive(Clone, Copy)]
+struct DoneRequest {
+    lba: u32,
+    write: bool,
+    status: u8,
+    used_id: u32,
 }
 
 pub struct VirtioBlk<M: Mmio, R: DerefMut<Target = VirtioRegion>> {
@@ -154,6 +205,8 @@ pub struct VirtioBlk<M: Mmio, R: DerefMut<Target = VirtioRegion>> {
     capacity: u64,
     next_avail: u16,
     last_used: u16,
+    in_flight: Option<PendingRequest>,
+    done: Option<DoneRequest>,
 }
 
 impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
@@ -255,6 +308,8 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
             capacity,
             next_avail: 0,
             last_used: 0,
+            in_flight: None,
+            done: None,
         })
     }
 
@@ -262,11 +317,84 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
         self.capacity
     }
 
+    /// used ringの完了があれば`done`へ回収して`in_flight`を下ろす。
+    /// `in_flight`が無いか完了が未着のときは何もしない。
+    /// `true`は「submit可能な状態」を意味する。
+    fn try_drain_completion(&mut self) -> bool {
+        if self.in_flight.is_none() {
+            return true;
+        }
+        let used_idx = unsafe { core::ptr::read_volatile(&raw const self.region.used.idx) };
+        if used_idx == self.last_used {
+            return false;
+        }
+        // deviceのdata/status書き込みを読む前に完了を確定する。
+        fence(Ordering::Acquire);
+        let Some(pending) = self.in_flight else {
+            return true;
+        };
+        let elem = unsafe {
+            core::ptr::read_volatile(
+                &raw const self.region.used.elems[(self.last_used % self.queue_len) as usize],
+            )
+        };
+        self.last_used = self.last_used.wrapping_add(1);
+        // device側のinterrupt statusはここでackしない。lineを下げるのは
+        // PLIC claim側 (`ack_irq_source`) の仕事であり、ここで下げると
+        // used ringのpollが割り込み配送に必ず勝ってpendingを観測できない。
+        // PLIC無しのmachineではstatus bitが立ち続けるが、完了判定はused
+        // ringだけを見るためpolling経路へ影響しない。
+        self.done = Some(DoneRequest {
+            lba: pending.lba,
+            write: pending.write,
+            status: unsafe { core::ptr::read_volatile(&raw const self.region.status) },
+            used_id: elem.id,
+        });
+        self.in_flight = None;
+        true
+    }
+
+    /// `done`の内容を検査して結果へ写像する。used idはdesc headの0、
+    /// statusは`BLK_STATUS_OK`を要求する。
+    fn check_done(&self, done: DoneRequest) -> Result<(), VirtioError> {
+        if done.used_id != 0 {
+            return Err(VirtioError::BadUsedId(done.used_id));
+        }
+        if done.status != BLK_STATUS_OK {
+            return Err(VirtioError::DeviceStatus(done.status));
+        }
+        Ok(())
+    }
+
     /// request header + data + statusの3-desc chainをqueueへ流し、
     /// used ringの完了をboundedに待つ。`request_type`はIN(読み)または
     /// OUT(書き)で、OUTの場合はdata descをdevice-readableにするため
-    /// `DESC_WRITE`を外す。
+    /// `DESC_WRITE`を外す。直前に回収した完了が同じrequestならdescを
+    /// 再投入せずそのまま結果を返す。完了が短期poll内に来ない場合は、
+    /// process実行窓では`WouldBlock`（再試行で回収）、それ以外では
+    /// `POLL_LIMIT`まで待って`Timeout`を返す。
     fn submit_sector_request(&mut self, lba: u32, request_type: u32) -> Result<(), VirtioError> {
+        // 前のin-flightが未完了のまま残っている間はdesc chainを再利用
+        // できないため、完了が取れなければ待機へ回す。blockingでない文脈
+        // （shell/probe）のcallerには退避先が無いため`Timeout`を返す。
+        if !self.try_drain_completion() {
+            return Err(if IO_BLOCK_ALLOWED.load(Ordering::Relaxed) {
+                VirtioError::WouldBlock
+            } else {
+                VirtioError::Timeout
+            });
+        }
+        // RV32ではOUT request自体がcfg除外されるため`BLK_REQUEST_OUT`は
+        // 未定義であり、IN以外=writeで判定する。
+        let write = request_type != BLK_REQUEST_IN;
+        if let Some(done) = self.done.take()
+            && done.lba == lba
+            && done.write == write
+        {
+            return self.check_done(done);
+        }
+        // 別requestの完了は破棄する。sector読み書きは冪等なので、
+        // 本来のcallerが再試行時に同じ要求を投げ直せば済む。
         let base = self.region.base();
         let data_flags = if request_type == BLK_REQUEST_IN {
             DESC_NEXT | DESC_WRITE
@@ -327,38 +455,33 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> VirtioBlk<M, R> {
         // MMIO notifyがavail更新より先にdeviceへ届かないようにする。
         fence(Ordering::SeqCst);
         self.mmio.write32(reg::QUEUE_NOTIFY, 0);
+        self.in_flight = Some(PendingRequest { lba, write });
 
-        let mut spins = 0u32;
-        loop {
-            let used_idx = unsafe { core::ptr::read_volatile(&raw const self.region.used.idx) };
-            if used_idx != self.last_used {
-                break;
-            }
-            spins += 1;
-            if spins > POLL_LIMIT {
-                return Err(VirtioError::Timeout);
-            }
-        }
-        // deviceのdata/status書き込みを読む前に完了を確定する。
-        fence(Ordering::Acquire);
-        let elem = unsafe {
-            core::ptr::read_volatile(
-                &raw const self.region.used.elems[(self.last_used % self.queue_len) as usize],
-            )
+        // process実行窓では短期pollで諦めて`WouldBlock`を返し、deviceの
+        // used-buffer割り込みで起きた再試行が`in_flight`の完了を回収する。
+        // それ以外では従来どおりboundedに待つ。
+        let blocking = IO_BLOCK_ALLOWED.load(Ordering::Relaxed);
+        let limit = if blocking {
+            QUICK_POLL_LIMIT
+        } else {
+            POLL_LIMIT
         };
-        self.last_used = self.last_used.wrapping_add(1);
-
-        // 使ったbuffered interruptをackする (v2はused buffer notifyが既定)。
-        let pending = self.mmio.read32(reg::INTERRUPT_STATUS);
-        self.mmio.write32(reg::INTERRUPT_ACK, pending);
-
-        if elem.id != 0 {
-            return Err(VirtioError::BadUsedId(elem.id));
+        let mut spins = 0u32;
+        while !self.try_drain_completion() {
+            spins += 1;
+            if spins > limit {
+                // `in_flight`は残したまま返し、再試行のdrainが完了を拾う。
+                return Err(if blocking {
+                    VirtioError::WouldBlock
+                } else {
+                    VirtioError::Timeout
+                });
+            }
         }
-        let status = unsafe { core::ptr::read_volatile(&raw const self.region.status) };
-        if status != BLK_STATUS_OK {
-            return Err(VirtioError::DeviceStatus(status));
-        }
+        let Some(done) = self.done.take() else {
+            return Err(VirtioError::Timeout);
+        };
+        self.check_done(done)?;
         Ok(())
     }
 }
@@ -381,6 +504,16 @@ impl<M: Mmio, R: DerefMut<Target = VirtioRegion>> crate::storage::SectorWriter f
     fn write_sector(&mut self, lba: u32, source: &[u8; 512]) -> Result<(), VirtioError> {
         if u64::from(lba) >= self.capacity {
             return Err(VirtioError::BadLba);
+        }
+        // data bufferはrequest間で共有のため、前のin-flight requestが残る間に
+        // copyするとdeviceが新dataを旧requestへ書き込み得る。submitの入口
+        // drainと同じ待機をcopyの前にも行う。
+        if !self.try_drain_completion() {
+            return Err(if IO_BLOCK_ALLOWED.load(Ordering::Relaxed) {
+                VirtioError::WouldBlock
+            } else {
+                VirtioError::Timeout
+            });
         }
         self.region.data.copy_from_slice(source);
         self.submit_sector_request(lba, BLK_REQUEST_OUT)
@@ -690,9 +823,15 @@ mod tests {
         );
     }
 
+    /// `IO_BLOCK_ALLOWED`を触るtest同士を直列化する。完了しないrequestを
+    /// 持つtestは`WouldBlock`/`Timeout`のどちらが返るかflagに依存するため、
+    /// 並行実行の窓を閉じる。
+    static IO_BLOCK_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // Catches a missing poll bound or a missing used-id validation.
     #[test]
     fn read_sector_times_out_and_validates_used_id() {
+        let _flag_lock = IO_BLOCK_FLAG_LOCK.lock().unwrap();
         let (mut device, region) = device_and_region();
         device.never_complete = true;
         let mut blk = VirtioBlk::init(device, region).unwrap();
@@ -703,5 +842,51 @@ mod tests {
         device.used_id = 5;
         let mut blk = VirtioBlk::init(device, region).unwrap();
         assert_eq!(blk.read_sector(0, &mut buf), Err(VirtioError::BadUsedId(5)));
+    }
+
+    // Catches a WouldBlock submission dropping its in-flight request, or a
+    // retry forgetting to drain the same completion before resubmitting.
+    #[test]
+    fn blocked_read_collects_the_in_flight_completion_on_retry() {
+        let _flag_lock = IO_BLOCK_FLAG_LOCK.lock().unwrap();
+        let (mut device, region) = device_and_region();
+        for (i, byte) in device.sector_data.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+        device.never_complete = true;
+        let mut blk = VirtioBlk::init(device, region).unwrap();
+        super::set_io_block_allowed(true);
+        let mut buf = [0u8; 512];
+        assert_eq!(blk.read_sector(0, &mut buf), Err(VirtioError::WouldBlock));
+        assert!(blk.in_flight.is_some());
+
+        // deviceが遅れて完了した振る舞いをさせ、retryが完了を回収する。
+        blk.mmio.never_complete = false;
+        blk.mmio.complete_request();
+        assert_eq!(blk.read_sector(0, &mut buf), Ok(()));
+        assert_eq!(buf[250], 250);
+        assert!(blk.in_flight.is_none());
+        super::set_io_block_allowed(false);
+    }
+
+    // Catches a mismatched completion being reused as if it were the new
+    // request's, or being dropped without resubmitting the new request.
+    #[test]
+    fn retry_with_a_different_sector_discards_the_stale_completion() {
+        let _flag_lock = IO_BLOCK_FLAG_LOCK.lock().unwrap();
+        let (mut device, region) = device_and_region();
+        device.never_complete = true;
+        let mut blk = VirtioBlk::init(device, region).unwrap();
+        super::set_io_block_allowed(true);
+        let mut buf = [0u8; 512];
+        assert_eq!(blk.read_sector(0, &mut buf), Err(VirtioError::WouldBlock));
+
+        // lba 0の完了が遅れて届いた後、別sectorのretryが来た場合は完了を
+        // 破棄して新しいrequestを流す。完了済みdeviceは同期応答する。
+        blk.mmio.never_complete = false;
+        blk.mmio.complete_request();
+        assert_eq!(blk.read_sector(5, &mut buf), Ok(()));
+        assert!(blk.in_flight.is_none());
+        super::set_io_block_allowed(false);
     }
 }

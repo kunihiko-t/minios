@@ -174,7 +174,9 @@ pub(crate) fn run_boot_payload(
     let mut last_code = 0u32;
     while !table.is_empty() {
         // stdinへbyteが届いていればblocked processを選対象へ戻す。
-        if console::stdin_pending() {
+        // virtioのused-buffer割り込みも同様に、`BlockedOnIo`で寝ている
+        // processを起こすedgeを消費する。
+        if console::stdin_pending() || crate::drivers::plic::take_blk_io_notified() {
             table.wake_all_blocked();
         }
         // deadlineに達したsleep中processを選対象へ戻す。
@@ -208,7 +210,10 @@ pub(crate) fn run_boot_payload(
                 // byte到着を先に判定すると、届いたirqをclaimせずループを
                 // 抜けてしまうため、判定より先に処理する。
                 crate::drivers::plic::handle_external_pending();
-                if console::stdin_pending() || time::interrupt_pending() {
+                if console::stdin_pending()
+                    || time::interrupt_pending()
+                    || crate::drivers::plic::blk_io_notified()
+                {
                     break;
                 }
                 // Safety: STIE/SEIEを立てた`wfi`であり、timerかexternalの
@@ -245,6 +250,9 @@ pub(crate) fn run_boot_payload(
             USER_EXIT_CODE.store(usize::MAX, Ordering::Relaxed);
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_NONE, Ordering::Relaxed);
             set_current_process(process);
+            // file I/Oがdevice完了待ちになったとき`WouldBlock`として返し、
+            // callerを`BlockedOnIo`で寝かせられるようにする。戻ったら即解除。
+            crate::storage::virtio_blk::set_io_block_allowed(true);
         }
         // Safety: processがuser address space・連続した専用kernel stack・保存済み
         // contextを所有する。assemblyはkernel satpとboot stackを復元して戻る。
@@ -263,6 +271,7 @@ pub(crate) fn run_boot_payload(
             USER_SYSCALL_PROBE_SPACE = 0;
             USER_SYSCALL_PROBE_MEMORY = 0;
             set_current_process(core::ptr::null_mut());
+            crate::storage::virtio_blk::set_io_block_allowed(false);
         }
         if last_pid != usize::MAX && last_pid != pid {
             switches += 1;
@@ -343,6 +352,15 @@ pub(crate) fn run_boot_payload(
         close_file_storage();
     }
 
+    #[cfg(feature = "qemu-test-irq-blk")]
+    {
+        // disk I/Oの完了がpollingではなくPLIC claim経由だったことの観測
+        // marker。used-buffer割り込みが一度もclaimされなければmarkerを出さず、
+        // test側のtimeoutで検出する。
+        if crate::drivers::plic::virtio_irq_claims() > 0 {
+            crate::println!("[MINIOS_TEST] irq-blk: ok");
+        }
+    }
     let after = frames.stats();
     if after != before {
         fatal_payload_error(format_args!(
