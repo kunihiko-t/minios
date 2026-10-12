@@ -129,13 +129,16 @@ pub(crate) fn run_boot_payload(
     // 遮断してから`stvec`と`sie`を設定する。dispatch loop中のS-modeでは
     // trap時にSIEが落ちるため、この後に再び立つことはない。
     const SIE_STIE: usize = 1 << 5;
+    const SIE_SEIE: usize = 1 << 9;
     // Safety: S-modeで`sstatus`、`stvec`、`sie`を書く。
     unsafe {
         let sstatus = arch::riscv64::csr::read_sstatus();
         arch::riscv64::csr::write_sstatus(sstatus & !SSTATUS_SIE);
         arch::riscv64::csr::write_stvec(__user_trap_entry as *const () as usize);
+        // timer割り込みに加えてexternal割り込みもU-mode実行窓へ配送する。
+        // 届いたIRQは`handle_user_trap`のExternal分岐がclaimする。
         let sie = arch::riscv64::csr::read_sie();
-        arch::riscv64::csr::write_sie(sie | SIE_STIE);
+        arch::riscv64::csr::write_sie(sie | SIE_STIE | SIE_SEIE);
         USER_STDIN_STAGING = StdinStaging::new();
     }
 
@@ -194,13 +197,37 @@ pub(crate) fn run_boot_payload(
         let Some(pid) = table.pick_next() else {
             // 占有slotが残るのに選べない＝全processがstdinかsleepなどで待っている。
             // ここはS-mode割り込みを遮断したままなので、timer割り込みは
-            // trapせず`sip.STIP`がpendingになるだけでtickは進まない。そこで
-            // stdinのdata-readyと並べてSTIPもpollし、立っていれば
-            // `handle_interrupt`でtickを進めて再アームする。trap経路を
-            // S-mode用に足す`wfi`案より変更が小さく、既存のstdin pollとも
-            // 同じ形で済む。loop先頭へ戻ると`wake_sleepers`が起床を判定する。
-            while !console::stdin_pending() && !time::interrupt_pending() {
-                core::hint::spin_loop();
+            // trapせず`sip.STIP`がpendingになるだけでtickは進まない。external
+            // 割り込みも同様にSEIPへ積まれるため、claim/dispatchを明示的に呼ぶ。
+            // stdinのdata-readyとSTIPをpollしつつ、間は`wfi`で眠る。`wfi`は
+            // sstatus.SIEに依らずsieで許可されたpending割り込みで起床するため、
+            // UART受信か次のtickで必ず戻る。loop先頭へ戻ると`wake_sleepers`が
+            // 起床を判定する。
+            loop {
+                // 起床したirqがあればSEIP pendingを確実にclaimする。stdinの
+                // byte到着を先に判定すると、届いたirqをclaimせずループを
+                // 抜けてしまうため、判定より先に処理する。
+                crate::drivers::plic::handle_external_pending();
+                if console::stdin_pending() || time::interrupt_pending() {
+                    break;
+                }
+                // Safety: STIE/SEIEを立てた`wfi`であり、timerかexternalの
+                // pending割り込みが起床させる。PLIC未初期化のmachineでは
+                // timer割り込みだけが起床源となる。
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+            }
+            #[cfg(feature = "qemu-test-irq-uart")]
+            {
+                // stdin待ちの起床が割り込み経由で起きたことの観測marker。
+                // claim回数が0のままbyteだけが見えた場合はpolling経由であり、
+                // その場合はmarkerを出さずtest側のtimeoutで検出する。
+                static IRQ_UART_MARKED: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                if crate::drivers::plic::uart_irq_claims() > 0
+                    && !IRQ_UART_MARKED.swap(true, core::sync::atomic::Ordering::Relaxed)
+                {
+                    crate::println!("[MINIOS_TEST] irq-uart: ok");
+                }
             }
             if time::interrupt_pending()
                 && let Err(error) = time::handle_interrupt()

@@ -45,6 +45,10 @@ pub struct MachineSpec {
     pub virtio_mmio: [usize; VIRTIO_MMIO_MAX],
     /// `virtio_mmio`の有効個数。
     pub virtio_mmio_count: usize,
+    /// `sifive,plic-1.0.0`/`riscv,plic0`互換の先頭nodeのregベース。
+    /// PLICを持たないmachine記述では0となり、その場合kernelは割り込み
+    /// 経路を初期化せずpollingだけで動く。
+    pub plic_base: usize,
 }
 
 /// QEMU virtが提供するvirtio-mmio transportのslot数。
@@ -71,6 +75,7 @@ struct NodeScan {
     device_is_memory: bool,
     has_ns16550: bool,
     is_virtio_mmio: bool,
+    has_plic: bool,
     reg_cells: (u32, u32),
     reg_first: Option<(u64, u64)>,
     timebase: Option<u32>,
@@ -199,6 +204,12 @@ fn compatible_has_ns16550(value: &[u8]) -> bool {
         .any(|entry| entry == b"ns16550a" || entry == b"ns16550")
 }
 
+fn compatible_has_plic(value: &[u8]) -> bool {
+    value
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == b"sifive,plic-1.0.0" || entry == b"riscv,plic0")
+}
+
 fn device_type_is_memory(value: &[u8]) -> bool {
     value == b"memory" || value == b"memory\0"
 }
@@ -215,6 +226,7 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
     let mut timebase: Option<u32> = None;
     let mut virtio_mmio = [0usize; VIRTIO_MMIO_MAX];
     let mut virtio_mmio_count = 0usize;
+    let mut plic: Option<u64> = None;
 
     loop {
         let token = read_be32(structure, cursor).map_err(|_| FdtError::BadStructure)?;
@@ -263,6 +275,9 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                 if scan.has_ns16550 && uart.is_none() {
                     uart = scan.reg_first.map(|(address, _)| address);
                 }
+                if scan.has_plic && plic.is_none() {
+                    plic = scan.reg_first.map(|(address, _)| address);
+                }
                 if scan.is_virtio_mmio
                     && virtio_mmio_count < VIRTIO_MMIO_MAX
                     && let Some((base, _)) = scan.reg_first
@@ -295,6 +310,7 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                     "compatible" => {
                         scan.has_ns16550 = compatible_has_ns16550(value);
                         scan.is_virtio_mmio = compatible_has_virtio_mmio(value);
+                        scan.has_plic = compatible_has_plic(value);
                     }
                     "timebase-frequency" => scan.timebase = Some(read_be32(value, 0)?),
                     _ => {}
@@ -323,6 +339,12 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
         timebase_hz: u64::from(timebase.ok_or(FdtError::MissingTimebase)?),
         virtio_mmio,
         virtio_mmio_count,
+        // PLICは必須ではない。見つからないmachineでは0のまま返し、
+        // kernel側が割り込み経路を立てずpollingだけで動く。
+        plic_base: match plic {
+            Some(address) => usize::try_from(address).map_err(|_| FdtError::BadStructure)?,
+            None => 0,
+        },
     })
 }
 
@@ -400,6 +422,14 @@ mod tests {
                 children: std::vec![],
             });
         }
+        soc_children.push(Node {
+            name: "plic@c000000",
+            props: std::vec![
+                prop("reg", reg((2, 2), 0x0c00_0000, 0x0600_0000)),
+                prop("compatible", b"riscv,plic0\0".to_vec()),
+            ],
+            children: std::vec![],
+        });
         build_dtb(&Node {
             name: "",
             props: std::vec![
@@ -526,6 +556,7 @@ mod tests {
         assert_eq!(spec.uart_base, 0x1000_0000);
         assert_eq!(spec.timebase_hz, 10_000_000);
         assert_eq!(spec.virtio_mmio[..spec.virtio_mmio_count], [0x1000_1000]);
+        assert_eq!(spec.plic_base, 0x0c00_0000);
     }
 
     #[test]

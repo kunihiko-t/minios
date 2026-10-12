@@ -135,9 +135,10 @@ user heap、時刻と待機、fdの複製、spawnへの引数渡し、user libra
 ここまでのkernelはUART入力をpollingで読み、virtio-blkも完了を待ち続けます。
 networkを扱うには、外部割り込みでdeviceの完了を受け取る基盤が先に要ります。
 
-- **PLIC driver**：QEMU `virt`のPLICを初期化し、UARTとvirtio deviceの割り込みをS-modeへ配送します。
-- **UART受信割り込み**：`StdinStaging`を割り込みhandlerから供給し、`BlockedOnStdin`のprocessを割り込みで起こします。
-  shellのidle時に`wfi`で待てるようになります。
+- **PLIC driver**（完了）：QEMU `virt`のPLICを`drivers/plic.rs`で初期化し、優先度・enable・threshold・claim/completeをS-mode context 1へ設定します。
+  FDTの`riscv,plic0`互換nodeから`MachineSpec::plic_base`を取り、kernel mappingに専用のPLIC MMIO窓を追加しています。
+- **UART受信割り込み**（完了）：supervisor external割り込みをtrap経路へ接続し、PLICのclaim/dispatch/completeからUARTの受信を処理します。
+  全processが待ちへ入ったidleではdispatch loopが`wfi`で眠り、受信割り込みで`BlockedOnStdin`のprocessを起こします（`cargo xtask test irq-uart`で検証）。
 - **virtio-blkの割り込み化**：polling waitを割り込み完了に置き換え、I/O待ちのprocessを`BlockedOnIo`で退避させます。
 - **virtio-net driver**：frameの送受信をringで扱い、hostの`-netdev user`で疎通を確認します。
 - **最小のnetwork stack**：ARP、IPv4、ICMP echo、UDPまでを実装し、TCPは対象外とします。

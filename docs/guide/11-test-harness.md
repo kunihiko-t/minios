@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|proc-fault|proc-kill|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|proc-fault|proc-kill|shell]
 cargo xtask check
 ```
 
@@ -91,11 +91,12 @@ parserを変更したときに手動で実行するもので、詳しい手順�
 39. QEMU schedテスト
 40. QEMU sched-ioテスト
 41. QEMU sched-io-partialテスト
-42. QEMU proc-faultテスト
-43. QEMU proc-killテスト
-44. QEMUシェルテスト
+42. QEMU irq-uartテスト
+43. QEMU proc-faultテスト
+44. QEMU proc-killテスト
+45. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、killによるprocess終了、対話シェルという依存関係の順に、ゲストの全経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、UART受信割り込み、killによるprocess終了、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
 RV32 release buildのphaseでは、ELFの実ロード範囲からIMEMの使用量・容量・残量も表示します。
 容量と起点はリンカーの`ORIGIN(IMEM)`・`LENGTH(IMEM)`由来のELFシンボルを使い、`.data`のIMEMロード分と配置の隙間を使用量に含めます。BSSのDMEM領域は含めません。
@@ -128,7 +129,7 @@ CRLFをLFへ変換した後の一行と完全一致することを調べるた�
 `kernel-stack`はuser-exitの実行窓を使い、最初のsyscallの中でkernel trap stackを再帰で使い切ります。
 guard pageで止まった診断の後にマーカーが出ることを要求し、syscallから戻ったことを示す`[MINIOS_TEST] user-exit: ok code=42`は禁止します。
 
-`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`spawn-args`、`user-shell`、`sched`、`sched-io`、`proc-fault`、`proc-kill`は**control frameモード**です。
+`user-exit`、`payload`、`payload-args`、`payload-stdin`、`file`、`file-fd`、`file-write`、`file-unlink`、`file-seek`、`file-rename`、`file-mkdir`、`file-spawn`、`file-waitpid`、`file-stat`、`file-readdir`、`file-exec`、`file-fdinherit`、`file-pipe`、`user-heap`、`user-sleep`、`user-dup`、`spawn-args`、`user-shell`、`sched`、`sched-io`、`irq-uart`、`proc-fault`、`proc-kill`は**control frameモード**です。
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
@@ -138,6 +139,7 @@ MiniContainer control protocolのframeを解析し、Ready、標準出力、標�
 入力frameは`b3`を観測してから送るため、`b3 < r2`の順序は「block中も他processが進む」ことの直接証拠です。
 `sched-io-partial`では同じimageへStdin frameを分割して送り、header途中で書き込みを止めてから残りを送ります。
 途中受信でもreaderが再びblockしてframeが正しく完結することを、`r2`到達と正常な`ProcExit`で検証します。
+`irq-uart`では`sched-io`と同じ三つのimageをuart割り込み対応カーネルへ渡し、stdin待ちの間にPLICがUART受信割り込みをclaimしたことを示す`[MINIOS_TEST] irq-uart: ok`マーカーを要求します。
 `file`ではfile_read guestのimageをpayload loaderとvirtio-blk diskの両方とともに起動し、guestが`read_file` syscallで`DOCS/NOTE.TXT`を読んで内容を標準出力へ出し、終了コード42を返すことを要求します。
 `file-fd`ではfile_fd guestが同じfileを`open`して分割`read`でoffsetを進め、EOF、二重`close`と未割り当てfdの`EBADF`、存在しないfileの`ENOENT`を確かめてから終了コード42を返すことを要求します。
 `file-write`ではfile_write guestが`GUEST.TXT`を`create`して内容を`write`し、閉じてから`open`で読み直して内容を往復させます。
@@ -284,9 +286,10 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 52. QEMU sched test
 53. QEMU sched-io test
 54. QEMU sched-io-partial test
-55. QEMU proc-fault test
-56. QEMU proc-kill test
-57. QEMU shell test
+55. QEMU irq-uart test
+56. QEMU proc-fault test
+57. QEMU proc-kill test
+58. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -325,12 +328,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/57] cargo fmt --all -- --check
-phase 1/57 passed (elapsed: ...s)
+[1/58] cargo fmt --all -- --check
+phase 1/58 passed (elapsed: ...s)
 ...
-[57/57] QEMU shell test
-phase 57/57 passed (elapsed: ...s)
-summary: PASSED all 57 phases (elapsed: ...s)
+[58/58] QEMU shell test
+phase 58/58 passed (elapsed: ...s)
+summary: PASSED all 58 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。
