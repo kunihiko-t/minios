@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 minios-abi = { path = "../abi" }
+# fuzz targetをhost binaryから直接実行するため、kernel libraryは
+# dev-dependencyではなく通常dependencyに置く。no_stdのためhostでも動く。
+minios-kernel = { path = "../kernel" }
 
 [lib]
 path = "src/lib.rs"
@@ -16,6 +19,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
-
-[dev-dependencies]
-minios-kernel = { path = "../kernel" }

@@ -3,6 +3,7 @@ pub mod cargo;
 pub mod cli;
 pub mod disk;
 pub mod docs;
+pub mod fuzz;
 pub mod guest;
 mod imem;
 pub mod qemu;
@@ -18,6 +19,7 @@ pub enum XtaskError {
     Cargo(cargo::CargoError),
     Imem(String),
     Docs(docs::DocsError),
+    Fuzz(fuzz::FuzzError),
     Qemu(qemu::QemuError),
     Tool(tools::ToolError),
 }
@@ -29,6 +31,7 @@ impl fmt::Display for XtaskError {
             Self::Cargo(error) => error.fmt(formatter),
             Self::Imem(error) => formatter.write_str(error),
             Self::Docs(error) => error.fmt(formatter),
+            Self::Fuzz(error) => error.fmt(formatter),
             Self::Qemu(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
         }
@@ -52,6 +55,12 @@ impl From<tools::ToolError> for XtaskError {
 impl From<cargo::CargoError> for XtaskError {
     fn from(error: cargo::CargoError) -> Self {
         Self::Cargo(error)
+    }
+}
+
+impl From<fuzz::FuzzError> for XtaskError {
+    fn from(error: fuzz::FuzzError) -> Self {
+        Self::Fuzz(error)
     }
 }
 
@@ -530,7 +539,9 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::ProcKill) => Some(vec![Phase::Qemu(qemu::TestKind::ProcKill)]),
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
         Command::Check => Some(check_phases()),
-        Command::Setup | Command::Build | Command::Run | Command::Bundle(_) => None,
+        Command::Setup | Command::Build | Command::Run | Command::Bundle(_) | Command::Fuzz(_) => {
+            None
+        }
     }
 }
 
@@ -560,6 +571,39 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
                 product.arguments,
                 product.images,
                 hex_digest(&product.digest),
+            );
+        }
+        Command::Fuzz(options) => {
+            let Some(target) = options.target.as_deref().and_then(fuzz::FuzzTarget::parse) else {
+                return Err(XtaskError::Fuzz(fuzz::FuzzError::InvalidConfig(
+                    "unknown fuzz target (expected fat32|elf|boot-payload)",
+                )));
+            };
+            let workspace = workspace_root();
+            let report = fuzz::run(&fuzz::FuzzConfig {
+                target,
+                seed: options.seed.unwrap_or(fuzz::DEFAULT_SEED),
+                iters: options.iters.unwrap_or(fuzz::DEFAULT_ITERS),
+                max_bytes: options.max_bytes.unwrap_or(fuzz::DEFAULT_MAX_BYTES),
+                input_timeout: options
+                    .input_timeout
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(fuzz::DEFAULT_INPUT_TIMEOUT),
+                time_limit: options.time_limit.map(std::time::Duration::from_secs),
+                alloc_cap: options.alloc_cap.unwrap_or(fuzz::DEFAULT_ALLOC_CAP),
+                corpus_dir: options
+                    .corpus_dir
+                    .unwrap_or_else(|| workspace.join("xtask/corpus")),
+                output_dir: options
+                    .output_dir
+                    .unwrap_or_else(|| workspace.join("target/fuzz")),
+                replay_input: options.input,
+            })?;
+            println!(
+                "fuzz {}: {} inputs passed (seed {})",
+                report.target.name(),
+                report.iters_run,
+                report.seed
             );
         }
         Command::Test(_) | Command::Check => unreachable!("phase commands returned above"),
