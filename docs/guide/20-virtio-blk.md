@@ -85,7 +85,7 @@ requestは常に一件ずつ発行して完了まで待つため、descriptor 0.
 QEMU検査の[`run_virtio_test`](../../kernel/src/main.rs)は、`virtio_mmio`の各slotで`MmioRegs`と新しい`VirtioRegionPage`を作り、`VirtioBlk::init`を試します。
 `BadMagic`、`NotBlockDevice`、`UnsupportedVersion`は次のslotへ進み、失敗した領域はdropでpoolへ返ります。
 それ以外のerrorは即座に検査失敗です。
-blockが見つかると[`Fat32::mount`](../../kernel/src/storage/fat32.rs)へ渡し、root directoryに`HELLO.TXT`があること、内容が`hello from virtio\n`であることを照合します。
+blockが見つかると[`Fat32::mount`](../../kernel/src/storage/fat32/read.rs)へ渡し、root directoryに`HELLO.TXT`があること、内容が`hello from virtio\n`であることを照合します。
 
 host側の[`xtask/src/disk.rs`](../../xtask/src/disk.rs)は、`DiskImage::create`で決定的なFAT32 imageを組み立てます。
 partitionを持たないsuperfloppyで、`VOLUME_SECTORS`は70,000、1 cluster 1 sector、reserved sector 32、FAT 2面です。

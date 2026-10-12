@@ -95,7 +95,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 - `user/context.rs`：entry、user stack、`sstatus.SPP=0`を持つ`UserContext`を定義します。
 - `user/memory.rs`：user pointerを参照として解釈せず、pageごとに`U=1`とread権限を確認してcopyします。
-- `user/syscall.rs`：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`をdispatchします。
+- `user/syscall/`（`mod.rs`と`dispatch.rs`）：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`をdispatchします。
 - `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
 - `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 
@@ -191,7 +191,7 @@ RV64の仕組みをそのまま縮小した構成ではなく、UARTとシェル
 ## NEORV32 read-only storage
 
 - `storage/sd.rs`：SDHCとSDXC専用のread-only SPI driverであり、CMD17によるsector読み取りとCRC16検証を行います。
-- `storage/fat32.rs`：read-only FAT32 parserであり、partition選択、BPB検証、root directory反復、8.3名lookupを行います。
+- `storage/fat32/`（`mod.rs`、`parse.rs`、`read.rs`、`write.rs`）：read-only FAT32 parserであり、partition選択、BPB検証、root directory反復、8.3名lookupを行います。
 - `drivers/neorv32_sd.rs`：GPIO bit-bangのSPI busであり、`rdcycle`基準のdelayで初期化時375 kHz以下を保ちます。
 - `shell`の`ls`と`cat`：単一sessionを使い回し、型付きerrorを`sd:`接頭辞の安定messageへ写像します。
 

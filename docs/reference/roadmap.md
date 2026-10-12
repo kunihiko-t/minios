@@ -114,8 +114,7 @@ user heap、時刻と待機、fdの複製、spawnへの引数渡し、user libra
 段階1で機能が増えると、kernel内の大きなfileと暗黙の規約が保守の障害になります。
 この段階では振る舞いを変えず、境界と検査を整えます。
 
-- **大きなfileの分割**：`storage/fat32.rs`は4,086行、`user/syscall.rs`は3,826行、`main.rs`は3,087行あります。
-  FAT32はdirectory、cluster chain、write pathへ、syscallはfile、process、pipeへ、`main.rs`はboot段階ごとのmoduleへ分けます。
+- **大きなfileの分割**（完了）：`storage/fat32/`は`mod.rs`（type・定数）と`parse.rs`/`read.rs`/`write.rs`/`tests/`へ、`user/syscall/`は`mod.rs`（sink/source境界）と`dispatch.rs`/`tests/`へ、`main.rs`は`qemu_test.rs`/`user_trap.rs`/`proc_runtime.rs`/`user_probe.rs`/`payload.rs`へ分け、各fileは1,500行以下です。
 - **user pointer検査の一本化**（完了）：読み出しは`copy_from_user`、書き込みは`copy_to_user`がpageごとの`U`/権限検査を兼ね、`ReadComplete`のcopy-outも`complete_read`経由で`copy_to_user`を通ります。
   `sstatus.SUM`を立てたraw pointer書き込みは廃止し、検査経路と書き込み経路がずれて検査漏れになる形を除きました。
 - **processの異常終了の統一**（完了）：fatal trapを起こしたprocessの回収経路が、単一実行時の`UserRun`と複数process時の`ProcessTable`で分かれていました。

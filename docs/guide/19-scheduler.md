@@ -67,7 +67,7 @@ manifestが`version=2`のとき、終了は[`ProcExitPayload`](../../abi/src/con
 
 ### blockとecallのやり直し
 
-`read`の入力待ちは、[`kernel/src/user/syscall.rs`](../../kernel/src/user/syscall.rs)の`dispatch_read`がsourceから`Ok(None)`を受けたときに起こります。
+`read`の入力待ちは、[`kernel/src/user/syscall/dispatch.rs`](../../kernel/src/user/syscall/dispatch.rs)の`dispatch_read`がsourceから`Ok(None)`を受けたときに起こります。
 `classify_user_trap`が`sepc`をecallの次へ進めてあるため、`dispatch_read`は`sepc`を4 byte戻してから`SyscallFlow::Blocked`を返し、run loopはprocessを`BlockedOnStdin`へ移します。
 起こされたprocessは同じecallから再開し、`a0`から`a2`も保存時のままなので、同じ引数で`read`をやり直します。
 

@@ -35,7 +35,7 @@ stackが溢れると、隣のframeを壊す代わりにS-modeのpage faultが起
 
 system call番号は`a7`です。
 `write`は`a0=fd`、`a1=buffer`、`a2=len`を受け、`exit`は`a0=code`を受けます。
-[`dispatch_syscall`](../../kernel/src/user/syscall.rs)はこの規約を読み、戻り値またはerrnoを`a0`へ書き戻します。
+[`dispatch_syscall`](../../kernel/src/user/syscall/dispatch.rs)はこの規約を読み、戻り値またはerrnoを`a0`へ書き戻します。
 
 [`copy_from_user`](../../kernel/src/user/memory.rs)は`start + len`のoverflowを先に拒否します。
 その後はpageごとにSv39変換を行い、`U=1`かつreadableなPTEだけから最大4 KiBのkernel bufferへcopyします。
