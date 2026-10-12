@@ -84,6 +84,14 @@ impl Uart {
         }
     }
 
+    /// `irq-uart`診断用のIER read-back。受信割り込みが実際にdevice側で
+    /// 有効になっているかを検査出力で確認する。
+    #[cfg(feature = "qemu-test-irq-uart")]
+    pub fn ier(&self) -> u8 {
+        // Safety: `base + 1`は16550のInterrupt Enable Registerである。
+        unsafe { core::ptr::read_volatile(self.base.add(INTERRUPT_ENABLE_OFFSET)) }
+    }
+
     fn write_ier(&mut self, update: impl FnOnce(u8) -> u8) {
         // Safety: `base + 1`は16550のInterrupt Enable Registerである。
         // read-modify-writeでRX data以外のbit (modem status等) を保つ。

@@ -117,3 +117,26 @@ pub fn handle_external_pending() {
 pub fn uart_irq_claims() -> usize {
     UART_IRQ_CLAIMS.load(Ordering::Relaxed)
 }
+
+/// `irq-uart`診断用のread-back。base、S-mode contextのenable word 0、
+/// threshold、UART sourceのpriorityを返す。PLIC未初期化では全て0を返す。
+#[cfg(feature = "qemu-test-irq-uart")]
+pub fn debug_state() -> (usize, u32, u32, u32) {
+    let base = PLIC_BASE.load(Ordering::Relaxed);
+    if base == 0 {
+        return (0, 0, 0, 0);
+    }
+    // Safety: `init`済みのPLIC MMIOへのvolatile readである。
+    unsafe {
+        let enable = core::ptr::read_volatile(
+            plic().add(ENABLE_BASE + S_MODE_CONTEXT * ENABLE_CONTEXT_STRIDE) as *const u32,
+        );
+        let threshold = core::ptr::read_volatile(
+            plic().add(THRESHOLD_BASE + S_MODE_CONTEXT * CONTEXT_BLOCK_STRIDE) as *const u32,
+        );
+        let priority = core::ptr::read_volatile(
+            plic().add(PRIORITY_BASE + UART_IRQ as usize * 4) as *const u32
+        );
+        (base, enable, threshold, priority)
+    }
+}
