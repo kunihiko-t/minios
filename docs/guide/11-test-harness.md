@@ -90,7 +90,7 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 43. QEMU proc-killテスト
 44. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、対話シェルという依存関係の順に、ゲストの全経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、killによるprocess終了、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
 RV32 release buildのphaseでは、ELFの実ロード範囲からIMEMの使用量・容量・残量も表示します。
 容量と起点はリンカーの`ORIGIN(IMEM)`・`LENGTH(IMEM)`由来のELFシンボルを使い、`.data`のIMEMロード分と配置の隙間を使用量に含めます。BSSのDMEM領域は含めません。

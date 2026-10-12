@@ -1807,6 +1807,36 @@ mod tests {
         assert_eq!(table.pick_next(), Some(0));
     }
 
+    // Catches a killed waiter being resurrected by peer exit or pipe events:
+    // wake_on_exit and wake_pipe_waiters match only the live BlockedOn*
+    // variants, so a Killed process must stay Killed and reach the drain.
+    #[test]
+    fn killed_waiters_are_not_revived_by_exit_or_pipe_wakes() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+
+        table
+            .insert(fixture.spawn("killer"))
+            .expect("insert killer");
+        table
+            .insert(fixture.spawn("pid_waiter"))
+            .expect("insert pid waiter");
+        table
+            .insert(fixture.spawn("pipe_waiter"))
+            .expect("insert pipe waiter");
+
+        table.get_mut(1).unwrap().block_on_pid(9);
+        table.get_mut(2).unwrap().block_on_pipe(7);
+        table.mark_killed(0, 1).expect("kill pid waiter");
+        table.mark_killed(0, 2).expect("kill pipe waiter");
+
+        // 待っていた条件が成立してもKilledは起きない。
+        table.wake_on_exit(9);
+        table.wake_pipe_waiters(7);
+        assert_eq!(table.killed_pids().count(), 2);
+        assert_eq!(table.pick_next(), Some(0));
+    }
+
     // Catches a waiter never being released: when the target exits,
     // wake_on_exit must return every BlockedOnPid waiter to the rotation.
     #[test]

@@ -200,7 +200,8 @@ pub const ENOTEMPTY: isize = -39;
 
 /// `kill`で終了させたprocessが`waitpid`と`PROC_EXIT` frameへ記録する
 /// 終了code。fatal trapの`USER_FAULT_EXIT_CODE` (70、`'F'`) と同じく
-/// 原因を一字で表す約束で、guestの`exit`が取りうる値と区別できる。
+/// 原因を一字で表す約束。guestが同じ値で`exit`すれば同じ記録になる
+/// （区別は慣例のみ）点は70と同じである。
 pub const EXIT_CODE_KILLED: u32 = 75;
 
 #[cfg(test)]
