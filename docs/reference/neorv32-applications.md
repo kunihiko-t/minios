@@ -141,5 +141,5 @@ U-mode、system call、分離はQEMU RV64の自動試験付き教材で教え、
 
 - [NEORV32](https://github.com/stnolting/neorv32)と[NEORV32資料](https://stnolting.github.io/neorv32/)（U拡張とPMPのgenerics）
 - [`linker_neorv32.ld`](../../kernel/linker_neorv32.ld)と[`entry.S`](../../kernel/src/arch/riscv32/entry.S)（現行のRV32起動契約）
-- [`user/stack.rs`](../../kernel/src/user/stack.rs)、[`user/syscall.rs`](../../kernel/src/user/syscall.rs)、[`elf/header.rs`](../../kernel/src/elf/header.rs)（共有可否の判定対象）
+- [`user/stack.rs`](../../kernel/src/user/stack.rs)、[`user/syscall/mod.rs`](../../kernel/src/user/syscall/mod.rs)、[`elf/header.rs`](../../kernel/src/elf/header.rs)（共有可否の判定対象）
 - [MiniContainer Guest ABI](minicontainer-abi.md)と[発展ロードマップ](roadmap.md)

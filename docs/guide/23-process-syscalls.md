@@ -21,7 +21,7 @@ UNIXでは`fork`でaddress spaceを複製してから`exec`で置き換えます
 
 ### 番号とdispatch
 
-[`dispatch_syscall`](../../kernel/src/user/syscall.rs)は`a7`の番号（[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`SyscallNumber::Getpid`、`Spawn`、`Waitpid`、`Exec`、`Kill`）を`dispatch_getpid`、`dispatch_spawn`、`dispatch_waitpid`、`dispatch_exec`、`dispatch_kill`へ振り分けます。
+[`dispatch_syscall`](../../kernel/src/user/syscall/dispatch.rs)は`a7`の番号（[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`SyscallNumber::Getpid`、`Spawn`、`Waitpid`、`Exec`、`Kill`）を`dispatch_getpid`、`dispatch_spawn`、`dispatch_waitpid`、`dispatch_exec`、`dispatch_kill`へ振り分けます。
 
 `dispatch_spawn`と`dispatch_exec`は、process生成やimage差し替えの前に`copy_user_path`でpathを検証します。
 長さ0か`MAX_PATH_LEN`（256）超は`EINVAL`、読めないuser rangeは`EFAULT`、UTF-8でないpathは`EINVAL`です。

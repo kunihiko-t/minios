@@ -27,7 +27,7 @@ pipeは容量が有限のため、空のpipeからの`read`と満杯のpipeへ�
 ### fd table
 
 fd tableは[`kernel/src/process.rs`](../../kernel/src/process.rs)の`FileFdTable`です。
-slot数は[`kernel/src/user/syscall.rs`](../../kernel/src/user/syscall.rs)の`FD_TABLE_LEN`（19）で、[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`FIRST_FILE_FD`（3）と`MAX_OPEN_FILES`（16）の和です。
+slot数は[`kernel/src/user/syscall/mod.rs`](../../kernel/src/user/syscall/mod.rs)の`FD_TABLE_LEN`（19）で、[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`FIRST_FILE_FD`（3）と`MAX_OPEN_FILES`（16）の和です。
 fd番号はslot indexそのものです。
 各slotは`Option<FdEntry>`であり、`FdEntry::Console(ConsoleFd)`、`FdEntry::File(FileFd)`、`FdEntry::Pipe { id, write }`のいずれかを持ちます。
 `FileFdTable::new`はfd 0、1、2へconsoleの`Stdin`、`Stdout`、`Stderr`を置き、残りを空にします。
@@ -45,7 +45,7 @@ pipe端だけは同じpipe idを指すため、bufferはparentとchildで共有�
 
 ### file fdのsyscall
 
-番号とerrnoは[`abi/src/syscall.rs`](../../abi/src/syscall.rs)にあり、受け口は[`kernel/src/user/syscall.rs`](../../kernel/src/user/syscall.rs)の`dispatch_syscall`です。
+番号とerrnoは[`abi/src/syscall.rs`](../../abi/src/syscall.rs)にあり、受け口は[`kernel/src/user/syscall/dispatch.rs`](../../kernel/src/user/syscall/dispatch.rs)の`dispatch_syscall`です。
 dispatch層はfd範囲、長さ、user pointerを先に検証し、storageへ触れる処理は`ControlSource`の実装である[`kernel/src/control.rs`](../../kernel/src/control.rs)へ委譲します。
 `read`と`write`の経路はfd番号ではなくslotの中身で決まります。
 dispatch層は`ControlSource::console_fd`でslotがconsoleを指すかを尋ね、consoleの出力ならframe sinkへ、入力なら`read_stdin`へ、それ以外は`read_fd`や`write_fd`へ流します。
