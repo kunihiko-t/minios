@@ -11,7 +11,7 @@ use minios_abi::{
     manifest::ARG_MAX_LEN,
     syscall::{
         DIRENT_LEN, EAGAIN, EBADF, EFAULT, EINVAL, ENOMEM, ENOSYS, ESPIPE, MAX_PATH_LEN,
-        MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, SPAWN_ARG_LEN, SPAWN_MAX_ARGC,
+        MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, SOCKADDR_LEN, SPAWN_ARG_LEN, SPAWN_MAX_ARGC,
         STAT_KIND_CONSOLE, STAT_LEN, Stat, SyscallNumber,
     },
 };
@@ -44,8 +44,11 @@ fn errno_flow<E, SE>(context: &mut UserContext, errno: isize) -> SyscallFlow<E, 
 /// 受信する。どのfdがconsoleを指すかは`source.console_fd`が決め、fd番号では
 /// 決めない。stdinの未到着（`Ok(None)`）、pipe待ち（`EAGAIN`）、`waitpid`の
 /// 対象がliveな場合は`Blocked`を返し、`sepc`をecallへ戻して再開時の再実行に
-/// 委ねる。userへのcopyは呼び出し側の`ReadComplete`処理へ委ねる。scratchは
-/// 呼び出し側が1個だけ持ち、多重frameへ4 KiBを複製しない。
+/// 委ねる。`socket`/`sendto`/`recvfrom`はUDP socket tableを`source`経由で
+/// 操作し、`recvfrom`の未受信は`Blocked`で再実行、`sendto`は送信byte数を
+/// `a0`へ返す。userへのcopyは呼び出し側の`ReadComplete`/`RecvComplete`
+/// 処理へ委ねる。scratchは呼び出し側が1個だけ持ち、多重frameへ4 KiBを
+/// 複製しない。
 pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
     context: &mut UserContext,
     space: &AddressSpace,
@@ -134,6 +137,18 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_dup2(context, source)
     } else if number == SyscallNumber::Kill as usize {
         dispatch_kill(context, source)
+    } else if number == SyscallNumber::Socket as usize {
+        match source.socket() {
+            Ok(sock) => {
+                context.set_register(10, sock);
+                SyscallFlow::Resume
+            }
+            Err(errno) => errno_flow(context, errno),
+        }
+    } else if number == SyscallNumber::SendTo as usize {
+        dispatch_send_to(context, space, memory, source, read_scratch)
+    } else if number == SyscallNumber::RecvFrom as usize {
+        dispatch_recv_from(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Exit as usize {
         SyscallFlow::Exit(context.register(10) as u32)
     } else {
@@ -922,5 +937,99 @@ fn dispatch_write<M: FrameStore, S: ControlSink, R: ControlSource>(
             // ecallへ戻して再実行する。
             Err(errno) => errno_flow(context, errno),
         },
+    }
+}
+
+/// `sendto` (`a0=sock, a1=buf_ptr, a2=buf_len, a3=addr_ptr`)。payloadと
+/// `SOCKADDR_LEN` byteの`SockAddr`を検証付きcopyで受け取り、
+/// `source.send_to`へ委譲する。payloadは`read_scratch`を使うため
+/// `MAX_READ_LEN`以下でなければならない（実際のdatagram上限は
+/// `MAX_DATAGRAM_LEN`でstack側が検査する）。
+fn dispatch_send_to<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let sock = context.register(10);
+    let buf_len = context.register(12);
+    if buf_len > MAX_READ_LEN {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    let mut addr = [0u8; SOCKADDR_LEN];
+    if copy_from_user(space, memory, context.register(13) as u64, &mut addr).is_err()
+        || copy_from_user(
+            space,
+            memory,
+            context.register(11) as u64,
+            &mut read_scratch[..buf_len],
+        )
+        .is_err()
+    {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    // `ip`はdotted-quad順を整数で保持する（`10.0.2.15`なら`0x0A00020F`）。
+    let dst_ip = u32::from_le_bytes([addr[0], addr[1], addr[2], addr[3]]).to_be_bytes();
+    let dst_port = u16::from_le_bytes([addr[4], addr[5]]);
+    match source.send_to(sock, &read_scratch[..buf_len], dst_ip, dst_port) {
+        Ok(sent) => {
+            context.set_register(10, sent);
+            SyscallFlow::Resume
+        }
+        Err(errno) => errno_flow(context, errno),
+    }
+}
+
+/// `recvfrom` (`a0=sock, a1=buf_ptr, a2=buf_len, a3=addr_ptr`)。bufと
+/// `addr`の書き込み可能を先に確定させてから`source.recv_from`を呼び、
+/// 受信があればpayloadをscratch先頭`len` byteへ、`SockAddr`を続く
+/// `SOCKADDR_LEN` byteへ配置して`RecvComplete`を返す。未受信
+/// (`Ok(None)`) は`EAGAIN`経由で`Blocked`となり、datagram到着後に
+/// 同じecallがやり直される。
+fn dispatch_recv_from<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let sock = context.register(10);
+    let buf_len = context.register(12);
+    // payloadの後ろへsockaddrを置くため、buf_len + SOCKADDR_LENが
+    // scratch内に収まることが条件である。
+    if buf_len > MAX_READ_LEN - SOCKADDR_LEN {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    let buf_start = context.register(11) as u64;
+    let addr_start = context.register(13) as u64;
+    if check_user_writable_range(space, memory, buf_start, buf_len).is_err()
+        || check_user_writable_range(space, memory, addr_start, SOCKADDR_LEN).is_err()
+    {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.recv_from(sock, &mut read_scratch[..buf_len]) {
+        Ok(Some((src_ip, src_port, len))) => {
+            // sourceの契約は`output.len()`以下だが、逸脱しても検証済みの
+            // 範囲外を`RecvComplete`へ渡さないよう打ち切る。
+            let len = len.min(buf_len);
+            let mut addr = [0u8; SOCKADDR_LEN];
+            addr[0..4].copy_from_slice(&u32::from_be_bytes(src_ip).to_le_bytes());
+            addr[4..6].copy_from_slice(&src_port.to_le_bytes());
+            // handler側は`scratch[len..len + SOCKADDR_LEN]`を`addr_start`へ
+            // copyするため、sockaddrはpayloadの直後へ置く。
+            read_scratch[len..len + SOCKADDR_LEN].copy_from_slice(&addr);
+            SyscallFlow::RecvComplete {
+                start: buf_start,
+                len,
+                addr_start,
+            }
+        }
+        Ok(None) => errno_flow(context, EAGAIN),
+        Err(errno) => errno_flow(context, errno),
     }
 }

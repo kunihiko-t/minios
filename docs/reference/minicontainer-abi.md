@@ -182,6 +182,9 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 26 | `yield` | なし | 残りのtime sliceを手放して次のrunnable processへ順番を回し、再び選ばれると0を返す |
 | 27 | `dup2` | `a0=oldfd`、`a1=newfd` | `newfd`を閉じてから`oldfd`と同じentryを指させ、`newfd`を返す。`oldfd == newfd`は何も変えずに`newfd`を返す。負のerrnoは`EBADF` |
 | 28 | `kill` | `a0=pid` | `pid`のprocessの終了を要求し、0を返す。対象は再びdispatchされずに回収され、終了codeは`EXIT_CODE_KILLED`（75、`'K'`）として`waitpid`と`ProcExit` frameへ記録される。tableに残る間の再`kill`も0を返す。負のerrnoは`ECHILD`（対象不在）/`EINVAL`（自分自身） |
+| 29 | `socket` | なし | UDP socketを開き、socket index（0から採番）を返す。file fdとは別の名前空間で、table満杯は`EMFILE`、network device未接続は`ENODEV` |
+| 30 | `sendto` | `a0=sock`、`a1=buffer pointer`、`a2=length`、`a3=sockaddr pointer` | `a1`の`a2` byteを`a3`の`SockAddr`宛にUDP datagramとして送る。戻り値は送信byte数。負のerrnoは`EBADF`/`EINVAL`/`EFAULT`/`ENODEV`/`EIO` |
+| 31 | `recvfrom` | `a0=sock`、`a1=buffer pointer`、`a2=length`、`a3=sockaddr pointer` | 受信queueから1 datagramを`a1`へ最大`a2` byte取り、`a3`へ送信元`SockAddr`を8 byteで書き戻す。戻り値は受信byte数。queueが空なら`waitpid`と同じ巻き戻し規約でcallerをblockし、datagram到着で同じecallが再実行される。負のerrnoは`EBADF`/`EINVAL`/`EFAULT`/`ENODEV`/`EIO` |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -248,6 +251,13 @@ argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたた�
 pipeのread端への`read`は、bufferにdataがあれば読んでbyte数を返し、空でwrite端が残っていれば呼び出しprocessを`BlockedOnPipe`へ移してecallを再実行へ回します（`read`のstdin待ちと同じ巻き戻し規約）。write端がすべて閉じていればEOFとして0を返します。write端への`write`は、read端がすべて閉じていれば`EPIPE`、bufferが満杯なら同じくblockして再実行、空きがあれば書いてbyte数を返します。片端への逆方向操作（read端への`write`、write端への`read`）は`EBADF`、pipe fdへの`lseek`/`pread`/`pwrite`は`ESPIPE`を返します。
 `fstat`はpipe fdへ`kind`=`STAT_KIND_PIPE`（2）・`size`=0を返します。processが終了または`close`で端を手放すと、そのpipeを待つprocessは全員wakeされ、再実行した`read`/`write`が新しい端数（EOFや`EPIPE`）を見ます。両端ともどのprocessのfd tableからも消えたpipeのslotは再利用されます。同時にliveなpipeは4本までで、枯渇は`ENOMEM`を返します。
 
+`socket`はkernelが保持するnetwork stackへUDP socketを開き、file fdとは別の名前空間で採番したsocket indexを返します。local portはephemeral範囲からsocket indexごとに固定で割り当てられ、同時にliveなsocketは4個までで、枯渇は`EMFILE`を返します。
+`sendto`と`recvfrom`の`a3`は`SOCKADDR_LEN`（8）byteの`SockAddr`を指します。`SockAddr`はlittle-endianで、先頭4 byteがIPv4 addressをdotted-quad順の整数として持つ`ip`（`10.0.2.15`なら`0x0A00020F`）、次の2 byteが`port`、末尾2 byteが予約の0です。
+`sendto`の`a2`は`MAX_READ_LEN`（4,096）以下でなければ`EINVAL`、組み立てたframeが1 ethernet frame（1,514 byte）に収まらないdatagramも`EINVAL`です。`a1`のpayloadと`a3`の`sockaddr`はともに読み取り可能であることを要求し、どちらかが読めなければ`EFAULT`です。
+`recvfrom`は受信queueから1 datagramを取り出し、`a1`へ最大`a2` byteのpayload、`a3`へ送信元の`SockAddr`を書き戻します。受信byte数より長いdatagramは`a2`で切り詰められ、残りは捨てられます。stackは着信datagramを`MAX_DATAGRAM_LEN`（512）byteで切り詰めてqueueへ積むため、それより長いpayloadは到着時点で既に欠けています。`a2` + `SOCKADDR_LEN`が`MAX_READ_LEN`を越える指定は`EINVAL`です。`a1`の`a2` byteと`a3`の8 byteはともに書き込み可能であることを要求し、queueが空なら`waitpid`やpipeと同じく`sepc`がecallへ戻されてcallerがblockし、virtio-netの受信割り込みで起きた後に同じecallが再実行されてdatagramを返します。
+`recvfrom`のblock待ちはstorageの`BlockedOnIo`と同じ起床経路を使い、virtio-netのused-buffer割り込みがPLIC経由でclaimされるとwakeします。
+network deviceが見つからない場合の`ENODEV`は`socket`の初回probeで確定し、以後の`sendto`/`recvfrom`でも同じerrnoが返ります。未割り当てのsocket indexへの操作は`EBADF`です。
+
 `sbrk`はprocessのheap breakを動かします。
 初期breakはimageの最上位PT_LOAD segment末尾をpage境界へ切り上げた位置で、heapはそこからuser stack下のguard pageへ向けて上へ伸びます。
 新しく必要になったpageはzero済みのユーザー読み書き可能ページ（実行不可）としてmapし、戻り値は伸ばす前のbreakです。
@@ -268,17 +278,17 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | ---: | --- | --- |
 | `-2` | `ENOENT` | fileが存在しない |
 | `-5` | `EIO` | storageの読み取りまたはfilesystem構造の失敗 |
-| `-9` | `EBADF` | fd tableの範囲外のfile descriptor、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`/`dup2`、範囲外の`newfd`への`dup2`、console入力への`write`とconsole出力への`read`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作 |
+| `-9` | `EBADF` | fd tableの範囲外のfile descriptor、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`/`dup2`、範囲外の`newfd`への`dup2`、console入力への`write`とconsole出力への`read`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作、未割り当てのsocket indexへの`sendto`/`recvfrom` |
 | `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない、`kill`の対象が存在しない |
-| `-11` | `EAGAIN` | pipeの`read`/`write`が条件未達でcallerをblockへ移したことを示すkernel内部のsignal。dispatchがecallを巻き戻して再実行するためguestへは返らない |
+| `-11` | `EAGAIN` | pipeの`read`/`write`や`recvfrom`が条件未達でcallerをblockへ移したことを示すkernel内部のsignal。dispatchがecallを巻き戻して再実行するためguestへは返らない |
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足、同時にliveなpipe本数（4本）の枯渇、`sbrk`の上限超過やframe不足 |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
 | `-17` | `EEXIST` | `mkdir`の対象と同名のentryが既にある |
-| `-19` | `ENODEV` | block deviceが見つからない |
+| `-19` | `ENODEV` | block deviceやnetwork deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
-| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement、`kill`の対象が自分自身 |
-| `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う |
+| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |
+| `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う。socket table（4個）が満杯 |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdとconsole entryへの`lseek`/`pread`/`pwrite` |
 | `-32` | `EPIPE` | read端がすべて閉じたpipeへの`write` |

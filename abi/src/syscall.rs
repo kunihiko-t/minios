@@ -65,6 +65,20 @@ pub enum SyscallNumber {
     /// `'K'`）として`waitpid`から回収できる。対象不在は`ECHILD`、
     /// 自分自身（`exit`を使うこと）は`EINVAL`。
     Kill = 28,
+    /// UDP socketを開く。引数なし。戻り値はsocket index（0から採番）で、
+    /// file fdとは別の名前空間である。socket table満杯は`EMFILE`、
+    /// network device未接続は`ENODEV`。
+    Socket = 29,
+    /// `a0`のsocket indexから`a1`が指す`a2` byteのpayloadを、`a3`が指す
+    /// `SOCKADDR_LEN` byteの`SockAddr`宛にUDP datagramとして送る。
+    /// 戻り値は送ったbyte数。socket未割当は`EBADF`、1 ethernet frameに
+    /// 収まらないdatagramは`EINVAL`、network device未接続は`ENODEV`。
+    SendTo = 30,
+    /// `a0`のsocket indexの受信queueから1 datagramを`a1`へ最大`a2` byte
+    /// 取り、`a3`が指す`SOCKADDR_LEN` byteへ送信元`SockAddr`を書き戻す。
+    /// 戻り値は受信byte数。queueが空ならcallerを`BlockedOnIo`へ回し、
+    /// datagram到着で同じecallがやり直される。
+    RecvFrom = 31,
 }
 
 pub const STDIN: usize = 0;
@@ -136,6 +150,11 @@ impl Stat {
 pub const DIRENT_NAME_LEN: usize = 255;
 /// `readdir`が`out` pointerへ書き込む`DirEnt`のbyte長。
 pub const DIRENT_LEN: usize = 4 + 4 + DIRENT_NAME_LEN;
+
+/// `sendto`/`recvfrom`の`SockAddr`のbyte長。`{ip: u32, port: u16, pad: u16}`
+/// のLE列（8 byte）。`ip`はIPv4 addressをdotted-quad順の整数として持つ
+/// （`10.0.2.15`なら`0x0A00020F`）。
+pub const SOCKADDR_LEN: usize = 8;
 
 /// `pipe`が`a0`のuser bufferへ書き込むfd pairのbyte長。
 /// `[read_fd: u32, write_fd: u32]`のLE列。

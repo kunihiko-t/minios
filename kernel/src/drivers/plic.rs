@@ -164,9 +164,9 @@ pub fn virtio_irq_claims() -> usize {
         .sum()
 }
 
-/// `source`番のvirtio割り込みをこれまでにclaimした回数。`net-arp`検査が
-/// net deviceのused-buffer割り込みが実際にPLIC経由で届いたことを観測する。
-#[cfg(feature = "qemu-test-net-arp")]
+/// `source`番のvirtio割り込みをこれまでにclaimした回数。`net-arp`/`net-ping`
+/// 検査がnet deviceのused-buffer割り込みが実際にPLIC経由で届いたことを観測する。
+#[cfg(any(feature = "qemu-test-net-arp", feature = "qemu-test-net-ping"))]
 pub fn virtio_irq_claims_for(source: u32) -> usize {
     if !(VIRTIO_IRQ_FIRST..=VIRTIO_IRQ_LAST).contains(&source) {
         return 0;

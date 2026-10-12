@@ -161,6 +161,23 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
             complete_user_read(context, space, start, len, &read_scratch[..len]);
             RunExit::Resume
         }
+        SyscallFlow::RecvComplete {
+            start,
+            len,
+            addr_start,
+        } => {
+            // 先にsockaddrを書いてa0を上書きさせ、最後にpayload copyが
+            // `a0 = len`を確定する。
+            complete_user_read(
+                context,
+                space,
+                addr_start,
+                minios_abi::syscall::SOCKADDR_LEN,
+                &read_scratch[len..len + minios_abi::syscall::SOCKADDR_LEN],
+            );
+            complete_user_read(context, space, start, len, &read_scratch[..len]);
+            RunExit::Resume
+        }
         SyscallFlow::Exit(code) => {
             USER_EXIT_CODE.store(code as usize, Ordering::Relaxed);
             USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_EXIT, Ordering::Relaxed);
@@ -296,6 +313,21 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
             complete_user_read(context, space, start, len, &read_scratch[..len]);
             RunExit::Resume
         }
+        SyscallFlow::RecvComplete {
+            start,
+            len,
+            addr_start,
+        } => {
+            complete_user_read(
+                context,
+                space,
+                addr_start,
+                minios_abi::syscall::SOCKADDR_LEN,
+                &read_scratch[len..len + minios_abi::syscall::SOCKADDR_LEN],
+            );
+            complete_user_read(context, space, start, len, &read_scratch[..len]);
+            RunExit::Resume
+        }
         SyscallFlow::Exit(code) => {
             // このprobeのExit経路はsinkへ直接frameを1回載せる。
             use minios_kernel::user::syscall::ControlSink as _;
@@ -371,6 +403,21 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     match flow {
         SyscallFlow::Resume => RunExit::Resume,
         SyscallFlow::ReadComplete { start, len } => {
+            complete_user_read(context, space, start, len, &read_scratch[..len]);
+            RunExit::Resume
+        }
+        SyscallFlow::RecvComplete {
+            start,
+            len,
+            addr_start,
+        } => {
+            complete_user_read(
+                context,
+                space,
+                addr_start,
+                minios_abi::syscall::SOCKADDR_LEN,
+                &read_scratch[len..len + minios_abi::syscall::SOCKADDR_LEN],
+            );
             complete_user_read(context, space, start, len, &read_scratch[..len]);
             RunExit::Resume
         }

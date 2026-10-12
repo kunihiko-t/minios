@@ -264,6 +264,39 @@ pub trait ControlSource {
         let _ = (oldfd, newfd);
         Err(ENOSYS)
     }
+
+    /// UDP socketを開き、socket indexを返す。`Err`はそのまま`a0`へ返す
+    /// errnoである。network stackを持たないsourceのdefault実装は`ENOSYS`。
+    fn socket(&mut self) -> Result<usize, isize> {
+        Err(ENOSYS)
+    }
+
+    /// `sock`のsocketから`dst_ip`:`dst_port`へ`data`を1 datagramとして
+    /// 送る。戻り値は送ったbyte数。`Err`はそのまま`a0`へ返すerrnoである。
+    /// default実装は`ENOSYS`。
+    fn send_to(
+        &mut self,
+        sock: usize,
+        data: &[u8],
+        dst_ip: [u8; 4],
+        dst_port: u16,
+    ) -> Result<usize, isize> {
+        let _ = (sock, data, dst_ip, dst_port);
+        Err(ENOSYS)
+    }
+
+    /// `sock`のsocketの受信queueから1 datagramを`output`へ取り、
+    /// `(src_ip, src_port, len)`を返す。`Ok(None)`は現時点で未受信を
+    /// 意味し、callerを`Blocked`へ回してdatagram到着でやり直す。
+    /// `Err`はそのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
+    fn recv_from(
+        &mut self,
+        sock: usize,
+        output: &mut [u8],
+    ) -> Result<Option<([u8; 4], u16, usize)>, isize> {
+        let _ = (sock, output);
+        Err(ENOSYS)
+    }
 }
 
 /// 1個のsystem callを処理した後の継続種別。
@@ -282,6 +315,14 @@ pub enum SyscallFlow<E, SE = E> {
     /// `a0`へ`len`を書いて戻る。4 KiBを値で返さないのは、trap stackの
     /// 多重frameでoverflowさせないためである。
     ReadComplete { start: u64, len: usize },
+    /// `recvfrom`の受信が済み、payloadと送信元`sockaddr`の二箇所へcopy
+    /// 待ちである。scratchの先頭`len` byteを`start`へ、続く
+    /// `SOCKADDR_LEN` byteを`addr_start`へ移してから`a0`へ`len`を書く。
+    RecvComplete {
+        start: u64,
+        len: usize,
+        addr_start: u64,
+    },
     /// `read`の検証は通ったが入力が未到着である。`sepc`はecallへ戻してあり、
     /// 入力到着後の再開で同じsyscallがやり直される。schedulerはこのprocessを
     /// stdin待ちへ回し、他のrunnable processを動かせる。

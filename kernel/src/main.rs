@@ -472,13 +472,13 @@ impl Drop for VirtioRegionPage {
 /// dropで返す。`T`は`align(4096)`を持つ4 KiB以内のregion型
 /// (`NetQueueRegion`や`NetRxBufPage`) で、managed RAMは恒等map済み
 /// なのでframeの物理アドレスがそのままdeviceへ渡すDMAアドレスになる。
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+#[cfg(target_arch = "riscv64")]
 struct FrameRegion<T> {
     frame: Option<PhysFrame>,
     _target: core::marker::PhantomData<T>,
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+#[cfg(target_arch = "riscv64")]
 impl<T> FrameRegion<T> {
     fn new(frame: PhysFrame) -> Self {
         // Safety: frame poolが管理する物理pageは`KernelMapPlan`で恒等map
@@ -499,7 +499,7 @@ impl<T> FrameRegion<T> {
     }
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+#[cfg(target_arch = "riscv64")]
 impl<T> core::ops::Deref for FrameRegion<T> {
     type Target = T;
 
@@ -510,7 +510,7 @@ impl<T> core::ops::Deref for FrameRegion<T> {
     }
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+#[cfg(target_arch = "riscv64")]
 impl<T> core::ops::DerefMut for FrameRegion<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: `deref`と同じ領域。driverが生存中はこのwrapperが領域の
@@ -519,7 +519,7 @@ impl<T> core::ops::DerefMut for FrameRegion<T> {
     }
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-net-arp"))]
+#[cfg(target_arch = "riscv64")]
 impl<T> Drop for FrameRegion<T> {
     fn drop(&mut self) {
         if let Some(frame) = self.frame.take() {
@@ -867,6 +867,11 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         qemu_test::run_net_arp_test(machine, &mut frames);
     }
 
+    #[cfg(feature = "qemu-test-net-ping")]
+    {
+        qemu_test::run_net_ping_test(machine, &mut frames);
+    }
+
     if let Some(payload) = payload {
         payload::run_boot_payload(&kernel_space, &plan, &mut frames, &mut memory, payload);
     }
@@ -971,7 +976,8 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
         feature = "qemu-test-fdt",
         feature = "qemu-test-heap",
         feature = "qemu-test-virtio",
-        feature = "qemu-test-net-arp"
+        feature = "qemu-test-net-arp",
+        feature = "qemu-test-net-ping"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -992,7 +998,8 @@ fn successful_qemu_test_shutdown() -> ! {
         feature = "qemu-test-user-exit",
         feature = "qemu-test-heap",
         feature = "qemu-test-virtio",
-        feature = "qemu-test-net-arp"
+        feature = "qemu-test-net-arp",
+        feature = "qemu-test-net-ping"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {

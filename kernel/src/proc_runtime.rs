@@ -34,6 +34,103 @@ pub(crate) unsafe fn borrow_file_storage()
     Ok(storage.as_mut().expect("mounted above"))
 }
 
+/// `borrow_net_stack`がprobeするnet deviceの型。queue/buffer領域は
+/// frame poolのpageを`FrameRegion`が所有し、device dropで返される。
+#[cfg(target_arch = "riscv64")]
+type RuntimeNetDevice = minios_kernel::net::virtio_net::VirtioNet<
+    drivers::virtio_mmio::MmioRegs,
+    FrameRegion<minios_kernel::net::virtio_net::NetQueueRegion>,
+    FrameRegion<minios_kernel::net::virtio_net::NetRxBufPage>,
+>;
+
+/// guestのnetwork syscallが使うnetwork stack。socket tableはstack内で
+/// 共有され、socket indexはprocessをまたいで一意に採番される。queue領域と
+/// rx pageを確保したdeviceをこのstaticが存続させる。
+#[cfg(target_arch = "riscv64")]
+static mut NET_STACK: Option<minios_kernel::net::stack::Stack<RuntimeNetDevice>> = None;
+
+/// QEMU user-netがguestへ割り当てる既定address。slirp環境では常に
+/// `10.0.2.15`である。
+#[cfg(target_arch = "riscv64")]
+const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
+
+/// FDTが報告するvirtio-mmio slotからnet deviceをprobeする。見つかった
+/// deviceのPLIC sourceをenableしてstackを返し、net以外のslotやframe
+/// 不足のslotは読み飛ばす。`Err(ENODEV)`はnet device無し。
+#[cfg(target_arch = "riscv64")]
+fn probe_net_stack() -> Result<minios_kernel::net::stack::Stack<RuntimeNetDevice>, isize> {
+    use minios_kernel::net::stack::Stack;
+    use minios_kernel::net::virtio_net::{NetQueueRegion, NetRxBufPage, VirtioNet};
+
+    let spec = crate::machine::spec();
+    for (slot, &base) in spec.virtio_mmio[..spec.virtio_mmio_count]
+        .iter()
+        .enumerate()
+    {
+        // Safety: `base`はFDTが報告したMMIO領域で、`with_device_pages`が
+        // S-mode R+Wとしてmap済み。
+        let mmio = unsafe { drivers::virtio_mmio::MmioRegs::new(base) };
+        let mut frames = GlobalFrames;
+        let Some(queue_frame) = frames.allocate() else {
+            continue;
+        };
+        let region = FrameRegion::<NetQueueRegion>::new(queue_frame);
+        let mut rx_slots = [None, None, None, None];
+        let mut short = false;
+        for rx in &mut rx_slots {
+            match frames.allocate() {
+                Some(frame) => *rx = Some(FrameRegion::<NetRxBufPage>::new(frame)),
+                None => {
+                    short = true;
+                    break;
+                }
+            }
+        }
+        // 確保済みのslotとregionはここでdropされてframe poolへ戻る。
+        if short {
+            continue;
+        }
+        let rx_pages = rx_slots.map(|page| page.expect("rx slots populated above"));
+        if let Ok(device) = VirtioNet::init(mmio, region, rx_pages) {
+            let irq = spec.virtio_mmio_irq[slot];
+            if irq != 0 {
+                drivers::plic::enable(irq);
+            }
+            return Ok(Stack::new(device, GUEST_IP));
+        }
+    }
+    Err(minios_abi::syscall::ENODEV)
+}
+
+/// `socket`/`sendto`/`recvfrom` syscall向けのnetwork stackを借りる。
+/// 初回だけFDT probeを行い、以降は同じstackを返す。
+///
+/// # Safety
+///
+/// stdin stagingと同じくtrap handlerの実行窓からのみ呼び、借用をtrapの
+/// 外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn borrow_net_stack()
+-> Result<&'static mut minios_kernel::net::stack::Stack<RuntimeNetDevice>, isize> {
+    let stack = unsafe { &mut *&raw mut NET_STACK };
+    if stack.is_none() {
+        *stack = Some(probe_net_stack()?);
+    }
+    Ok(stack.as_mut().expect("probed above"))
+}
+
+/// run終了時にnetwork stackを閉じ、queue/rx frameをpoolへ返す。
+///
+/// # Safety
+///
+/// 全user processが終了し、trap handlerからの借用が残っていない後にだけ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn close_net_stack() {
+    unsafe { *&raw mut NET_STACK = None };
+}
+
 /// 現在trap中のprocess。fd tableは`Process`が所有するため、handlerは
 /// このpointer経由でだけ現在processのfdへ触れる。run loopが
 /// `__run_user`の直前に設定し、復帰後にnullへ戻す。

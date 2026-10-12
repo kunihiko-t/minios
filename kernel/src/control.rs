@@ -542,6 +542,70 @@ impl ControlSource for UartControlSource<'_> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         unsafe { crate::sleep_current_process(millis) }
     }
+
+    /// guestの`socket`をnetwork stackのtableへ委譲する。table満杯は
+    /// `EMFILE`、net device未接続は`borrow_net_stack`の`ENODEV`。
+    #[cfg(target_arch = "riscv64")]
+    fn socket(&mut self) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let stack = unsafe { crate::borrow_net_stack() }?;
+        stack.socket_open().ok_or(minios_abi::syscall::EMFILE)
+    }
+
+    /// guestの`sendto`をnetwork stackへ委譲し、成功時は送信byte数を返す。
+    #[cfg(target_arch = "riscv64")]
+    fn send_to(
+        &mut self,
+        sock: usize,
+        data: &[u8],
+        dst_ip: [u8; 4],
+        dst_port: u16,
+    ) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let stack = unsafe { crate::borrow_net_stack() }?;
+        stack
+            .socket_send_to(sock, dst_ip, dst_port, data)
+            .map(|()| data.len())
+            .map_err(net_errno)
+    }
+
+    /// guestの`recvfrom`をnetwork stackへ委譲する。queue空ならcallerを
+    /// `BlockedOnIo`へmarkして`EAGAIN`を返し、virtio-netの割り込みで
+    /// 起きたretryが`stack.poll()`で新着frameをqueueへ取り込む。
+    #[cfg(target_arch = "riscv64")]
+    fn recv_from(
+        &mut self,
+        sock: usize,
+        output: &mut [u8],
+    ) -> Result<Option<([u8; 4], u16, usize)>, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let stack = unsafe { crate::borrow_net_stack() }?;
+        stack.poll().map_err(net_errno)?;
+        match stack.socket_recv_from(sock, output) {
+            Ok(None) => {
+                // disk I/Oの`WouldBlock`と同じく、割り込み完了待ちで
+                // callerをmarkしてから`EAGAIN`へ流す。
+                unsafe { crate::block_current_on_io() };
+                Err(minios_abi::syscall::EAGAIN)
+            }
+            Ok(received) => Ok(received),
+            Err(error) => Err(net_errno(error)),
+        }
+    }
+}
+
+/// network stackの失敗をguest向けerrnoへ写像する。
+#[cfg(target_arch = "riscv64")]
+fn net_errno(error: minios_kernel::net::stack::StackError) -> isize {
+    use minios_abi::syscall::{EBADF, EINVAL, EIO, EMFILE};
+    use minios_kernel::net::stack::StackError;
+
+    match error {
+        StackError::BadSocket => EBADF,
+        StackError::PacketTooLarge => EINVAL,
+        StackError::NoSocket => EMFILE,
+        StackError::Timeout | StackError::Link(_) => EIO,
+    }
 }
 
 /// FSを変更するopは`WouldBlock`で途中退避できない。部分commitを残した

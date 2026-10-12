@@ -224,3 +224,33 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
 pub fn sys_yield() -> isize {
     ecall(SyscallNumber::Yield, 0, 0, 0, 0)
 }
+
+/// `socket`を呼ぶ。戻り値はsocket indexか負のerrno。
+pub fn sys_socket() -> isize {
+    ecall(SyscallNumber::Socket, 0, 0, 0, 0)
+}
+
+/// `sendto`を呼ぶ。`addr`は`SOCKADDR_LEN` byteの`{ip u32 LE, port u16 LE}`
+/// を指す。戻り値は送信byte数か負のerrno。
+pub fn sys_sendto(sock: usize, buf: *const u8, buf_len: usize, addr: *const u8) -> isize {
+    ecall(
+        SyscallNumber::SendTo,
+        sock,
+        buf as usize,
+        buf_len,
+        addr as usize,
+    )
+}
+
+/// `recvfrom`を呼ぶ。`buf`へ最大`buf_len` byte、`addr`へ`SOCKADDR_LEN`
+/// byteの送信元`SockAddr`を書き戻す。未受信ならdatagram到着までblockする。
+/// 戻り値は受信byte数か負のerrno。
+pub fn sys_recvfrom(sock: usize, buf: *mut u8, buf_len: usize, addr: *mut u8) -> isize {
+    ecall(
+        SyscallNumber::RecvFrom,
+        sock,
+        buf as usize,
+        buf_len,
+        addr as usize,
+    )
+}

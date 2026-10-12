@@ -145,11 +145,12 @@ networkを扱うには、外部割り込みでdeviceの完了を受け取る基�
 - **virtio-net driver**（完了）：`kernel/src/net/virtio_net.rs`がrx/txの二つのvirtqueueでethernet frameを送受し、`-netdev user`のgateway 10.0.2.2へARP requestを送ってreplyを受け取ります（`cargo xtask test net-arp`で検証）。
   virtio-mmioのregister/queue共通部は`kernel/src/virtio.rs`へ集約してblockとnetの両driverが共有し、net deviceのused-buffer割り込みもblkと同じPLIC claim経路で受けます。
   virtio_net_hdrは`VIRTIO_NET_F_MRG_RXBUF`をnegotiateした12 byte layoutで統一し、rx bufferは常時deviceへpostしたまま`drain_rx`が回収・再postします。
-- **最小のnetwork stack**：ARP、IPv4、ICMP echo、UDPまでを実装し、TCPは対象外とします。
-  guestへは`socket`、`sendto`、`recvfrom`の三つのsyscallで公開します。
+- **最小のnetwork stack**（完了）：`net/stack.rs`が`Link` traitでdeviceを抽象化し、ARP cache・自分宛ARP requestへのreply・ICMP echoへのreply・4 socketのUDP tableと受信queueを持ちます（`net-ping`で検証）。
+  guestへは`socket`、`sendto`、`recvfrom`の三つのsyscallで公開し、未受信の`recvfrom`は`BlockedOnIo`で巻き戻し待機してvirtio-netの受信割り込みで起きます（`net-udp`で検証）。
+  TCPは対象外です。
 
 受け入れ条件は`cargo xtask test irq-uart`、`irq-blk`、`net-ping`、`net-udp`の四経路です。
-`net-ping`はQEMUのuser network経由でhostからのICMP echoに応答することを観測します。
+`net-ping`はQEMUのuser network経由でgateway 10.0.2.2へICMP echoを送りreplyを受け取ることを、`net-udp`はguestのUDP datagramがhostのecho socketと往復することを観測します。
 
 ### 段階4：multi-hart
 

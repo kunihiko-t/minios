@@ -9,6 +9,7 @@
 pub mod fs;
 pub mod heap;
 pub mod io;
+pub mod net;
 pub mod process;
 pub mod sys;
 

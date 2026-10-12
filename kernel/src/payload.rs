@@ -331,12 +331,13 @@ pub(crate) fn run_boot_payload(
         }
     }
 
-    // guestが開いたstorage sessionを閉じ、queue frameをpoolへ返す。
-    // 全processが終了済みでhandlerからの借用は残っていない。
+    // guestが開いたstorage sessionとnetwork stackを閉じ、queue/rx frameを
+    // poolへ返す。全processが終了済みでhandlerからの借用は残っていない。
     unsafe {
         set_process_table(core::ptr::null_mut());
         set_kernel_map_plan(core::ptr::null());
         close_file_storage();
+        close_net_stack();
     }
 
     #[cfg(feature = "qemu-test-irq-uart")]
