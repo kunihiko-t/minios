@@ -1,5 +1,6 @@
 use super::*;
 
+#[test]
 fn short_name_normalizes_and_rejects_unconvertible_names() {
     assert_eq!(to_short_name("guest.txt"), Some(*b"GUEST   TXT"));
     assert_eq!(to_short_name("A"), Some(*b"A          "));
