@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|proc-fault|proc-kill|shell]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|proc-fault|proc-kill|shell]
 cargo xtask check
 ```
 
@@ -93,11 +93,12 @@ parserを変更したときに手動で実行するもので、詳しい手順�
 41. QEMU sched-io-partialテスト
 42. QEMU irq-uartテスト
 43. QEMU irq-blkテスト
-44. QEMU proc-faultテスト
-45. QEMU proc-killテスト
-46. QEMUシェルテスト
+44. QEMU net-arpテスト
+45. QEMU proc-faultテスト
+46. QEMU proc-killテスト
+47. QEMUシェルテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、UART受信割り込み、VirtIO block完了割り込み、killによるprocess終了、対話シェルという依存関係の順に、ゲストの全経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、UART受信割り込み、VirtIO block完了割り込み、VirtIO netのARP往復、killによるprocess終了、対話シェルという依存関係の順に、ゲストの全経路を確認します。
 
 RV32 release buildのphaseでは、ELFの実ロード範囲からIMEMの使用量・容量・残量も表示します。
 容量と起点はリンカーの`ORIGIN(IMEM)`・`LENGTH(IMEM)`由来のELFシンボルを使い、`.data`のIMEMロード分と配置の隙間を使用量に含めます。BSSのDMEM領域は含めません。
@@ -106,7 +107,7 @@ ELFを読めない場合やロード領域が容量を超える場合はphaseを
 
 ### QEMUの三つの検証モード
 
-起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、kernel-stack、FDT、ヒープ、VirtIOのテストは**マーカーモード**です。
+起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、kernel-stack、FDT、ヒープ、VirtIO、net-arpのテストは**マーカーモード**です。
 テストごとのCargo機能を有効にしてカーネルをビルドし、UARTの記録、終了ステータス0、次の完全一致するマーカーを要求します。
 
 ```text
@@ -122,11 +123,14 @@ ELFを読めない場合やロード領域が容量を超える場合はphaseを
 [MINIOS_TEST] kernel-stack: overflow detected
 [MINIOS_TEST] fdt: ram=0x80000000..0x88000000 uart=0x10000000 timebase=10000000
 [MINIOS_TEST] heap: ok
+[MINIOS_TEST] net-arp: ok
 ```
 
 マーカーがなければ、終了ステータスが0でも成功とは見なしません。
 この条件により、「QEMUは終了したが、検査対象のカーネル処理へ到達しなかった」という誤検出を防ぎます。
 CRLFをLFへ変換した後の一行と完全一致することを調べるため、診断行にマーカーを含むだけの場合や、似た文字列は通りません。
+`net-arp`では`-netdev user`を持つvirtio-net deviceをprobeし、guest側IPから仮想networkのgateway 10.0.2.2へARP requestを送ってreplyを受け取ります。
+replyがdeadlineまでに届くことに加え、deviceのused-buffer割り込みが実際にPLIC経由でclaimされたことをguest内で検証するため、ringが動くだけの割り込み不通経路は弾けます。
 `kernel-stack`はuser-exitの実行窓を使い、最初のsyscallの中でkernel trap stackを再帰で使い切ります。
 guard pageで止まった診断の後にマーカーが出ることを要求し、syscallから戻ったことを示す`[MINIOS_TEST] user-exit: ok code=42`は禁止します。
 
@@ -291,9 +295,10 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 54. QEMU sched-io-partial test
 55. QEMU irq-uart test
 56. QEMU irq-blk test
-57. QEMU proc-fault test
-58. QEMU proc-kill test
-59. QEMU shell test
+57. QEMU net-arp test
+58. QEMU proc-fault test
+59. QEMU proc-kill test
+60. QEMU shell test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -332,12 +337,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/59] cargo fmt --all -- --check
-phase 1/59 passed (elapsed: ...s)
+[1/60] cargo fmt --all -- --check
+phase 1/60 passed (elapsed: ...s)
 ...
-[59/59] QEMU shell test
-phase 59/59 passed (elapsed: ...s)
-summary: PASSED all 59 phases (elapsed: ...s)
+[60/60] QEMU shell test
+phase 60/60 passed (elapsed: ...s)
+summary: PASSED all 60 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

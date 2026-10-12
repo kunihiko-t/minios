@@ -31,7 +31,8 @@ baseが0、page非整列、既存mappingとの重複のいずれかなら`Invali
 deviceが接続されていないslotもmapしますが、後のprobeで弾かれるだけなので問題になりません。
 
 [`MmioRegs`](../../kernel/src/drivers/virtio_mmio.rs)は、このbaseからのoffsetをvolatileな32-bit load/storeへ変換する薄い型です。
-driver本体は[`Mmio`](../../kernel/src/storage/virtio_blk.rs) traitだけに依存するため、host testは`FakeDevice`という偽のregister fileで同じ初期化手順を検査できます。
+driver本体は[`Mmio`](../../kernel/src/virtio.rs) traitだけに依存するため、host testは`FakeDevice`という偽のregister fileで同じ初期化手順を検査できます。
+register offset・ring構造・初期化の共通部は[`virtio.rs`](../../kernel/src/virtio.rs)へ集約してあり、`virtio_blk`と`virtio_net`の両driverが共有します。
 
 ### DMA領域の所有
 

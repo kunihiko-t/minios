@@ -31,6 +31,10 @@ pub mod fdt;
 // RV32用アロケーターは幅汎化と合わせて別途対応する。ホストテストでは検証を続ける。
 #[cfg(not(target_arch = "riscv32"))]
 pub mod memory;
+// ARP/virtio-netはalloc非依存の純粋なcodec/driverであり、全targetで
+// compileする。NEORV32実機にvirtio-mmioはないが、lib側のhost検証を
+// 共用するためRV32 buildからも外さない。
+pub mod net;
 // pipe bufferはfd tableとprocess tableへ統合されるためprocessと同じく
 // RV32から外す。
 #[cfg(not(target_arch = "riscv32"))]
@@ -49,6 +53,9 @@ pub mod storage;
 pub mod time;
 #[cfg(not(target_arch = "riscv32"))]
 pub mod user;
+// virtio-mmioのregister/queue共通部はstorage::virtio_blkとnet::virtio_netが
+// 共有する純粋な定数・traitである。
+pub mod virtio;
 #[cfg(not(target_arch = "riscv32"))]
 pub mod vm;
 

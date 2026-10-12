@@ -2,7 +2,7 @@
 //! 報告したMMIO領域であり、`KernelMapPlan::with_device_pages`でS-mode
 //! R+Wとしてmap済みであることが前提。
 
-use minios_kernel::storage::virtio_blk::Mmio;
+use minios_kernel::virtio::Mmio;
 
 pub struct MmioRegs {
     base: usize,
