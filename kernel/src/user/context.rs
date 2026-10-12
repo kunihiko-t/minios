@@ -8,7 +8,9 @@ pub const SSTATUS_SIE: usize = 1 << 1;
 pub const SSTATUS_SPP: usize = 1 << 8;
 /// `sstatus.SPIE`: `sret`がSIEへコピーする、トラップ前の割り込み許可値。
 pub const SSTATUS_SPIE: usize = 1 << 5;
-/// `sstatus.SUM`: S-modeからのU page accessを許可する。`read`完了copyの間だけ立てる。
+/// `sstatus.SUM`: S-modeからのU page accessを許可するbit。
+/// kernelはU pageへ`copy_to_user`経由のphysical frame書き込みで届くため、
+/// 現在このbitを立てる経路はない。trap contextのlayoutを読むために残す。
 pub const SSTATUS_SUM: usize = 1 << 18;
 
 /// `user.S`が`sd`/`ld`の固定offsetで直接指す、正確なC ABI layoutである。

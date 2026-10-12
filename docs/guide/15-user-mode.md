@@ -41,6 +41,9 @@ system call番号は`a7`です。
 その後はpageごとにSv39変換を行い、`U=1`かつreadableなPTEだけから最大4 KiBのkernel bufferへcopyします。
 このため、user pointerをRustの参照やraw pointerとして扱わず、未写像page、S-mode専用page、read不可pageを`EFAULT`として返せます。
 
+書き込み方向は`check_user_writable_range`が副作用の前に`EFAULT`を確定し、実際のcopyは`copy_to_user`が同じpage walkで`U`と`W`を再検査しながら物理frameへ行います。
+`read`系syscallが返す`ReadComplete`は、このcopyを実行窓のhandlerが`complete_read`経由で適用します。
+
 [`UserRun::finish_exit`](../../kernel/src/user/run.rs)はExit control frameを送ってから`reclaim`を呼びます。
 [`UserRun::reclaim`](../../kernel/src/user/run.rs)はguard pageを含むkernel trap stackを返し、続いて`LoadedImage::destroy`でuser pageとpage tableを返します。
 回収に失敗した値はrun内へ戻るため、呼び出し側は所有権を失わず再試行できます。

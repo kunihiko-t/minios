@@ -52,7 +52,7 @@ PMPのmode（TORとNAPOT）は版により対応が異なるため、利用版�
 | 部位 | 共有可否 | 理由 |
 | --- | --- | --- |
 | 初期stack | layout手順のみ | 8 byte語長、Sv39 `AddressSpace`、U/W検査に依存し、RV32用に4 byte語長とflat書き込みの別実装が必要 |
-| syscall dispatch | 番号と検査のみ | 番号、fd、長さ検査は中立で再利用可。`copy_from_user`はSv39 page walk依存のためflat range検査のbackendが必要 |
+| syscall dispatch | 番号と検査のみ | 番号、fd、長さ検査は中立で再利用可。`copy_from_user`/`copy_to_user`はSv39 page walk依存のためflat range検査のbackendが必要 |
 | trap | 共有なし | `user.S`、`trap.S`、`trap.rs`、`csr.rs`はS-mode、`sepc`、`sret`、8 byte context専用。M-mode用に新規が必要 |
 | ELF loader | 共有なし | `ELFCLASS64`専用かつSv39配置専用。RV32はELF32とMMUなし直接配置のため別実装か、raw配置でloader省略の選択 |
 | ABI定数とframe形式 | そのまま共有 | `minios-abi`は`no_std`無依存でRV32ビルド済み |

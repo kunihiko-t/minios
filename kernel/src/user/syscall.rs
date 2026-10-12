@@ -4,7 +4,7 @@
 use crate::{
     user::{
         context::UserContext,
-        memory::{check_user_writable_range, copy_from_user},
+        memory::{check_user_writable_range, copy_from_user, copy_to_user},
     },
     vm::{AddressSpace, FrameStore},
 };
@@ -1096,20 +1096,26 @@ fn dispatch_dup2<E, R: ControlSource>(
     SyscallFlow::Resume
 }
 
-/// `ReadComplete`の受信済みbyteを検証済みuser rangeへ移し、`a0`へ長さを書く。
-///
-/// # Safety
+/// `ReadComplete`の受信済みbyteを`copy_to_user`でuser rangeへ移し、
+/// `a0`へ長さを書く。
 ///
 /// 呼び出し側は`dispatch_read`へ渡したscratchの先頭`len` byteと、返却された
-/// `start`と`len`をそのまま渡さなければならない。user satpが有効でguestが
-/// 停止中のtrap handlerからのみ呼び、copyの間`sstatus.SUM`を立てておくこと。
-/// 検証時からpage tableは不変であり、このcopyは正確に届く。
-pub unsafe fn complete_read(context: &mut UserContext, start: u64, len: usize, data: &[u8]) {
-    // Safety: 呼び出し側の契約により、検証済みuser rangeへのcopyである。
-    unsafe {
-        core::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, len);
+/// `start`と`len`をそのまま渡さなければならない。copyは`copy_to_user`が
+/// `check_user_writable_range`と同じpage walkでU/Wを再検査しながら行う。
+/// 対象processが停止しpage tableも不変なtrap窓内であれば失敗は起き得ないが、
+/// 万一の場合は`a0`へ`EFAULT`を書いて留める。
+pub fn complete_read<M: FrameStore>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &mut M,
+    start: u64,
+    len: usize,
+    data: &[u8],
+) {
+    match copy_to_user(space, memory, start, &data[..len]) {
+        Ok(()) => context.set_register(10, len),
+        Err(_) => context.set_register(10, EFAULT as usize),
     }
-    context.set_register(10, len);
 }
 
 /// `read_file` (`a0=path_ptr, a1=path_len, a2=buf_ptr, a3=buf_len`)。
@@ -3720,8 +3726,9 @@ mod tests {
                 kind: STAT_KIND_FILE,
             }
         );
-        // 成功時の戻り値は`complete_read`が`a0`へ書く`len` (=STAT_LEN)で、
-        // `read`系のbyte-count規約に従う。dispatch自体はa0へ触れない。
+        // 成功時の戻り値は`ReadComplete`のcopy-out経路が`a0`へ書く
+        // `len` (=STAT_LEN)で、`read`系のbyte-count規約に従う。
+        // dispatch自体はa0へ触れない。
         let _ = context;
     }
 
@@ -4246,7 +4253,7 @@ mod tests {
         assert_eq!(source.preads, 1);
         assert_eq!(source.seen_offset, Some(4));
         assert_eq!(&read_scratch[..8], b"01234567");
-        // a0はcomplete_readが長さを書くまでfdのままである。
+        // a0はcopy-out経路が長さを書くまでfdのままである。
         assert_eq!(context.register(10), FIRST_FILE_FD);
     }
 
