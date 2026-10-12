@@ -123,7 +123,8 @@ user heap、時刻と待機、fdの複製、spawnへの引数渡し、user libra
 - **`kill`**（完了）：`kill(pid)`（番号28）を追加し、対象を`Killed`へmarkしてrun loopが`waitpid`へ終了code `EXIT_CODE_KILLED`（75）を渡します（`cargo xtask test proc-kill`で検証）。
 - **heap成長pageの返却**（完了）：`dealloc`の直後に`Heap::release_grown_pages`が下端の連続した空きpageを`init_start`まで切り離し、`GlobalAlloc`実装が`FrameAllocator`へ返します。
   初期領域はpoolの管理範囲外のため返さず、`cargo xtask test heap`で返却後の基準復元を検証しています。
-- **FAT32 write pathの整合性**：FSInfoのfree cluster数とcluster chainの検査をhost testで固定し、途中で電源が落ちた相当のimageを読み込んだときの振る舞いを決めます。
+- **FAT32 write pathの整合性**（完了）：FSInfoは読まず実値も維持せず、最初のFAT更新で`free`・`next`を規定の「不明」値へ揃える形に決めました。
+  signatureの無いsectorへは正しいFSInfoをまるごと書き、二面目が失われたimageは一面目で読み進めて次の更新で再同期します。cluster chainとcluster再利用の規約はhost testで固定しています。
 - **host側のfuzz test**：FAT32 parser、ELF header、MiniBundle manifestの三つのparserに`cargo fuzz`の経路を置きます。
   release gateには含めず、手動実行の手順を`CONTRIBUTING.md`へ書きます。
 
