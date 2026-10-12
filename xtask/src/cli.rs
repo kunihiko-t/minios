@@ -8,6 +8,7 @@ pub enum Command {
     Bundle(BundleOptions),
     Test(TestFilter),
     Check,
+    Fuzz(FuzzOptions),
 }
 
 /// `cargo xtask bundle`の入力。`None`の項目はbundle側の既定値を使う。
@@ -18,6 +19,26 @@ pub struct BundleOptions {
     /// 複数image (manifest v2) bundleのguest bin名。空なら単一image v1を生成する。
     pub images: Vec<String>,
     pub output: Option<PathBuf>,
+}
+
+/// `cargo xtask fuzz`の入力。`None`の項目はfuzz側の既定値を使う。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FuzzOptions {
+    /// 対象parser名。`fat32`、`elf`、`boot-payload`のいずれか。
+    pub target: Option<String>,
+    pub seed: Option<u64>,
+    pub iters: Option<u64>,
+    pub max_bytes: Option<usize>,
+    /// 入力あたりtimeout(秒)。
+    pub input_timeout: Option<u64>,
+    /// 全体の制限時間(秒)。`None`は無制限。
+    pub time_limit: Option<u64>,
+    /// 入力あたりallocation上限(bytes)。
+    pub alloc_cap: Option<usize>,
+    pub corpus_dir: Option<PathBuf>,
+    pub output_dir: Option<PathBuf>,
+    /// 指定時はこの一つのfileを変異なしで再生する。
+    pub input: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +93,7 @@ pub enum CliError {
     MissingCommand,
     UnknownCommand(String),
     InvalidBundleOptions(String),
+    InvalidFuzzOptions(String),
 }
 
 pub fn help() -> &'static str {
@@ -82,7 +104,9 @@ pub fn help() -> &'static str {
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
   cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
   cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|proc-fault|proc-kill|shell]\n\
-  cargo xtask check"
+  cargo xtask check\n\
+  cargo xtask fuzz --target <fat32|elf|boot-payload> [--seed <n>] [--iters <n>] [--max-bytes <n>] [--input-timeout <secs>] [--time-limit <secs>] [--alloc-cap <n>] [--corpus <dir>] [--output <dir>]\n\
+  cargo xtask fuzz --target <fat32|elf|boot-payload> --input <file>"
 }
 
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
@@ -216,6 +240,9 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         [command, options @ ..] if command == "bundle" => {
             parse_bundle_options(options).map(Command::Bundle)
         }
+        [command, options @ ..] if command == "fuzz" => {
+            parse_fuzz_options(options).map(Command::Fuzz)
+        }
         [] => Err(CliError::MissingCommand),
         [command, ..] => Err(CliError::UnknownCommand(command.clone())),
     }
@@ -278,6 +305,62 @@ fn parse_bundle_options(options: &[String]) -> Result<BundleOptions, CliError> {
     Ok(parsed)
 }
 
+/// `fuzz`以降のoption列をparseする。数値とpathの意味検査 (上限や存在確認)
+/// はfuzz実行側の責務である。`--target`の必須化もここで行う。
+fn parse_fuzz_options(options: &[String]) -> Result<FuzzOptions, CliError> {
+    let mut parsed = FuzzOptions::default();
+    let mut index = 0;
+    while index < options.len() {
+        let flag = options[index].as_str();
+        let Some(value) = options.get(index + 1) else {
+            return Err(CliError::InvalidFuzzOptions(format!(
+                "fuzz option {flag} requires a value"
+            )));
+        };
+        match flag {
+            "--target" => set_once(&mut parsed.target, value.clone(), flag)?,
+            "--seed" => set_once(&mut parsed.seed, parse_num(value, flag)?, flag)?,
+            "--iters" => set_once(&mut parsed.iters, parse_num(value, flag)?, flag)?,
+            "--max-bytes" => set_once(&mut parsed.max_bytes, parse_num(value, flag)?, flag)?,
+            "--input-timeout" => {
+                set_once(&mut parsed.input_timeout, parse_num(value, flag)?, flag)?
+            }
+            "--time-limit" => set_once(&mut parsed.time_limit, parse_num(value, flag)?, flag)?,
+            "--alloc-cap" => set_once(&mut parsed.alloc_cap, parse_num(value, flag)?, flag)?,
+            "--corpus" => set_once(&mut parsed.corpus_dir, PathBuf::from(value), flag)?,
+            "--output" => set_once(&mut parsed.output_dir, PathBuf::from(value), flag)?,
+            "--input" => set_once(&mut parsed.input, PathBuf::from(value), flag)?,
+            other => {
+                return Err(CliError::InvalidFuzzOptions(format!(
+                    "unknown fuzz option: {other}"
+                )));
+            }
+        }
+        index += 2;
+    }
+    if parsed.target.is_none() {
+        return Err(CliError::InvalidFuzzOptions(
+            "fuzz requires --target <fat32|elf|boot-payload>".to_owned(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), CliError> {
+    if slot.replace(value).is_some() {
+        return Err(CliError::InvalidFuzzOptions(format!(
+            "duplicate fuzz option: {flag}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_num<T: std::str::FromStr>(value: &str, flag: &str) -> Result<T, CliError> {
+    value.parse::<T>().map_err(|_| {
+        CliError::InvalidFuzzOptions(format!("fuzz option {flag} expects a number: {value}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +380,90 @@ mod tests {
             Ok(Command::Test(TestFilter::Timer))
         );
         assert_eq!(parse(&owned(&["check"])), Ok(Command::Check));
+        assert_eq!(
+            parse(&owned(&["fuzz", "--target", "elf"])),
+            Ok(Command::Fuzz(FuzzOptions {
+                target: Some("elf".to_owned()),
+                ..FuzzOptions::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_fuzz_options_and_rejects_bad_ones() {
+        assert_eq!(
+            parse(&owned(&[
+                "fuzz",
+                "--target",
+                "fat32",
+                "--seed",
+                "9",
+                "--iters",
+                "250",
+                "--max-bytes",
+                "4096",
+                "--input-timeout",
+                "2",
+                "--time-limit",
+                "60",
+                "--alloc-cap",
+                "1048576",
+                "--corpus",
+                "corpus",
+                "--output",
+                "out",
+            ])),
+            Ok(Command::Fuzz(FuzzOptions {
+                target: Some("fat32".to_owned()),
+                seed: Some(9),
+                iters: Some(250),
+                max_bytes: Some(4096),
+                input_timeout: Some(2),
+                time_limit: Some(60),
+                alloc_cap: Some(1048576),
+                corpus_dir: Some(PathBuf::from("corpus")),
+                output_dir: Some(PathBuf::from("out")),
+                input: None,
+            }))
+        );
+        assert_eq!(
+            parse(&owned(&[
+                "fuzz",
+                "--target",
+                "boot-payload",
+                "--input",
+                "finding.bin",
+            ])),
+            Ok(Command::Fuzz(FuzzOptions {
+                target: Some("boot-payload".to_owned()),
+                input: Some(PathBuf::from("finding.bin")),
+                ..FuzzOptions::default()
+            }))
+        );
+        assert!(matches!(
+            parse(&owned(&["fuzz"])),
+            Err(CliError::InvalidFuzzOptions(_))
+        ));
+        assert!(matches!(
+            parse(&owned(&["fuzz", "--iters", "1"])),
+            Err(CliError::InvalidFuzzOptions(_))
+        ));
+        assert!(matches!(
+            parse(&owned(&["fuzz", "--target", "elf", "--seed"])),
+            Err(CliError::InvalidFuzzOptions(_))
+        ));
+        assert!(matches!(
+            parse(&owned(&["fuzz", "--target", "elf", "--seed", "abc"])),
+            Err(CliError::InvalidFuzzOptions(_))
+        ));
+        assert!(matches!(
+            parse(&owned(&["fuzz", "--target", "elf", "--target", "fat32"])),
+            Err(CliError::InvalidFuzzOptions(_))
+        ));
+        assert!(matches!(
+            parse(&owned(&["fuzz", "--target", "elf", "--bogus", "1"])),
+            Err(CliError::InvalidFuzzOptions(_))
+        ));
     }
 
     #[test]

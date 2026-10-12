@@ -21,5 +21,8 @@ fn error_message(error: &cli::CliError) -> String {
         cli::CliError::InvalidBundleOptions(detail) => {
             format!("invalid bundle options: {detail}\n\n{}", cli::help())
         }
+        cli::CliError::InvalidFuzzOptions(detail) => {
+            format!("invalid fuzz options: {detail}\n\n{}", cli::help())
+        }
     }
 }

@@ -16,6 +16,29 @@ cargo xtask setup
 cargo xtask check
 ```
 
+## parserのfuzz検査
+
+FAT32 volume parser、ELF headerとload plan、boot payloadのmanifest経路に対して、`cargo xtask fuzz`で決定性の変異入力を流せます。
+QEMUもゲスト用toolchainも要りません。
+
+```sh
+cargo xtask fuzz --target fat32
+cargo xtask fuzz --target elf --seed 9 --iters 100000
+```
+
+対象は`fat32`、`elf`、`boot-payload`の三つで、入力は`xtask/corpus/<target>/`のseedを乱数seedで変異させて作ります。
+同じseedは同じ入力列を生成します。
+panic、入力あたりtimeout（`--input-timeout`、既定5秒）、allocation上限（`--alloc-cap`、既定16 MiB）の超過だけをfindingとして報告し、parserが返す通常のerrorはfindingに含めません。
+
+findingの入力は`target/fuzz/`に保存され、次のcommandで再現できます。
+
+```sh
+cargo xtask fuzz --target elf --input target/fuzz/<file>.bin
+```
+
+`cargo xtask check`には含めません。
+parserへ変更を加えたときや、不審な入力を見つけたときに実行してください。
+
 ## コードと文書
 
 コメントは、日本語の学習ガイドと同じく、読者がOSの仕組みを理解する助けになる内容を日本語で記述します。

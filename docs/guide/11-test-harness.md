@@ -42,6 +42,11 @@ QEMUテストは`xtask`内のRust関数を直接呼びます。
 対象は、シェルのパーサー、固定長の行バッファー、ティックから時間への変換、物理フレームアロケーター、Sv39のpage walk、ELFの検証と配置、`xtask`自身の引数解析とプロセス処理です。
 通常のRustテスト名から失敗箇所を絞れるため、ロジックの不具合を調べるだけならQEMUを起動する必要はありません。
 
+ホストtestのほかに、FAT32 volume・ELF・boot payloadの三つのparserには`cargo xtask fuzz`の決定性fuzz経路があります。
+corpusのseedを変異させた入力を逐次parserへ流し、panic、入力あたりのtimeout、allocation上限の超過だけをfindingとして報告します。
+parserが返す通常のerrorはfindingに含めず、`check`にも含めません。
+parserを変更したときに手動で実行するもので、詳しい手順は`CONTRIBUTING.md`に書いています。
+
 ゲストテストは、クロスビルドだけでは分からないOpenSBI、CSR、トラップの入口、SBIタイマー、UART、SBIリセットの接続をRISC-V仮想機上で検査します。
 `cargo xtask test`を引数なしで実行すると`all`となり、次の順序で進みます。
 
