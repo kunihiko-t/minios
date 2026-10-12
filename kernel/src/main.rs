@@ -357,6 +357,12 @@ impl minios_kernel::memory::frame::FrameSource for GlobalFrames {
             .flatten()
     }
 
+    fn allocate_contiguous(&mut self, frames: &mut [Option<PhysFrame>]) -> bool {
+        GLOBAL_FRAMES
+            .with(|allocator| allocator.allocate_contiguous(frames))
+            .unwrap_or(false)
+    }
+
     fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
         GLOBAL_FRAMES
             .with(|frames| frames.deallocate(frame))
@@ -483,11 +489,25 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        if let Some(ptr) = core::ptr::NonNull::new(ptr) {
-            // spanの検証失敗（領域外・二重解放）は安全側の見逃しとして
-            // 解放せずに残す。破壊よりリークを選ぶ。
-            let _ = self.with(|heap| unsafe { heap.dealloc(ptr) });
-        }
+        let Some(ptr) = core::ptr::NonNull::new(ptr) else {
+            return;
+        };
+        // spanの検証失敗（領域外・二重解放）は安全側の見逃しとして
+        // 解放せずに残す。破壊よりリークを選ぶ。
+        let _ = self.with(|heap| unsafe { heap.dealloc(ptr) });
+        // 成長分の下端がpage単位で空いたらframe poolへ返す。
+        // 初期領域はpoolの管理範囲外なので`init_start`を境に返さない。
+        // lock順序はallocと同じheap→framesである。
+        let mut frames = GlobalFrames;
+        self.with(|heap| {
+            heap.release_grown_pages(|start| {
+                // Safety: heapが切り離したpageは成長時にpoolから借りた
+                // frameであり、管理外になった今、所有者はここだけである。
+                if let Ok(frame) = unsafe { PhysFrame::from_start(start) } {
+                    let _ = frames.deallocate(frame);
+                }
+            })
+        });
     }
 }
 
@@ -553,6 +573,9 @@ const USER_RUN_OUTCOME_NONE: usize = 0;
 const USER_RUN_OUTCOME_EXIT: usize = 1;
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_FATAL_TRAP: usize = 2;
+/// manifest v2のuser例外終了code。Rust guestのpanicと同じ失敗codeを使う。
+#[cfg(target_arch = "riscv64")]
+const USER_FAULT_EXIT_CODE: u32 = 70;
 #[cfg(target_arch = "riscv64")]
 const USER_RUN_OUTCOME_SINK_FAILURE: usize = 3;
 #[cfg(target_arch = "riscv64")]
@@ -968,6 +991,20 @@ fn run_heap_test() {
     if KERNEL_HEAP.stats().allocated != baseline.allocated {
         fatal_qemu_test(format_args!("heap: grown allocation was not released"));
     }
+    // 成長分がまとめて空くと、下端の空きpageはframe poolへ返され、
+    // 領域とpoolの占有は成長前の基準へ戻る。
+    let released = KERNEL_HEAP.stats();
+    let frames_released = GlobalFrames.stats();
+    if released.total != KERNEL_HEAP_LEN || frames_released.allocated != frames_before.allocated {
+        fatal_qemu_test(format_args!(
+            "heap: grown pages were not returned: stats={released:?} frames={frames_released:?}"
+        ));
+    }
+    crate::println!(
+        "[MINIOS_TEST] heap: returned total={} pool_allocated={}",
+        released.total,
+        frames_released.allocated
+    );
 
     crate::println!(
         "[MINIOS_TEST] heap: total={} largest_free={} blocks={}",
@@ -1517,6 +1554,65 @@ extern "C" fn rust_user_trap_handler(context: *mut UserContext) -> RunExit {
     unsafe { rust_user_trap_handler_impl(context) }
 }
 
+/// user trap入口が受けたS-mode由来のtrap。syscall処理中のkernel stack溢れは、
+/// guard pageへのstore/load page faultとしてここへ届く。`fault_sp`はtrap時の
+/// sp、`stack_top`は直近の`__run_user`へ渡したkernel stack topである。
+/// 元のstackは信用できないため、`user.S`の専用stack上で診断を出して停止する。
+#[cfg(target_arch = "riscv64")]
+// `user.S`がシンボル名とC ABIを直接指定して呼ぶため、この名前とABIを変えてはならない。
+#[unsafe(no_mangle)]
+extern "C" fn rust_kernel_trap_in_user_window(fault_sp: usize, stack_top: usize) -> ! {
+    const LOAD_PAGE_FAULT: usize = 13;
+    const STORE_PAGE_FAULT: usize = 15;
+    let scause = arch::riscv64::csr::read_scause();
+    let sepc = arch::riscv64::csr::read_sepc();
+    let stval = arch::riscv64::csr::read_stval();
+    if matches!(scause, LOAD_PAGE_FAULT | STORE_PAGE_FAULT)
+        && minios_kernel::user::run::kernel_stack_guard_contains(stack_top, stval)
+    {
+        crate::console::emergency_print(format_args!(
+            "\r\nMiniOS kernel stack overflow: sepc={sepc:#018x} stval={stval:#018x} sp={fault_sp:#018x} stack_top={stack_top:#018x}\r\n"
+        ));
+        finish_kernel_stack_overflow()
+    }
+    crate::console::emergency_print(format_args!(
+        "\r\nMiniOS kernel trap: scause={scause:#018x} sepc={sepc:#018x} stval={stval:#018x} sp={fault_sp:#018x}\r\n"
+    ));
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
+
+#[cfg(all(target_arch = "riscv64", not(feature = "qemu-test-kernel-stack")))]
+fn finish_kernel_stack_overflow() -> ! {
+    arch::riscv64::sbi::system_reset(
+        arch::riscv64::sbi::ResetType::Shutdown,
+        arch::riscv64::sbi::ResetReason::SystemFailure,
+    )
+}
+
+/// kernel-stack probeでは、guard pageで止まったことが成功条件である。
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-kernel-stack"))]
+fn finish_kernel_stack_overflow() -> ! {
+    crate::console::emergency_print(format_args!(
+        "[MINIOS_TEST] kernel-stack: overflow detected\r\n"
+    ));
+    successful_qemu_test_shutdown()
+}
+
+/// syscall処理中のtrap stackを、guard pageへ届くまで再帰で使い切る。
+/// 一段ごとに`black_box`へ渡す配列がframeをstack上に残す。
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-kernel-stack"))]
+#[allow(unconditional_recursion)]
+#[inline(never)]
+fn exhaust_kernel_stack(depth: usize) -> usize {
+    let mut frame = [0u8; 256];
+    frame[depth % frame.len()] = depth as u8;
+    core::hint::black_box(&mut frame);
+    exhaust_kernel_stack(depth + 1) + usize::from(frame[0])
+}
+
 #[cfg(target_arch = "riscv64")]
 unsafe fn rust_user_trap_handler_impl(context: *mut UserContext) -> RunExit {
     let scause = arch::riscv64::csr::read_scause();
@@ -1949,6 +2045,28 @@ unsafe fn wait_pid(target: usize) -> Result<Option<u32>, isize> {
     table.block_waitpid(caller, target).map(|()| None)
 }
 
+/// `kill`のtable側処理。`target`を`Killed`へmarkして`Ok(())`を返し、
+/// 実際の回収と`waitpid`への終了code通知はrun loopが行う。`ECHILD`は
+/// 対象不在、`EINVAL`は自分自身、process contextがなければ`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。`CURRENT_PROC`やdispatch中の
+/// 他processへのpointerが`Vec::remove`でずれないよう、ここではmark
+/// だけを行い`take`しない。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+unsafe fn kill_pid(target: usize) -> Result<(), isize> {
+    let Some(caller) = (unsafe { current_pid() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    let Some(table) = (unsafe { table.as_mut() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    table.mark_killed(caller, target)
+}
+
 /// 現在processのimageを`elf`で置き替える (`exec`)。kernel stackとfd
 /// tableは引き継ぎ、成功時は旧imageをprocessの`retired_image`へ退避して
 /// 新imageの初期contextを返す。旧imageの解放はkernel satpへ戻った後の
@@ -2129,10 +2247,8 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
     ))
 ))]
 fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
-    // fatal trapの診断はcontrol modeではGuestError frameとしてhostへ届く。
-    crate::console::emergency_print(format_args!(
-        "MiniOS user trap: scause={scause:#018x} stval={stval:#018x}\r\n"
-    ));
+    // schedulerへ戻してからmanifestの終了契約に応じた診断を送る。
+    // 複数imageのuser例外をGuestErrorにすると、hostが他のタスクまで停止してしまう。
     USER_FATAL_SCAUSE.store(scause, Ordering::Relaxed);
     USER_FATAL_STVAL.store(stval, Ordering::Relaxed);
     USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
@@ -2152,10 +2268,10 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
 ))]
 fn user_trap_timer() -> RunExit {
     if let Err(error) = time::handle_interrupt() {
-        // 再アームできない環境ではscheduleを続けられないため、実行中processの
-        // fatalとして扱う。timer欠損はhaltではなく診断で表す。
+        // timerの再アーム失敗はタスクのuser例外ではなくkernel側の障害である。
+        // 複数imageでも正常なタスク分離として扱わず、payload全体を失敗させる。
         crate::console::emergency_print(format_args!("MiniOS user timer: {error:?}\r\n"));
-        USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_FATAL_TRAP, Ordering::Relaxed);
+        USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SOURCE_FAILURE, Ordering::Relaxed);
         return RunExit::ReturnToKernel;
     }
     USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_PREEMPTED, Ordering::Relaxed);
@@ -2279,6 +2395,9 @@ fn user_trap_system_call(context: &mut UserContext) -> RunExit {
 
 #[cfg(all(target_arch = "riscv64", feature = "qemu-test-user-exit"))]
 fn user_trap_system_call(context: &mut UserContext) -> RunExit {
+    // kernel-stack probeは本物のsyscall trapの中でtrap stackを使い切る。
+    #[cfg(feature = "qemu-test-kernel-stack")]
+    core::hint::black_box(exhaust_kernel_stack(0));
     // Safety: user-exit runnerが`__run_user`の直前に設定し、assemblyが
     // kernelへ戻るまで所有する単一hart静的参照である。
     let space = unsafe { &*(USER_SYSCALL_PROBE_SPACE as *const AddressSpace) };
@@ -2710,6 +2829,35 @@ fn reclaim_process_slot(table: &mut ProcessTable, pid: usize, frames: &mut dyn F
     }
 }
 
+/// statusを台帳へ記録して終了を通知し、waiterの起床後に所有resourceを回収する。
+/// statusなしは単一imageのfatalやkernel側障害であり、成功のExitを送らない。
+#[cfg(target_arch = "riscv64")]
+fn complete_process(
+    table: &mut ProcessTable,
+    pid: usize,
+    code: Option<u32>,
+    multi: bool,
+    sink: &mut control::UartControlSink,
+    frames: &mut dyn FrameSource,
+) {
+    if let Some(code) = code {
+        table.record_exit(pid, code);
+        use minios_kernel::user::syscall::ControlSink as _;
+        if multi {
+            let payload = minios_abi::control::ProcExitPayload {
+                pid: pid as u32,
+                code,
+            }
+            .encode();
+            let _ = sink.frame(minios_abi::control::FrameKind::ProcExit, &payload);
+        } else {
+            let _ = sink.frame(minios_abi::control::FrameKind::Exit, &code.to_le_bytes());
+        }
+    }
+    table.wake_on_exit(pid);
+    reclaim_process_slot(table, pid, frames);
+}
+
 /// tableに残る全processを回収する。spawn途中の失敗経路で使う。
 #[cfg(target_arch = "riscv64")]
 fn reclaim_process_table(table: &mut ProcessTable, frames: &mut dyn FrameSource) {
@@ -2842,6 +2990,21 @@ fn run_boot_payload(
         }
         // deadlineに達したsleep中processを選対象へ戻す。
         table.wake_sleepers(time::ticks());
+        // `kill`がmarkしたprocessをdispatchの外で回収する。trap窓の内側で
+        // `take`すると`Vec::remove`で他processへのpointerがずれるため、
+        // killは`Killed`のmarkだけを残して終了code`EXIT_CODE_KILLED`の
+        // 台帳記録・frame送信・waiter起床・resource回収をここへ委ねる。
+        let killed = table.killed_pids().collect::<alloc::vec::Vec<usize>>();
+        for killed_pid in killed {
+            complete_process(
+                &mut table,
+                killed_pid,
+                Some(minios_abi::syscall::EXIT_CODE_KILLED),
+                multi,
+                &mut sink,
+                frames,
+            );
+        }
         let Some(pid) = table.pick_next() else {
             // 占有slotが残るのに選べない＝全processがstdinかsleepなどで待っている。
             // ここはS-mode割り込みを遮断したままなので、timer割り込みは
@@ -2916,35 +3079,39 @@ fn run_boot_payload(
             (RunExit::ReturnToKernel, USER_RUN_OUTCOME_EXIT) => {
                 let code = USER_EXIT_CODE.load(Ordering::Relaxed) as u32;
                 last_code = code;
-                // `waitpid`のreapより先にstatusを台帳へ記録し、待っている
-                // processをrunnableへ戻す。reclaimはledger消費を妨げない。
-                table.record_exit(pid, code);
-                table.wake_on_exit(pid);
+                complete_process(&mut table, pid, Some(code), multi, &mut sink, frames);
+            }
+            (RunExit::ReturnToKernel, USER_RUN_OUTCOME_FATAL_TRAP) => {
+                let scause = USER_FATAL_SCAUSE.load(Ordering::Relaxed);
+                let stval = USER_FATAL_STVAL.load(Ordering::Relaxed);
                 if multi {
-                    let payload = minios_abi::control::ProcExitPayload {
-                        pid: pid as u32,
-                        code,
-                    }
-                    .encode();
-                    use minios_kernel::user::syscall::ControlSink as _;
-                    let _ = sink.frame(minios_abi::control::FrameKind::ProcExit, &payload);
+                    // 故障したタスクだけを終了し、待っているタスクへstatusを渡す。
+                    crate::println!(
+                        "MiniOS sched: fault pid={pid} code={USER_FAULT_EXIT_CODE} scause={scause:#018x} stval={stval:#018x}"
+                    );
+                    complete_process(
+                        &mut table,
+                        pid,
+                        Some(USER_FAULT_EXIT_CODE),
+                        multi,
+                        &mut sink,
+                        frames,
+                    );
                 } else {
-                    use minios_kernel::user::syscall::ControlSink as _;
-                    let _ = sink.frame(minios_abi::control::FrameKind::Exit, &code.to_le_bytes());
+                    // 既存の単一image契約ではGuestErrorと異常shutdownを維持する。
+                    failed += 1;
+                    crate::console::emergency_print(format_args!(
+                        "MiniOS user trap: scause={scause:#018x} stval={stval:#018x}\r\n"
+                    ));
+                    complete_process(&mut table, pid, None, multi, &mut sink, frames);
                 }
-                reclaim_process_slot(&mut table, pid, frames);
             }
             (
                 RunExit::ReturnToKernel,
-                USER_RUN_OUTCOME_FATAL_TRAP
-                | USER_RUN_OUTCOME_SINK_FAILURE
-                | USER_RUN_OUTCOME_SOURCE_FAILURE,
+                USER_RUN_OUTCOME_SINK_FAILURE | USER_RUN_OUTCOME_SOURCE_FAILURE,
             ) => {
                 failed += 1;
-                // statusを持たない異常終了は台帳へ記録せず、waiterだけを
-                // 解放する。再dispatchした`waitpid`は`ECHILD`を得る。
-                table.wake_on_exit(pid);
-                reclaim_process_slot(&mut table, pid, frames);
+                complete_process(&mut table, pid, None, multi, &mut sink, frames);
             }
             // `ReturnToKernel`以外の戻りや、handlerがoutcomeを記録しないまま
             // 戻った場合は実装不変条件の破綻であり、静かに続行しない。

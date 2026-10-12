@@ -33,6 +33,7 @@ pub enum TestFilter {
     UserTrap,
     UserSyscall,
     UserExit,
+    KernelStack,
     Fdt,
     Heap,
     Virtio,
@@ -61,6 +62,8 @@ pub enum TestFilter {
     Sched,
     SchedIo,
     SchedIoPartial,
+    ProcFault,
+    ProcKill,
     Shell,
 }
 
@@ -78,7 +81,7 @@ pub fn help() -> &'static str {
   cargo xtask run\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
   cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|shell]\n\
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|proc-fault|proc-kill|shell]\n\
   cargo xtask check"
 }
 
@@ -114,6 +117,9 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         [command, test] if command == "test" && test == "user-exit" => {
             Ok(Command::Test(TestFilter::UserExit))
+        }
+        [command, test] if command == "test" && test == "kernel-stack" => {
+            Ok(Command::Test(TestFilter::KernelStack))
         }
         [command, test] if command == "test" && test == "fdt" => Ok(Command::Test(TestFilter::Fdt)),
         [command, test] if command == "test" && test == "heap" => {
@@ -196,6 +202,12 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         [command, test] if command == "test" && test == "sched-io-partial" => {
             Ok(Command::Test(TestFilter::SchedIoPartial))
+        }
+        [command, test] if command == "test" && test == "proc-fault" => {
+            Ok(Command::Test(TestFilter::ProcFault))
+        }
+        [command, test] if command == "test" && test == "proc-kill" => {
+            Ok(Command::Test(TestFilter::ProcKill))
         }
         [command, test] if command == "test" && test == "shell" => {
             Ok(Command::Test(TestFilter::Shell))
@@ -301,6 +313,7 @@ mod tests {
             (vec!["test", "user-trap"], TestFilter::UserTrap),
             (vec!["test", "user-syscall"], TestFilter::UserSyscall),
             (vec!["test", "user-exit"], TestFilter::UserExit),
+            (vec!["test", "kernel-stack"], TestFilter::KernelStack),
             (vec!["test", "fdt"], TestFilter::Fdt),
             (vec!["test", "heap"], TestFilter::Heap),
             (vec!["test", "virtio"], TestFilter::Virtio),
@@ -329,6 +342,8 @@ mod tests {
             (vec!["test", "sched"], TestFilter::Sched),
             (vec!["test", "sched-io"], TestFilter::SchedIo),
             (vec!["test", "sched-io-partial"], TestFilter::SchedIoPartial),
+            (vec!["test", "proc-fault"], TestFilter::ProcFault),
+            (vec!["test", "proc-kill"], TestFilter::ProcKill),
             (vec!["test", "shell"], TestFilter::Shell),
         ] {
             assert_eq!(parse(&owned(&args)), Ok(Command::Test(expected)));
@@ -354,7 +369,7 @@ mod tests {
             "cargo xtask run",
             "cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]",
             "cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]",
-            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|shell]",
+            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|proc-fault|proc-kill|shell]",
             "cargo xtask check",
         ] {
             assert!(help.contains(command), "missing help entry: {command}");

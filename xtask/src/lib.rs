@@ -4,6 +4,7 @@ pub mod cli;
 pub mod disk;
 pub mod docs;
 pub mod guest;
+mod imem;
 pub mod qemu;
 pub mod tools;
 
@@ -15,6 +16,7 @@ use cli::{Command, TestFilter};
 pub enum XtaskError {
     Bundle(bundle::BundleError),
     Cargo(cargo::CargoError),
+    Imem(String),
     Docs(docs::DocsError),
     Qemu(qemu::QemuError),
     Tool(tools::ToolError),
@@ -25,6 +27,7 @@ impl fmt::Display for XtaskError {
         match self {
             Self::Bundle(error) => error.fmt(formatter),
             Self::Cargo(error) => error.fmt(formatter),
+            Self::Imem(error) => formatter.write_str(error),
             Self::Docs(error) => error.fmt(formatter),
             Self::Qemu(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
@@ -211,6 +214,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::UserTrap) => "QEMU user-trap test".to_owned(),
             Self::Qemu(qemu::TestKind::UserSyscall) => "QEMU user-syscall test".to_owned(),
             Self::Qemu(qemu::TestKind::UserExit) => "QEMU user-exit test".to_owned(),
+            Self::Qemu(qemu::TestKind::KernelStack) => "QEMU kernel-stack test".to_owned(),
             Self::Qemu(qemu::TestKind::Fdt) => "QEMU fdt test".to_owned(),
             Self::Qemu(qemu::TestKind::Heap) => "QEMU heap test".to_owned(),
             Self::Qemu(qemu::TestKind::Virtio) => "QEMU virtio test".to_owned(),
@@ -239,6 +243,8 @@ impl Phase {
             Self::Qemu(qemu::TestKind::Sched) => "QEMU sched test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIo) => "QEMU sched-io test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIoPartial) => "QEMU sched-io-partial test".to_owned(),
+            Self::Qemu(qemu::TestKind::ProcFault) => "QEMU proc-fault test".to_owned(),
+            Self::Qemu(qemu::TestKind::ProcKill) => "QEMU proc-kill test".to_owned(),
             Self::Qemu(qemu::TestKind::Shell) => "QEMU shell test".to_owned(),
             _ => unreachable!("Cargo phases returned above"),
         }
@@ -259,6 +265,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserTrap),
         Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::UserExit),
+        Phase::Qemu(qemu::TestKind::KernelStack),
         Phase::Qemu(qemu::TestKind::Fdt),
         Phase::Qemu(qemu::TestKind::Heap),
         Phase::Qemu(qemu::TestKind::Virtio),
@@ -287,6 +294,8 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
+        Phase::Qemu(qemu::TestKind::ProcFault),
+        Phase::Qemu(qemu::TestKind::ProcKill),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -318,6 +327,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::UserTrap),
         Phase::Qemu(qemu::TestKind::UserSyscall),
         Phase::Qemu(qemu::TestKind::UserExit),
+        Phase::Qemu(qemu::TestKind::KernelStack),
         Phase::Qemu(qemu::TestKind::Fdt),
         Phase::Qemu(qemu::TestKind::Heap),
         Phase::Qemu(qemu::TestKind::Virtio),
@@ -346,6 +356,8 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Sched),
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
+        Phase::Qemu(qemu::TestKind::ProcFault),
+        Phase::Qemu(qemu::TestKind::ProcKill),
         Phase::Qemu(qemu::TestKind::Shell),
     ]
 }
@@ -403,6 +415,19 @@ fn run_phases<E>(
 
 fn execute_phase(phase: Phase) -> Result<String, XtaskError> {
     if let Some(args) = phase.cargo_args() {
+        if phase == Phase::BuildKernelRv32 {
+            // 環境のCARGO_TARGET_DIRにより古いELFを読むことを防ぐ。
+            let target = workspace_root().join("target");
+            let target_text = target.to_string_lossy();
+            let mut build_args = args.to_vec();
+            build_args.extend(["--target-dir", &target_text]);
+            let mut transcript = cargo::run(&build_args).map_err(XtaskError::Cargo)?;
+            transcript.push_str(
+                &imem::report(&target.join("riscv32im-unknown-none-elf/release/minios-kernel"))
+                    .map_err(XtaskError::Imem)?,
+            );
+            return Ok(transcript);
+        }
         return cargo::run(args).map_err(XtaskError::Cargo);
     }
     let workspace = workspace_root();
@@ -454,6 +479,9 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
             Some(vec![Phase::Qemu(qemu::TestKind::UserSyscall)])
         }
         Command::Test(TestFilter::UserExit) => Some(vec![Phase::Qemu(qemu::TestKind::UserExit)]),
+        Command::Test(TestFilter::KernelStack) => {
+            Some(vec![Phase::Qemu(qemu::TestKind::KernelStack)])
+        }
         Command::Test(TestFilter::Fdt) => Some(vec![Phase::Qemu(qemu::TestKind::Fdt)]),
         Command::Test(TestFilter::Heap) => Some(vec![Phase::Qemu(qemu::TestKind::Heap)]),
         Command::Test(TestFilter::Virtio) => Some(vec![Phase::Qemu(qemu::TestKind::Virtio)]),
@@ -498,6 +526,8 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::SchedIoPartial) => {
             Some(vec![Phase::Qemu(qemu::TestKind::SchedIoPartial)])
         }
+        Command::Test(TestFilter::ProcFault) => Some(vec![Phase::Qemu(qemu::TestKind::ProcFault)]),
+        Command::Test(TestFilter::ProcKill) => Some(vec![Phase::Qemu(qemu::TestKind::ProcKill)]),
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
         Command::Check => Some(check_phases()),
         Command::Setup | Command::Build | Command::Run | Command::Bundle(_) => None,
@@ -567,6 +597,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::UserTrap),
                 Phase::Qemu(qemu::TestKind::UserSyscall),
                 Phase::Qemu(qemu::TestKind::UserExit),
+                Phase::Qemu(qemu::TestKind::KernelStack),
                 Phase::Qemu(qemu::TestKind::Fdt),
                 Phase::Qemu(qemu::TestKind::Heap),
                 Phase::Qemu(qemu::TestKind::Virtio),
@@ -595,6 +626,8 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Sched),
                 Phase::Qemu(qemu::TestKind::SchedIo),
                 Phase::Qemu(qemu::TestKind::SchedIoPartial),
+                Phase::Qemu(qemu::TestKind::ProcFault),
+                Phase::Qemu(qemu::TestKind::ProcKill),
                 Phase::Qemu(qemu::TestKind::Shell),
             ]
         );
@@ -648,6 +681,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserTrap),
             Phase::Qemu(qemu::TestKind::UserSyscall),
             Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::KernelStack),
             Phase::Qemu(qemu::TestKind::Fdt),
             Phase::Qemu(qemu::TestKind::Heap),
             Phase::Qemu(qemu::TestKind::Virtio),
@@ -676,6 +710,8 @@ mod tests {
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
+            Phase::Qemu(qemu::TestKind::ProcFault),
+            Phase::Qemu(qemu::TestKind::ProcKill),
             Phase::Qemu(qemu::TestKind::Shell),
         ];
         assert_eq!(check_phases(), expected);
@@ -722,6 +758,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::UserTrap),
             Phase::Qemu(qemu::TestKind::UserSyscall),
             Phase::Qemu(qemu::TestKind::UserExit),
+            Phase::Qemu(qemu::TestKind::KernelStack),
             Phase::Qemu(qemu::TestKind::Fdt),
             Phase::Qemu(qemu::TestKind::Heap),
             Phase::Qemu(qemu::TestKind::Virtio),
@@ -750,10 +787,15 @@ mod tests {
             Phase::Qemu(qemu::TestKind::Sched),
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
+            Phase::Qemu(qemu::TestKind::ProcFault),
+            Phase::Qemu(qemu::TestKind::ProcKill),
         ];
 
-        assert_eq!(&plan[host_tests_end + 7..host_tests_end + 39], expected);
-        assert_eq!(plan.len(), 54);
+        assert_eq!(
+            &plan[host_tests_end + 7..host_tests_end + 7 + expected.len()],
+            expected
+        );
+        assert_eq!(plan.len(), 57);
     }
 
     #[test]
@@ -781,6 +823,10 @@ mod tests {
         assert_eq!(
             phase_plan_for(&Command::Test(TestFilter::UserExit)),
             Some(vec![Phase::Qemu(qemu::TestKind::UserExit)])
+        );
+        assert_eq!(
+            phase_plan_for(&Command::Test(TestFilter::KernelStack)),
+            Some(vec![Phase::Qemu(qemu::TestKind::KernelStack)])
         );
         assert_eq!(
             phase_plan_for(&Command::Test(TestFilter::Payload)),
@@ -823,6 +869,10 @@ mod tests {
         assert_eq!(
             Phase::Qemu(qemu::TestKind::UserExit).command(),
             "QEMU user-exit test"
+        );
+        assert_eq!(
+            Phase::Qemu(qemu::TestKind::KernelStack).command(),
+            "QEMU kernel-stack test"
         );
         assert_eq!(
             Phase::Qemu(qemu::TestKind::Payload).command(),

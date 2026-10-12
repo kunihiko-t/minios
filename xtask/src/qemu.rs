@@ -25,6 +25,7 @@ const USER_TRAP_FAULT_DIAGNOSTIC: &str =
     "MiniOS user trap: scause=0x000000000000000f stval=0x0000000010000000";
 const USER_SYSCALL_MARKER: &str = "[MINIOS_TEST] user-syscall: ok";
 const USER_EXIT_MARKER: &str = "[MINIOS_TEST] user-exit: ok code=42";
+const KERNEL_STACK_MARKER: &str = "[MINIOS_TEST] kernel-stack: overflow detected";
 // QEMU `virt` -m 128Mが渡すDTBからkernelが発見するmachine記述の期待値。
 const FDT_MARKER: &str =
     "[MINIOS_TEST] fdt: ram=0x80000000..0x88000000 uart=0x10000000 timebase=10000000";
@@ -148,6 +149,7 @@ pub enum TestKind {
     UserTrap,
     UserSyscall,
     UserExit,
+    KernelStack,
     Fdt,
     Heap,
     Virtio,
@@ -176,6 +178,8 @@ pub enum TestKind {
     Sched,
     SchedIo,
     SchedIoPartial,
+    ProcFault,
+    ProcKill,
     Shell,
 }
 
@@ -192,6 +196,7 @@ impl TestKind {
             Self::UserTrap => "qemu-test-user-trap",
             Self::UserSyscall => "qemu-test-user-syscall",
             Self::UserExit => "qemu-test-user-exit",
+            Self::KernelStack => "qemu-test-kernel-stack",
             Self::Fdt => "qemu-test-fdt",
             Self::Heap => "qemu-test-heap",
             Self::Virtio => "qemu-test-virtio",
@@ -244,6 +249,8 @@ impl TestKind {
             Self::SchedIoPartial => {
                 unreachable!("the sched-io-partial test boots the normal kernel")
             }
+            Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
+            Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -260,6 +267,7 @@ impl TestKind {
             Self::UserTrap => USER_TRAP_REJECTED_MARKER,
             Self::UserSyscall => USER_SYSCALL_MARKER,
             Self::UserExit => USER_EXIT_MARKER,
+            Self::KernelStack => KERNEL_STACK_MARKER,
             Self::Fdt => FDT_MARKER,
             Self::Heap => HEAP_MARKER,
             Self::Virtio => VIRTIO_MARKER,
@@ -318,6 +326,8 @@ impl TestKind {
             Self::SchedIoPartial => {
                 unreachable!("the sched-io-partial test verifies a split frame's control frames")
             }
+            Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
+            Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
         }
     }
@@ -327,6 +337,8 @@ impl TestKind {
     fn forbidden_marker(self) -> Option<&'static str> {
         match self {
             Self::UserTrap => Some(USER_TRAP_OK_MARKER),
+            // probeはsyscallの途中で止まるため、user-exitの完了markerは出ない。
+            Self::KernelStack => Some(USER_EXIT_MARKER),
             _ => None,
         }
     }
@@ -853,6 +865,111 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         bundle.remove();
         disk.remove();
         return verify_file_seek_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::ProcFault {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let waiter = built_bin_elf_bytes("minios-guest-proc-fault-wait")?;
+        let fault = built_bin_elf_bytes("minios-guest-proc-fault")?;
+        let single = PayloadBundle::create_with(assemble_test_bundle(
+            b"version=1\nname=fault\narg=illegal\n",
+            &fault,
+        )?)?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, single.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        single.remove();
+        let frames = collect_payload_frames(completed.output.as_bytes());
+        // OpenSBIのSystemFailure shutdownでもQEMUは0を返すため、GuestErrorで判定する。
+        let single_ok = completed.status.code() == Some(0)
+            && frames.as_ref().is_some_and(|frames| {
+                frames.iter().any(|(kind, payload)| {
+                    *kind == FrameKind::GuestError
+                        && payload.starts_with(b"MiniOS user trap: scause=0x0000000000000002 ")
+                }) && frames.last().is_some_and(|(kind, payload)| {
+                    *kind == FrameKind::GuestError
+                        && payload.starts_with(b"MiniOS payload: failed processes=1")
+                }) && !frames
+                    .iter()
+                    .any(|(kind, _)| matches!(kind, FrameKind::Exit | FrameKind::ProcExit))
+            });
+        if !single_ok {
+            return Err(QemuError::PayloadFrames {
+                command: command_line,
+                output: completed.output,
+            });
+        }
+        let survivor = built_bin_elf_bytes(crate::guest::GUEST_SCHED_B)?;
+        let images = [
+            crate::bundle::BundleImage {
+                name: "waiter",
+                args: &[],
+                elf: &waiter,
+            },
+            crate::bundle::BundleImage {
+                name: "illegal",
+                args: &["illegal".to_owned()],
+                elf: &fault,
+            },
+            crate::bundle::BundleImage {
+                name: "store",
+                args: &["store".to_owned()],
+                elf: &fault,
+            },
+            crate::bundle::BundleImage {
+                name: "survivor",
+                args: &[],
+                elf: &survivor,
+            },
+        ];
+        let bytes =
+            crate::bundle::build_multi_bundle(&images).map_err(|error| QemuError::Bundle {
+                stage: "proc-fault bundle",
+                error: error.to_string(),
+            })?;
+        let bundle = PayloadBundle::create_with(bytes.bytes().to_vec())?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_proc_fault_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::ProcKill {
+        let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+        let waiter = built_bin_elf_bytes("minios-guest-proc-kill-wait")?;
+        let victim = built_bin_elf_bytes(crate::guest::GUEST_SCHED_R)?;
+        let killer = built_bin_elf_bytes("minios-guest-proc-kill")?;
+        let images = [
+            crate::bundle::BundleImage {
+                name: "waiter",
+                args: &[],
+                elf: &waiter,
+            },
+            crate::bundle::BundleImage {
+                name: "blocked1",
+                args: &[],
+                elf: &victim,
+            },
+            crate::bundle::BundleImage {
+                name: "blocked2",
+                args: &[],
+                elf: &victim,
+            },
+            crate::bundle::BundleImage {
+                name: "killer",
+                args: &[],
+                elf: &killer,
+            },
+        ];
+        let bytes =
+            crate::bundle::build_multi_bundle(&images).map_err(|error| QemuError::Bundle {
+                stage: "proc-kill bundle",
+                error: error.to_string(),
+            })?;
+        let bundle = PayloadBundle::create_with(bytes.bytes().to_vec())?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        return verify_proc_kill_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Sched {
@@ -2217,6 +2334,130 @@ fn collect_payload_frames(output: &[u8]) -> Option<Vec<(FrameKind, &[u8])>> {
     Some(frames)
 }
 
+/// fault二件の終了通知、waitpidの回収、正常タスクの継続と全frame回収を検証する。
+fn verify_proc_fault_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let invalid = || QemuError::PayloadFrames {
+        command: command.to_owned(),
+        output: output.to_owned(),
+    };
+    let frames = collect_payload_frames(output.as_bytes()).ok_or_else(invalid)?;
+    let mut exits = Vec::new();
+    let mut stdout = Vec::new();
+    let mut faults = [false; 2];
+    let mut recovered = false;
+    for (kind, payload) in &frames {
+        match kind {
+            FrameKind::Ready => {}
+            FrameKind::Stdout => stdout.extend_from_slice(payload),
+            FrameKind::ProcExit => {
+                let status = ProcExitPayload::decode(payload).map_err(|_| invalid())?;
+                exits.push((status.pid, status.code));
+            }
+            FrameKind::Diagnostic => {
+                let line = String::from_utf8_lossy(payload);
+                faults[0] |= line
+                    .starts_with("MiniOS sched: fault pid=1 code=70 scause=0x0000000000000002 ");
+                faults[1] |= line
+                    .starts_with("MiniOS sched: fault pid=2 code=70 scause=0x000000000000000f ");
+                recovered |= line.starts_with("\r\nMiniOS payload: ok processes=4 switches=");
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    let original = exits.clone();
+    exits.sort_unstable();
+    let waiter = original.iter().position(|exit| *exit == (0, 42));
+    let waited_before_exit = [1, 2].iter().all(|pid| {
+        matches!(
+            (original.iter().position(|exit| *exit == (*pid, 70)), waiter),
+            (Some(fault), Some(waiter)) if fault < waiter
+        )
+    });
+    if exits != [(0, 42), (1, 70), (2, 70), (3, 7)]
+        || faults != [true, true]
+        || !recovered
+        || !waited_before_exit
+        || !stdout
+            .windows(b"fault waitpid verified\n".len())
+            .any(|window| window == b"fault waitpid verified\n")
+        || !stdout.windows(3).any(|window| window == b"b3\n")
+    {
+        return Err(invalid());
+    }
+    Ok(output.to_owned())
+}
+
+/// kill二件の終了通知、waitpidの回収、errno契約と全frame回収を検証する。
+fn verify_proc_kill_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let invalid = || QemuError::PayloadFrames {
+        command: command.to_owned(),
+        output: output.to_owned(),
+    };
+    let frames = collect_payload_frames(output.as_bytes()).ok_or_else(invalid)?;
+    let mut exits = Vec::new();
+    let mut stdout = Vec::new();
+    let mut recovered = false;
+    for (kind, payload) in &frames {
+        match kind {
+            FrameKind::Ready => {}
+            FrameKind::Stdout => stdout.extend_from_slice(payload),
+            FrameKind::ProcExit => {
+                let status = ProcExitPayload::decode(payload).map_err(|_| invalid())?;
+                exits.push((status.pid, status.code));
+            }
+            FrameKind::Diagnostic => {
+                let line = String::from_utf8_lossy(payload);
+                recovered |= line.starts_with("\r\nMiniOS payload: ok processes=4 switches=");
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    let original = exits.clone();
+    exits.sort_unstable();
+    let waiter = original.iter().position(|exit| *exit == (0, 42));
+    let waited_before_exit = [1, 2].iter().all(|pid| {
+        matches!(
+            (original.iter().position(|exit| *exit == (*pid, 75)), waiter),
+            (Some(killed), Some(waiter)) if killed < waiter
+        )
+    });
+    if exits != [(0, 42), (1, 75), (2, 75), (3, 7)]
+        || !recovered
+        || !waited_before_exit
+        || !stdout
+            .windows(b"kill waitpid verified\n".len())
+            .any(|window| window == b"kill waitpid verified\n")
+        || !stdout
+            .windows(b"kill syscalls verified\n".len())
+            .any(|window| window == b"kill syscalls verified\n")
+    {
+        return Err(invalid());
+    }
+    Ok(output.to_owned())
+}
+
 /// sched検証: 2 processのstdout markerが交差すること、両方のProcExit frameが
 /// 届くこと、kernelが切り替え回数を報告することを確認する。
 ///
@@ -3337,6 +3578,54 @@ mod tests {
 
     const TEST_COMMAND: &str = "'qemu-system-riscv64' '-kernel' 'kernel.elf'";
 
+    // Oracle自身が終了status欠落・waiterの早すぎる終了・VM全体のfatalを見逃さない。
+    #[test]
+    fn proc_fault_validator_requires_both_reaped_faults_and_complete_recovery() {
+        let exit =
+            |pid, code| control_frame(FrameKind::ProcExit, &ProcExitPayload { pid, code }.encode());
+        let frames = vec![
+            PAYLOAD_READY_FRAME.to_vec(),
+            control_frame(
+                FrameKind::Diagnostic,
+                b"MiniOS sched: fault pid=1 code=70 scause=0x0000000000000002 stval=0\n",
+            ),
+            exit(1, 70),
+            control_frame(
+                FrameKind::Diagnostic,
+                b"MiniOS sched: fault pid=2 code=70 scause=0x000000000000000f stval=0\n",
+            ),
+            exit(2, 70),
+            control_frame(FrameKind::Stdout, b"fault waitpid verified\nb3\n"),
+            exit(0, 42),
+            exit(3, 7),
+            control_frame(
+                FrameKind::Diagnostic,
+                b"\r\nMiniOS payload: ok processes=4 switches=5\n",
+            ),
+        ];
+        let output = |frames: &[Vec<u8>]| String::from_utf8(frames.concat()).unwrap();
+        let valid = output(&frames);
+        verify_proc_fault_result(TEST_COMMAND, Some(0), &valid).unwrap();
+        assert!(verify_proc_fault_result(TEST_COMMAND, Some(1), &valid).is_err());
+        for omitted in 0..frames.len() {
+            let mut incomplete = frames.clone();
+            incomplete.remove(omitted);
+            assert!(
+                verify_proc_fault_result(TEST_COMMAND, Some(0), &output(&incomplete)).is_err(),
+                "frame {omitted}欠落を検出する"
+            );
+        }
+        let mut premature = frames.clone();
+        premature.swap(2, 6);
+        assert!(verify_proc_fault_result(TEST_COMMAND, Some(0), &output(&premature)).is_err());
+        let mut fatal = frames.clone();
+        fatal.push(control_frame(FrameKind::GuestError, b"payload failed"));
+        assert!(verify_proc_fault_result(TEST_COMMAND, Some(0), &output(&fatal)).is_err());
+        let mut wrong_code = frames;
+        wrong_code[2] = exit(1, 42);
+        assert!(verify_proc_fault_result(TEST_COMMAND, Some(0), &output(&wrong_code)).is_err());
+    }
+
     #[test]
     fn vm_and_elf_tests_select_their_features_and_exact_markers() {
         assert_eq!(TestKind::Vm.feature(), "qemu-test-vm");
@@ -3366,6 +3655,15 @@ mod tests {
         assert_eq!(
             TestKind::UserExit.marker(),
             "[MINIOS_TEST] user-exit: ok code=42"
+        );
+        assert_eq!(TestKind::KernelStack.feature(), "qemu-test-kernel-stack");
+        assert_eq!(
+            TestKind::KernelStack.marker(),
+            "[MINIOS_TEST] kernel-stack: overflow detected"
+        );
+        assert_eq!(
+            TestKind::KernelStack.forbidden_marker(),
+            Some("[MINIOS_TEST] user-exit: ok code=42")
         );
         for kind in [
             TestKind::Boot,

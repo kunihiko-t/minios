@@ -1,9 +1,10 @@
-# 23. spawn、waitpid、exec
+# 23. spawn、waitpid、exec、kill
 
 ## 学習目標
 
 `spawn`がFAT32上のELFを読み込み、単調に採番したpidでprocess tableへ登録する流れを説明できるようになります。
 `waitpid`が終了codeの台帳と`BlockedOnPid`を使い、対象の終了まで呼び出し側を止める仕組みを追います。
+`kill`が対象を`Killed`へmarkし、run loopがdispatchの外で回収する形で、trap窓が生きているpointerを壊さずにprocessを終了できることを確認します。
 `exec`がpid、kernel trap stack、fd tableを保ったままimageだけを差し替える手順と、旧imageの解放を遅らせる理由を確認します。
 
 ## 背景
@@ -20,7 +21,7 @@ UNIXでは`fork`でaddress spaceを複製してから`exec`で置き換えます
 
 ### 番号とdispatch
 
-[`dispatch_syscall`](../../kernel/src/user/syscall.rs)は`a7`の番号（[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`SyscallNumber::Getpid`、`Spawn`、`Waitpid`、`Exec`）を`dispatch_getpid`、`dispatch_spawn`、`dispatch_waitpid`、`dispatch_exec`へ振り分けます。
+[`dispatch_syscall`](../../kernel/src/user/syscall.rs)は`a7`の番号（[`abi/src/syscall.rs`](../../abi/src/syscall.rs)の`SyscallNumber::Getpid`、`Spawn`、`Waitpid`、`Exec`、`Kill`）を`dispatch_getpid`、`dispatch_spawn`、`dispatch_waitpid`、`dispatch_exec`、`dispatch_kill`へ振り分けます。
 
 `dispatch_spawn`と`dispatch_exec`は、process生成やimage差し替えの前に`copy_user_path`でpathを検証します。
 長さ0か`MAX_PATH_LEN`（256）超は`EINVAL`、読めないuser rangeは`EFAULT`、UTF-8でないpathは`EINVAL`です。
@@ -69,6 +70,12 @@ pipe端だけはcopy先も同じpipe idを指すため、bufferは親子で共�
 
 ### waitpidと終了台帳
 
+manifest v2で複数のimageを実行する場合、ユーザー命令のfatal trapは対象タスクだけを終了code `70`（guestのpanicと同じ）で終了させます。
+`ProcExit`で通知し、終了台帳への記録、待機タスクの起床、ページとfdの回収を行うため、`waitpid`は`70`を一度だけ返します。
+単一imageのfatal trapは従来どおり`GuestError`とpayload全体の異常終了になります。kernelの入出力・timerの失敗も全体の失敗として扱います。
+`cargo xtask test proc-fault`は不正命令と未割り当てアドレスへのstore、待機後の`ECHILD`、正常タスクの継続とメモリ回収、および単一imageの異常終了をQEMUで確認します。
+
+
 processが`exit`すると、run loopは`ProcessTable::record_exit`で`(pid, code)`を台帳へ記録し、`wake_on_exit`で待っているprocessを起こしてから、そのprocessを回収します。
 台帳の上限は`MAX_PROCS`件で、超えると最古の記録を捨てます。
 
@@ -81,11 +88,23 @@ blockした場合、`dispatch_waitpid`は`sepc`を4 byte戻して`SyscallFlow::B
 run loopは`Blocked`を受けると`block_on_stdin`を呼びますが、この関数はrunnableのときだけ遷移するため、`BlockedOnPid`は上書きされません。
 MiniOSのprocessには親子関係の記録がなく、liveなpidであれば自分以外のどのprocessでも待てます。
 
+### killと`Killed` mark
+
+`kill(pid)`は対象の`ProcessState`を`Killed`へ書き換えるだけで戻り、呼び出し側はblockしません。
+自分自身への`kill`は`exit`の役目として`EINVAL`、存在しないpidは`ECHILD`、tableに残る間の再`kill`は冪等に0を返します。
+
+trap窓の内側で`Vec::remove`すれば要素がずれて、dispatch中のprocessを指す`CURRENT_PROC`やfd走査中のpointerが別要素を指します。
+そのため`ProcessTable::mark_killed`はmarkだけを行い、run loopは各巡回の先頭で`killed_pids`を集めてから`complete_process`を呼びます。
+回収は`exit`やfatal trapと同じ経路を通るため、終了code`EXIT_CODE_KILLED`（75、`'K'`）の台帳記録、`ProcExit` frame、`wake_on_exit`での`BlockedOnPid`とpipe waiterの起床、pageとfdの解放がすべて既存どおりに働きます。
+`Killed`は`is_runnable`を満たさないためpick対象外であり、stdin・pid・pipe・timer待ちのprocessでも回収できます。
+`cargo xtask test proc-kill`は、stdin待ちで止まった二つのvictimへのkill、waitpidでのcode75の回収と`ECHILD`、errno契約（self`EINVAL`・不在`ECHILD`・再kill`Ok`）をQEMUで確認します。
+
 ### exec
 
 [`Process::exec`](../../kernel/src/process.rs)は、新しいimageの読み込みと`argv`の書き込みをすべて終えてから旧imageと交換します。
 交換前に失敗すれば旧imageには触れず、呼び出し側はerrnoを受けて元のprogramのまま動き続けます。
 成功時はpid、kernel trap stack、fd tableを引き継ぎ、address space、`user_satp`、process名だけを新しくします。
+引き継いだtrap stackのguard pageは、新しいaddress spaceのidentity mappingからも外します。
 
 trap handlerの実行窓ではまだ旧imageのpage tableが`satp`に載っているため、旧imageはその場では解放できません。
 `exec`は旧imageを`retired_image`へ退避し、`dispatch_exec`はtrap slotの`UserContext`を新imageの初期contextで上書きして`SyscallFlow::Exec`を返します。

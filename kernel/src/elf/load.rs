@@ -88,6 +88,11 @@ impl LoadedImage {
         &self.address_space
     }
 
+    /// kernel trap stackのguard pageを外すためにinactiveなspaceを借りる。
+    pub(crate) const fn address_space_mut(&mut self) -> &mut AddressSpace {
+        &mut self.address_space
+    }
+
     pub(crate) const fn allocator_id(&self) -> u64 {
         self.address_space.allocator_id()
     }

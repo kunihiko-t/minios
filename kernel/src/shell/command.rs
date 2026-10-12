@@ -36,8 +36,6 @@ pub fn parse_command(input: &str) -> Command<'_> {
         "shutdown" => Command::Shutdown,
         #[cfg(any(test, target_arch = "riscv32"))]
         "echo" => Command::Echo(""),
-        #[cfg(any(test, target_arch = "riscv32"))]
-        input if input.starts_with("echo ") => Command::Echo(input[5..].trim_start_matches(' ')),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         "ls" => Command::Ls(""),
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
@@ -68,6 +66,11 @@ pub fn parse_command(input: &str) -> Command<'_> {
         }
         #[cfg(any(test, target_arch = "riscv32", target_arch = "riscv64"))]
         input => {
+            // prefixの除去とsuffixの取得を一度で行い、str境界panicの経路を持ち込まない。
+            #[cfg(any(test, target_arch = "riscv32"))]
+            if let Some(argument) = input.strip_prefix("echo ") {
+                return Command::Echo(argument.trim_start_matches(' '));
+            }
             if let Some(argument) = input.strip_prefix("ls ") {
                 Command::Ls(argument.trim_start_matches(' '))
             } else if let Some(argument) = input.strip_prefix("cat ") {
@@ -112,6 +115,19 @@ mod tests {
     fn parser_distinguishes_empty_input_from_unknown_input() {
         assert_eq!(parse_command(" \t"), Command::Empty);
         assert_eq!(parse_command("HELP"), Command::Unknown("HELP"));
+    }
+
+    #[test]
+    fn echo_prefix_keeps_unicode_and_separator_contract() {
+        assert_eq!(
+            parse_command(" echo   日本語 🌱  "),
+            Command::Echo("日本語 🌱")
+        );
+        assert_eq!(parse_command("echo \t日本語"), Command::Echo("\t日本語"));
+        assert_eq!(
+            parse_command("echo\t日本語"),
+            Command::Unknown("echo\t日本語")
+        );
     }
 
     #[test]

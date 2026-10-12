@@ -6,20 +6,139 @@ use crate::{
     elf::LoadedImage,
     memory::frame::{FrameError, FrameSource, FrameStats, PAGE_SIZE, PhysFrame},
     user::syscall::ControlSink,
-    vm::{AddressSpace, FrameStore, PhysPageNum},
+    vm::{AddressSpace, FrameStore, PhysPageNum, VirtPage, VmError},
 };
 use minios_abi::control::FrameKind;
 
-/// user trap handler専用stackのpage数。
+/// user trap handler専用stackのpage数。直下のguard pageは含まない。
 ///
-/// FAT32を通るsyscall（`read_file`、`open`、`stat`など）はtrap handlerから
-/// 約17 KiBのstackを使う。guard pageがないため、溢れた分は直下のframe
-/// （直前に確保したuser stack）を黙って壊す。32 KiBで約2倍の余裕を持たせる。
-// ponytail: 幅を広げただけで溢れの検出はない。深さが増えたらguard pageを置く。
-pub const KERNEL_STACK_PAGES: usize = 8;
+/// `cargo xtask`が使うdebug buildで、stackを模様で塗ってQEMU testの後に走査した
+/// 最大使用量は次のとおり（2026-10、`file-*`、`user-*`、`sched*`、`payload*`）。
+/// - `write`と`exit`だけのprocess：13,160 byte
+/// - FAT32を通る`read`、`open`、`stat`など：17,296 byte、`readdir`は21,568 byte、
+///   `rename`は22,656 byte、`exec`は22,832 byte
+/// - `spawn`：32,096 byte（childの`Process`をstack上で組み立てて返すため）
+///
+/// 32 KiBでは`spawn`の余裕が672 byteしかないため、64 KiBで約2倍を持たせる。
+/// 溢れはguard pageのpage faultとして`kernel stack overflow`の診断で止まる。
+// ponytail: 余裕は実測頼み。深いsyscallを足したら測り直す。
+pub const KERNEL_STACK_PAGES: usize = 16;
+
+/// guard pageを含めて連続確保するframe数。
+const KERNEL_STACK_FRAMES: usize = KERNEL_STACK_PAGES + 1;
 
 const fn sv39_satp_bits(root: PhysPageNum) -> u64 {
     (8u64 << 60) | root.as_u64()
+}
+
+/// `address`が、上端`stack_top`のkernel stackの直下にあるguard page内か。
+/// S-mode page faultの`stval`をstack溢れとして報告するかの判定に使う。
+pub const fn kernel_stack_guard_contains(stack_top: usize, address: usize) -> bool {
+    match stack_top.checked_sub(KERNEL_STACK_FRAMES * PAGE_SIZE) {
+        Some(guard) => address >= guard && address - guard < PAGE_SIZE,
+        None => false,
+    }
+}
+
+/// `KernelStack::new`の失敗。確保したframeは返却済みである。
+#[derive(Debug, PartialEq, Eq)]
+pub enum KernelStackError<E> {
+    /// guard pageを含む連続frameを確保できなかった。
+    OutOfFrames,
+    /// stackのzero fillに失敗した。
+    Memory(E),
+    /// address spaceからguard pageを外せなかった。
+    Guard(VmError<E>),
+}
+
+/// 物理的に連続したkernel trap stackと、その直下のguard page。
+///
+/// 最下位のframeがguard pageであり、stackと一緒に所有するため生存中は
+/// allocatorが他へ払い出さない。guard pageはこのstackで動くaddress spaceの
+/// identity mappingから外すため、溢れたstoreは隣のframeを壊さずpage faultになる。
+/// kernel自身のaddress spaceと他processのspaceには残るが、そこでこのstackが
+/// 使われることはない。
+#[derive(Debug)]
+pub struct KernelStack {
+    frames: [Option<PhysFrame>; KERNEL_STACK_FRAMES],
+    guard: usize,
+}
+
+impl KernelStack {
+    /// 連続frameを確保してstack部分をzeroし、guard pageを`space`から外す。
+    /// 途中で失敗した場合は確保したframeをすべて返す。
+    pub fn new<M: FrameStore>(
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+        space: &mut AddressSpace,
+    ) -> Result<Self, KernelStackError<M::Error>> {
+        let mut frames = [const { None }; KERNEL_STACK_FRAMES];
+        if !allocator.allocate_contiguous(&mut frames) {
+            return Err(KernelStackError::OutOfFrames);
+        }
+        let guard = frames[0]
+            .as_ref()
+            .expect("contiguous allocation fills every slot")
+            .start();
+        let mut stack = Self { frames, guard };
+        if let Err(error) = stack.prepare(memory, space) {
+            stack
+                .release(allocator)
+                .expect("newly allocated kernel stack frames remain owned during rollback");
+            return Err(error);
+        }
+        Ok(stack)
+    }
+
+    fn prepare<M: FrameStore>(
+        &self,
+        memory: &mut M,
+        space: &mut AddressSpace,
+    ) -> Result<(), KernelStackError<M::Error>> {
+        for frame in self.frames[1..].iter().flatten() {
+            memory
+                .zero_frame(frame.start())
+                .map_err(KernelStackError::Memory)?;
+        }
+        self.hide_guard(space, memory)
+            .map_err(KernelStackError::Guard)
+    }
+
+    /// guard pageのidentity mappingを`space`から外す。`exec`の新imageにも使う。
+    pub fn hide_guard<M: FrameStore>(
+        &self,
+        space: &mut AddressSpace,
+        memory: &mut M,
+    ) -> Result<(), VmError<M::Error>> {
+        let page = VirtPage::from_start(self.guard as u64).map_err(VmError::Address)?;
+        space.unmap_identity(memory, page).map(|_| ())
+    }
+
+    pub const fn guard_page(&self) -> usize {
+        self.guard
+    }
+
+    pub const fn bottom(&self) -> usize {
+        self.guard + PAGE_SIZE
+    }
+
+    pub const fn top(&self) -> usize {
+        self.guard + KERNEL_STACK_FRAMES * PAGE_SIZE
+    }
+
+    /// guard pageを含む全frameを返す。返せなかったframeは自身へ戻すため再試行できる。
+    pub fn release(&mut self, allocator: &mut dyn FrameSource) -> Result<(), FrameError> {
+        for slot in self.frames.iter_mut().rev() {
+            let Some(frame) = slot.take() else {
+                continue;
+            };
+            if let Err((error, frame)) = allocator.deallocate_recoverable(frame) {
+                *slot = Some(frame);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `UserRun`構築中の失敗。
@@ -29,10 +148,10 @@ pub enum RunBuildError<E> {
     WrongAllocator,
     /// trap stackを構成する物理frameが不足した。
     OutOfFrames,
-    /// allocatorの断片化により連続したtrap stackを構成できなかった。
-    NonContiguousStack,
     /// trap stackのzero fillに失敗した。
     Memory(E),
+    /// address spaceからtrap stackのguard pageを外せなかった。
+    Guard(VmError<E>),
     /// 構築失敗後の所有frame回収に失敗した。
     Cleanup(FrameError),
 }
@@ -120,8 +239,7 @@ pub struct UserRun<'run, M: FrameStore> {
     image: Option<LoadedImage>,
     allocator: &'run mut dyn FrameSource,
     memory: &'run mut M,
-    kernel_stack: [Option<PhysFrame>; KERNEL_STACK_PAGES],
-    kernel_stack_bottom: usize,
+    kernel_stack: KernelStack,
     user_satp: u64,
     kernel_satp: u64,
     executed: bool,
@@ -131,7 +249,7 @@ impl<M: FrameStore> fmt::Debug for UserRun<'_, M> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UserRun")
-            .field("kernel_stack_bottom", &self.kernel_stack_bottom)
+            .field("kernel_stack", &self.kernel_stack)
             .field("user_satp", &self.user_satp)
             .field("kernel_satp", &self.kernel_satp)
             .finish_non_exhaustive()
@@ -143,7 +261,7 @@ impl<'run, M: FrameStore> UserRun<'run, M> {
     ///
     /// 途中で失敗した場合は、この関数がtrap stackとimageを両方回収する。
     pub fn new(
-        image: LoadedImage,
+        mut image: LoadedImage,
         allocator: &'run mut dyn FrameSource,
         memory: &'run mut M,
         kernel_root: PhysPageNum,
@@ -156,46 +274,23 @@ impl<'run, M: FrameStore> UserRun<'run, M> {
         }
         let user_root = PhysPageNum::from_start(image.address_space().root().as_u64())
             .expect("loaded image roots are page-aligned physical page numbers");
-        let mut kernel_stack = [const { None }; KERNEL_STACK_PAGES];
-        let mut stack_bottom = None;
-
-        for index in 0..KERNEL_STACK_PAGES {
-            let Some(frame) = allocator.allocate() else {
-                return Err(build_failure(
-                    image,
-                    &mut kernel_stack,
-                    allocator,
-                    RunBuildError::OutOfFrames,
-                ));
-            };
-            let start = frame.start();
-            let bottom = *stack_bottom.get_or_insert(start);
-            if start != bottom + index * PAGE_SIZE {
-                kernel_stack[index] = Some(frame);
-                return Err(build_failure(
-                    image,
-                    &mut kernel_stack,
-                    allocator,
-                    RunBuildError::NonContiguousStack,
-                ));
+        let kernel_stack = match KernelStack::new(allocator, memory, image.address_space_mut()) {
+            Ok(stack) => stack,
+            Err(error) => {
+                let error = match error {
+                    KernelStackError::OutOfFrames => RunBuildError::OutOfFrames,
+                    KernelStackError::Memory(error) => RunBuildError::Memory(error),
+                    KernelStackError::Guard(error) => RunBuildError::Guard(error),
+                };
+                return Err(build_failure(image, allocator, error));
             }
-            kernel_stack[index] = Some(frame);
-            if let Err(error) = memory.zero_frame(start) {
-                return Err(build_failure(
-                    image,
-                    &mut kernel_stack,
-                    allocator,
-                    RunBuildError::Memory(error),
-                ));
-            }
-        }
+        };
 
         Ok(Self {
             image: Some(image),
             allocator,
             memory,
             kernel_stack,
-            kernel_stack_bottom: stack_bottom.expect("kernel stack has at least one page"),
             user_satp: sv39_satp_bits(user_root),
             kernel_satp: sv39_satp_bits(kernel_root),
             executed: false,
@@ -222,11 +317,11 @@ impl<'run, M: FrameStore> UserRun<'run, M> {
     }
 
     pub const fn kernel_stack_bottom(&self) -> usize {
-        self.kernel_stack_bottom
+        self.kernel_stack.bottom()
     }
 
     pub const fn kernel_stack_top(&self) -> usize {
-        self.kernel_stack_bottom + KERNEL_STACK_PAGES * PAGE_SIZE
+        self.kernel_stack.top()
     }
 
     pub fn allocator_stats(&self) -> FrameStats {
@@ -286,15 +381,7 @@ impl<'run, M: FrameStore> UserRun<'run, M> {
     /// 失敗した所有権はstruct内へ戻すため、呼び出し側は同じrunで再試行できる。
     pub fn reclaim(&mut self) -> Result<(), FrameError> {
         self.executed = true;
-        for index in (0..KERNEL_STACK_PAGES).rev() {
-            let Some(frame) = self.kernel_stack[index].take() else {
-                continue;
-            };
-            if let Err((error, frame)) = self.allocator.deallocate_recoverable(frame) {
-                self.kernel_stack[index] = Some(frame);
-                return Err(error);
-            }
-        }
+        self.kernel_stack.release(self.allocator)?;
 
         let Some(image) = self.image.take() else {
             return Ok(());
@@ -312,11 +399,9 @@ impl<'run, M: FrameStore> UserRun<'run, M> {
 
 fn build_failure<E>(
     image: LoadedImage,
-    stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
     allocator: &mut dyn FrameSource,
     primary: RunBuildError<E>,
 ) -> RunBuildFailure<E> {
-    reclaim_stack(stack, allocator);
     match image.destroy(allocator) {
         Ok(()) => RunBuildFailure {
             error: primary,
@@ -332,32 +417,24 @@ fn build_failure<E>(
     }
 }
 
-fn reclaim_stack(
-    stack: &mut [Option<PhysFrame>; KERNEL_STACK_PAGES],
-    allocator: &mut dyn FrameSource,
-) {
-    for index in (0..KERNEL_STACK_PAGES).rev() {
-        let Some(frame) = stack[index].take() else {
-            continue;
-        };
-        allocator
-            .deallocate(frame)
-            .expect("newly allocated kernel stack frame remains owned during rollback");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     extern crate std;
 
     use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
-    use super::{KERNEL_STACK_PAGES, RunBuildError, RunCompletion, RunError, RunOutcome, UserRun};
+    use super::{
+        KERNEL_STACK_PAGES, RunBuildError, RunCompletion, RunError, RunOutcome, UserRun,
+        kernel_stack_guard_contains,
+    };
     use crate::{
-        elf::{fixture::valid_riscv64_elf, load_image},
+        elf::{fixture::valid_riscv64_elf, load_image, load_image_with_kernel_mappings},
         memory::frame::{FrameAllocator, FrameStats, PAGE_SIZE},
         user::syscall::ControlSink,
-        vm::{FrameStore, PhysPageNum},
+        vm::{
+            FrameStore, KernelMapping, PageFlags, PhysAddr, PhysPageNum, VirtAddr, VirtPage,
+            VmError,
+        },
     };
     use minios_abi::control::FrameKind;
 
@@ -742,7 +819,7 @@ mod tests {
 
         assert_eq!(
             run.allocator_stats().allocated,
-            before + image_frames + KERNEL_STACK_PAGES
+            before + image_frames + KERNEL_STACK_PAGES + 1
         );
         let top = run.kernel_stack_top();
         assert_eq!(top % PAGE_SIZE, 0);
@@ -750,6 +827,56 @@ mod tests {
             top - run.kernel_stack_bottom(),
             KERNEL_STACK_PAGES * PAGE_SIZE
         );
+
+        run.reclaim().unwrap();
+    }
+
+    // Catches leaving the guard frame identity-mapped in the space the trap
+    // stack runs in, unmapping a stack page instead, or a fault classifier
+    // that does not match the page directly below the stack.
+    #[test]
+    fn the_guard_page_below_the_trap_stack_is_unmapped_in_the_user_space() {
+        const RAM: core::ops::Range<usize> = 0x8000_0000..0x8018_0000;
+        let mut frames = unsafe { FrameAllocator::<16>::new(RAM.start, RAM.end) }.unwrap();
+        let mut memory = TestFrameStore::default();
+        let identity = RAM.step_by(PAGE_SIZE).map(|address| {
+            KernelMapping::new(
+                VirtPage::from_start(address as u64).unwrap(),
+                PhysAddr::try_new(address as u64).unwrap(),
+                PageFlags::supervisor_rw(),
+            )
+        });
+        let image = load_image_with_kernel_mappings(
+            &valid_riscv64_elf(),
+            &mut frames,
+            &mut memory,
+            identity,
+        )
+        .unwrap_or_else(|error| panic!("fixture image must load: {error:?}"));
+        let kernel_root = PhysPageNum::from_start(SYNTHETIC_KERNEL_ROOT).unwrap();
+        let mut run = UserRun::new(image, &mut frames, &mut memory, kernel_root)
+            .unwrap_or_else(|error| panic!("fixture run must build: {error:?}"));
+        let top = run.kernel_stack_top();
+        let bottom = run.kernel_stack_bottom();
+        let guard = bottom - PAGE_SIZE;
+        let at = |address: usize| VirtAddr::try_new(address as u64).unwrap();
+
+        assert_eq!(
+            run.address_space().translate(run.memory(), at(guard)),
+            Err(VmError::NotMapped)
+        );
+        for address in [bottom, top - PAGE_SIZE, guard - PAGE_SIZE] {
+            let (physical, _) = run
+                .address_space()
+                .translate(run.memory(), at(address))
+                .unwrap();
+            assert_eq!(physical.as_u64(), address as u64);
+        }
+        assert!(kernel_stack_guard_contains(top, guard));
+        assert!(kernel_stack_guard_contains(top, bottom - 8));
+        assert!(!kernel_stack_guard_contains(top, bottom));
+        assert!(!kernel_stack_guard_contains(top, guard - 1));
+        assert!(!kernel_stack_guard_contains(0, 0));
 
         run.reclaim().unwrap();
     }

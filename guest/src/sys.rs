@@ -154,6 +154,11 @@ pub fn sys_waitpid(pid: usize) -> isize {
     ecall(SyscallNumber::Waitpid, pid, 0, 0, 0)
 }
 
+/// `kill`を呼ぶ。戻り値は0か負のerrno。
+pub fn sys_kill(pid: usize) -> isize {
+    ecall(SyscallNumber::Kill, pid, 0, 0, 0)
+}
+
 /// `stat`を呼ぶ。`out`へ8 byteの`Stat`をLEで書き込む。
 pub fn sys_stat(path: *const u8, path_len: usize, out: *mut u8) -> isize {
     ecall(
