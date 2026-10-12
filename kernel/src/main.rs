@@ -745,6 +745,16 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
             arch::riscv64::csr::write_sie(sie | SIE_SEIE);
         }
     }
+    #[cfg(feature = "qemu-test-irq-uart")]
+    {
+        // PLIC経路のread-back診断。base=0はFDTでPLIC未検出、enable/priority/
+        // ierの値は割り込み経路が実際に立ったかを示す。
+        let (base, enable, threshold, priority) = drivers::plic::debug_state();
+        let ier = drivers::uart::Uart::for_target().ier();
+        crate::println!(
+            "[MINIOS_TEST] plic: base={base:#x} enable={enable:#x} threshold={threshold} priority={priority} ier={ier:#x}"
+        );
+    }
     crate::println!("[ok] timer");
     crate::println!("[ok] memory");
 
