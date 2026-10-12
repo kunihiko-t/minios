@@ -317,12 +317,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/55] cargo fmt --all -- --check
-phase 1/55 passed (elapsed: ...s)
+[1/56] cargo fmt --all -- --check
+phase 1/56 passed (elapsed: ...s)
 ...
-[55/55] QEMU shell test
-phase 55/55 passed (elapsed: ...s)
-summary: PASSED all 55 phases (elapsed: ...s)
+[56/56] QEMU shell test
+phase 56/56 passed (elapsed: ...s)
+summary: PASSED all 56 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。
