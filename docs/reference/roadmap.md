@@ -139,7 +139,9 @@ networkを扱うには、外部割り込みでdeviceの完了を受け取る基�
   FDTの`riscv,plic0`互換nodeから`MachineSpec::plic_base`を取り、kernel mappingに専用のPLIC MMIO窓を追加しています。
 - **UART受信割り込み**（完了）：supervisor external割り込みをtrap経路へ接続し、PLICのclaim/dispatch/completeからUARTの受信を処理します。
   全processが待ちへ入ったidleではdispatch loopが`wfi`で眠り、受信割り込みで`BlockedOnStdin`のprocessを起こします（`cargo xtask test irq-uart`で検証）。
-- **virtio-blkの割り込み化**：polling waitを割り込み完了に置き換え、I/O待ちのprocessを`BlockedOnIo`で退避させます。
+- **virtio-blkの割り込み化**（完了）：deviceのused-buffer完了をPLIC経由のvirtio割り込みで受け取り、I/O完了待ちのprocessを`BlockedOnIo`で退避させます。
+  virtio-mmioのsource番号はFDT nodeの`interrupts`宣言から取り（node列挙順はslot順とは限らないため）、claimがdeviceのinterrupt lineをackします。
+  requestは`in_flight`/`done`の状態機械で追跡し、retryが同じ完了をused ringから回収します（`cargo xtask test irq-blk`で検証）。
 - **virtio-net driver**：frameの送受信をringで扱い、hostの`-netdev user`で疎通を確認します。
 - **最小のnetwork stack**：ARP、IPv4、ICMP echo、UDPまでを実装し、TCPは対象外とします。
   guestへは`socket`、`sendto`、`recvfrom`の三つのsyscallで公開します。

@@ -31,10 +31,12 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
 - `user.S`：`sscratch`と`sp`を交換して専用kernel trap stackへ全registerを保存し、`sret`でU-modeと往復します。
 - `trap.S`：S-modeで発生したtimerなどのtrapを保存し、既存のS-mode handlerへ渡します。
 - `trap.rs`：`scause`を`Interrupt`と`Exception`へ分け、Direct modeの`stvec`初期化、timerとexternal割り込みの振り分け、breakpointの受け入れテスト、予期しないtrapの診断を担当します。
-  external割り込みはPLICの`claim`でsourceを確定し、UART sourceは`drivers::uart`の受信処理へ渡してから`complete`で締めます。
+  external割り込みはPLICの`claim`でsourceを確定し、UART sourceは`drivers::uart`の受信処理へ、virtio sourceは`drivers::virtio_mmio`のinterrupt ackへ渡してから`complete`で締めます。
 
 ### 機器とコンソール
 
+- `drivers/plic.rs`：QEMU `virt`のPLICを初期化し、S-mode contextのthreshold・優先度・enable・claim/completeを提供します。
+  UART受信とvirtio used-buffer完了の二系統のsourceをdispatchし、FDTにPLICが無いmachineでは無効のままpolling経路へ退避します。
 - `drivers/uart.rs`：QEMU `virt`の16550互換UARTについて、`write_byte`、`read_byte`、`has_byte`、`fmt::Write`だけを公開します。
   文字列の扱いとcommand処理は持ちません。
 - `drivers/neorv32_uart.rs`：NEORV32のUART0について、ボーレート設定、送信FIFO待ち、受信確認を提供します。
@@ -120,6 +122,9 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   全processが待ちへ入ったidleでは、dispatch loopがtimerとexternalのpendingを確認してから`wfi`で眠り、UART受信割り込みか次のtickで起床します。
   `waitpid`も同じBlocked再実行モデルで、対象processがliveなら呼び出しprocessを`BlockedOnPid`へ移し、対象の終了で起こして終了codeを返します。
   `pipe`の`read`/`write`も同じモデルで、空のread（write端がlive）と満杯のwrite（read端がlive）は呼び出しprocessを`BlockedOnPipe`へ移し、同pipeへのdata到着・空き発生・端のclose・process終了で起こしてecallをやり直します。
+  file I/Oも同じモデルで、virtioのrequest完了が短期poll内に来ない場合は呼び出しprocessを`BlockedOnIo`へ移し、used-buffer割り込みが届いた時点で起こして同じecallをやり直します。
+  retryは`in_flight`なrequestの完了をused ringから回収するため、desc chainの再投入は起きません。
+  この中断が許されるのは`read`/`pread`/`open`/`stat`/`readdir`などの読み取り系だけで、`write`/`pwrite`/`create`/`unlink`/`rename`/`mkdir`/`rmdir`のような更新系は部分commitを残したままやり直すと壊れるため、opの間だけ`WouldBlock`を無効にしてrequestをinlineで完結させます。
   Stdin frameの受信は`StdinStaging`内の再開可能なdecoderがbyte単位で蓄積し、frame途中でbyteが尽きた再試行は`WouldBlock`として再び`Blocked`へ戻るため、受信途中の間も他processが進み続けます。
 
 ### シェル

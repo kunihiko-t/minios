@@ -179,6 +179,7 @@ pub enum TestKind {
     SchedIo,
     SchedIoPartial,
     IrqUart,
+    IrqBlk,
     ProcFault,
     ProcKill,
     Shell,
@@ -251,6 +252,7 @@ impl TestKind {
                 unreachable!("the sched-io-partial test boots the normal kernel")
             }
             Self::IrqUart => "qemu-test-irq-uart",
+            Self::IrqBlk => "qemu-test-irq-blk",
             Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
             Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
@@ -330,6 +332,9 @@ impl TestKind {
             }
             Self::IrqUart => {
                 unreachable!("the irq-uart test verifies control frames and the irq marker")
+            }
+            Self::IrqBlk => {
+                unreachable!("the irq-blk test verifies control frames and the irq marker")
             }
             Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
             Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
@@ -1011,6 +1016,21 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let completed = run_sched_io_command(command, command_line.clone(), deadline)?;
         bundle.remove();
         return verify_irq_uart_result(&command_line, completed.status.code(), &completed.output);
+    }
+
+    if kind == TestKind::IrqBlk {
+        let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
+        let bundle = PayloadBundle::create_file()?;
+        let disk = crate::disk::DiskImage::create().map_err(|error| QemuError::Bundle {
+            stage: "disk image",
+            error,
+        })?;
+        let (command, command_line) =
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        bundle.remove();
+        disk.remove();
+        return verify_irq_blk_result(&command_line, completed.status.code(), &completed.output);
     }
 
     if kind == TestKind::Shell {
@@ -2651,6 +2671,59 @@ fn verify_irq_uart_result(
         });
     }
     Ok(output)
+}
+
+/// irq-blk検査: fileと同じguestを走らせ、file読み取りの完了内容に加えて
+/// disk I/Oの完了がvirtioのused-buffer割り込みのclaim経由だったことを示す
+/// markerを要求する。markerは追加のDiagnostic frameとして出るため、file側の
+/// exact-match検証は使えず、収集したframeの中身を条件で検査する。
+/// markerが無いまま全frameが揃う場合はpollingだけで完了しており、割り込み
+/// 経路は検証できていないため失敗とする。
+const IRQ_BLK_MARKER: &str = "[MINIOS_TEST] irq-blk: ok";
+
+fn verify_irq_blk_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let invalid = || QemuError::PayloadFrames {
+        command: command.to_owned(),
+        output: output.to_owned(),
+    };
+    let frames = collect_payload_frames(output.as_bytes()).ok_or_else(invalid)?;
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    let mut last_diagnostic = String::new();
+    for (kind, payload) in &frames {
+        match kind {
+            FrameKind::Stdout => stdout.extend_from_slice(payload),
+            FrameKind::Exit => {
+                exit_code = payload
+                    .get(..4)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u32::from_le_bytes);
+            }
+            FrameKind::Diagnostic => {
+                last_diagnostic = String::from_utf8_lossy(payload).into_owned();
+            }
+            _ => {}
+        }
+    }
+    let ok = stdout == b"note inside docs\n"
+        && exit_code == Some(42)
+        && last_diagnostic == "\r\nMiniOS payload: ok code=42\n"
+        && output.contains(IRQ_BLK_MARKER);
+    if !ok {
+        return Err(invalid());
+    }
+    Ok(output.to_owned())
 }
 
 fn verify_payload_args_result(

@@ -18,6 +18,20 @@ use minios_abi::{
 
 use super::{ConsoleFd, ControlSink, ControlSource, FD_TABLE_LEN, SyscallFlow};
 
+/// `EAGAIN`なら`sepc`をecallへ戻して`Blocked`を返し、入力到着やI/O完了の
+/// 再試行が同じsyscallをやり直す。guestへ`EAGAIN`自体が返ることはない。
+/// pipeやdisk I/Oの完了待ちでmark済みのcallerが使う。それ以外のerrnoは
+/// そのまま`a0`へ書いて`Resume`を返す。
+fn errno_flow<E, SE>(context: &mut UserContext, errno: isize) -> SyscallFlow<E, SE> {
+    if errno == EAGAIN {
+        context.set_sepc(context.sepc() - 4);
+        SyscallFlow::Blocked
+    } else {
+        context.set_register(10, errno as usize);
+        SyscallFlow::Resume
+    }
+}
+
 /// `a7`のsystem call番号に従って`context`を処理する。
 ///
 /// 各syscallはguest pointerをRust参照として解することなく引数を検証し、
@@ -111,10 +125,7 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
                 context.set_register(10, 0);
                 SyscallFlow::Yield
             }
-            Err(errno) => {
-                context.set_register(10, errno as usize);
-                SyscallFlow::Resume
-            }
+            Err(errno) => errno_flow(context, errno),
         }
     } else if number == SyscallNumber::Yield as usize {
         context.set_register(10, 0);
@@ -181,17 +192,9 @@ fn dispatch_read<M: FrameStore, E, R: ControlSource>(
             start,
             len: count.min(len),
         },
-        // `EAGAIN`はcontrol層がcallerをpipe待ちへmark済みのsignalであり、
-        // stdinの`Ok(None)`と同じくecallへ戻して再実行する。guestへ
-        // `EAGAIN`自体が返ることはない。
-        Err(EAGAIN) => {
-            context.set_sepc(context.sepc() - 4);
-            SyscallFlow::Blocked
-        }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        // `EAGAIN`はcontrol層がcallerをpipe待ちやI/O完了待ちへmark済みの
+        // signalであり、stdinの`Ok(None)`と同じくecallへ戻して再実行する。
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -265,7 +268,7 @@ fn dispatch_open<M: FrameStore, E, R: ControlSource>(
     };
     match result {
         Ok(fd) => context.set_register(10, fd),
-        Err(errno) => context.set_register(10, errno as usize),
+        Err(errno) => return errno_flow(context, errno),
     }
     SyscallFlow::Resume
 }
@@ -290,7 +293,7 @@ fn dispatch_path_op<M: FrameStore, E, R: ControlSource>(
     };
     match op(source, path) {
         Ok(()) => context.set_register(10, 0),
-        Err(errno) => context.set_register(10, errno as usize),
+        Err(errno) => return errno_flow(context, errno),
     }
     SyscallFlow::Resume
 }
@@ -322,7 +325,7 @@ fn dispatch_rename<M: FrameStore, E, R: ControlSource>(
     };
     match source.rename(old_path, new_path) {
         Ok(()) => context.set_register(10, 0),
-        Err(errno) => context.set_register(10, errno as usize),
+        Err(errno) => return errno_flow(context, errno),
     }
     SyscallFlow::Resume
 }
@@ -360,10 +363,7 @@ fn dispatch_spawn<M: FrameStore, E, R: ControlSource>(
     let mut ends = [0usize; SPAWN_MAX_ARGC];
     let argc = match copy_spawn_argv(context, space, memory, &mut strings, &mut ends) {
         Ok(argc) => argc,
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            return SyscallFlow::Resume;
-        }
+        Err(errno) => return errno_flow(context, errno),
     };
     let mut argv = [""; SPAWN_MAX_ARGC];
     let mut start = 0;
@@ -374,7 +374,7 @@ fn dispatch_spawn<M: FrameStore, E, R: ControlSource>(
     }
     match source.spawn(path, &argv[..argc]) {
         Ok(pid) => context.set_register(10, pid),
-        Err(errno) => context.set_register(10, errno as usize),
+        Err(errno) => return errno_flow(context, errno),
     }
     SyscallFlow::Resume
 }
@@ -447,10 +447,7 @@ fn dispatch_exec<M: FrameStore, E, R: ControlSource>(
             *context = initial;
             SyscallFlow::Exec
         }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -471,10 +468,7 @@ fn dispatch_waitpid<E, R: ControlSource>(
             context.set_sepc(context.sepc() - 4);
             SyscallFlow::Blocked
         }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -490,10 +484,7 @@ fn dispatch_kill<E, R: ControlSource>(
             context.set_register(10, 0);
             SyscallFlow::Resume
         }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -528,10 +519,7 @@ fn dispatch_stat<M: FrameStore, E, R: ControlSource>(
                 len: STAT_LEN,
             }
         }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -572,10 +560,7 @@ fn dispatch_fstat<M: FrameStore, E, R: ControlSource>(
                 len: STAT_LEN,
             }
         }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -623,10 +608,7 @@ fn dispatch_readdir<M: FrameStore, E, R: ControlSource>(
             context.set_register(10, 0);
             SyscallFlow::Resume
         }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -655,7 +637,7 @@ fn dispatch_lseek<E, R: ControlSource>(
     }
     match source.seek_fd(fd, context.register(11) as isize, context.register(12)) {
         Ok(offset) => context.set_register(10, offset as usize),
-        Err(errno) => context.set_register(10, errno as usize),
+        Err(errno) => return errno_flow(context, errno),
     }
     SyscallFlow::Resume
 }
@@ -694,10 +676,7 @@ fn dispatch_pread<M: FrameStore, E, R: ControlSource>(
             start,
             len: count.min(len),
         },
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -738,7 +717,7 @@ fn dispatch_pwrite<M: FrameStore, E, R: ControlSource>(
     }
     match source.pwrite_fd(fd, context.register(13) as u64, &buffer[..len]) {
         Ok(count) => context.set_register(10, count.min(len)),
-        Err(errno) => context.set_register(10, errno as usize),
+        Err(errno) => return errno_flow(context, errno),
     }
     SyscallFlow::Resume
 }
@@ -767,10 +746,7 @@ fn dispatch_pipe<M: FrameStore, E, R: ControlSource>(
                 len: PIPE_OUT_LEN,
             }
         }
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -787,7 +763,7 @@ fn dispatch_close<E, R: ControlSource>(
     }
     match source.close_fd(fd) {
         Ok(()) => context.set_register(10, 0),
-        Err(errno) => context.set_register(10, errno as usize),
+        Err(errno) => return errno_flow(context, errno),
     }
     SyscallFlow::Resume
 }
@@ -883,10 +859,7 @@ fn dispatch_read_file<M: FrameStore, E, R: ControlSource>(
             start: buf_start,
             len: count.min(buf_len),
         },
-        Err(errno) => {
-            context.set_register(10, errno as usize);
-            SyscallFlow::Resume
-        }
+        Err(errno) => errno_flow(context, errno),
     }
 }
 
@@ -945,16 +918,9 @@ fn dispatch_write<M: FrameStore, S: ControlSink, R: ControlSource>(
                 context.set_register(10, count.min(len));
                 SyscallFlow::Resume
             }
-            // `read`と同じく、pipe満杯でmark済みのcallerはecallへ戻して
-            // 再実行する。
-            Err(EAGAIN) => {
-                context.set_sepc(context.sepc() - 4);
-                SyscallFlow::Blocked
-            }
-            Err(errno) => {
-                context.set_register(10, errno as usize);
-                SyscallFlow::Resume
-            }
+            // `read`と同じく、pipe満杯やI/O完了待ちでmark済みのcallerは
+            // ecallへ戻して再実行する。
+            Err(errno) => errno_flow(context, errno),
         },
     }
 }

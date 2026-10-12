@@ -322,6 +322,23 @@ pub(crate) unsafe fn current_pid() -> Option<usize> {
     unsafe { process.as_ref() }.map(Process::pid)
 }
 
+/// file I/Oの完了待ちでcallerを`BlockedOnIo`へ移す。storage errno写像が
+/// `VirtioError::WouldBlock`を`EAGAIN`へ変える直前に呼び、dispatchの
+/// `Blocked`経路で同じecallが後でやり直されることを保証する。
+/// process contextがなければ何もしない（kernel shell経路では発生しない）。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn block_current_on_io() {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    if let Some(process) = unsafe { process.as_mut() } {
+        process.block_on_io();
+    }
+}
+
 /// ELFを新processとして読み込む。kernel mappingは`KERNEL_MAP_PLAN_PTR`、
 /// user memoryは`USER_SYSCALL_PROBE_MEMORY`、frameは`GlobalFrames`を使う。
 /// `USER_SYSCALL_PROBE_MEMORY`を指す`&`参照はこの呼び出し中に再使用

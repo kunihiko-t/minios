@@ -340,7 +340,10 @@ pub(crate) fn probe_and_mount(
 
     let spec = crate::machine::spec();
     let mut last_init_error = None;
-    for &base in &spec.virtio_mmio[..spec.virtio_mmio_count] {
+    for (slot, &base) in spec.virtio_mmio[..spec.virtio_mmio_count]
+        .iter()
+        .enumerate()
+    {
         // Safety: `base`はFDTが報告したMMIO領域で、`with_device_pages`が
         // S-mode R+Wとしてmap済み。
         let mmio = unsafe { crate::drivers::virtio_mmio::MmioRegs::new(base) };
@@ -349,6 +352,14 @@ pub(crate) fn probe_and_mount(
         };
         match VirtioBlk::init(mmio, crate::VirtioRegionPage::new(frame)) {
             Ok(blk) => {
+                // block deviceのused-buffer完了をPLIC経由で受け、
+                // `BlockedOnIo`のprocessを起こせるようにする。source番号は
+                // FDTがnodeへ宣言した`interrupts`の値を使う（node列挙順は
+                // slot順とは限らないためindexからは推測しない）。
+                let source = spec.virtio_mmio_irq[slot];
+                if source != 0 {
+                    crate::drivers::plic::enable(source);
+                }
                 return crate::storage::fat32::Fat32::mount(blk).map_err(Rv64StorageError::Fat);
             }
             Err(

@@ -253,6 +253,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::SchedIo) => "QEMU sched-io test".to_owned(),
             Self::Qemu(qemu::TestKind::SchedIoPartial) => "QEMU sched-io-partial test".to_owned(),
             Self::Qemu(qemu::TestKind::IrqUart) => "QEMU irq-uart test".to_owned(),
+            Self::Qemu(qemu::TestKind::IrqBlk) => "QEMU irq-blk test".to_owned(),
             Self::Qemu(qemu::TestKind::ProcFault) => "QEMU proc-fault test".to_owned(),
             Self::Qemu(qemu::TestKind::ProcKill) => "QEMU proc-kill test".to_owned(),
             Self::Qemu(qemu::TestKind::Shell) => "QEMU shell test".to_owned(),
@@ -305,6 +306,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
         Phase::Qemu(qemu::TestKind::IrqUart),
+        Phase::Qemu(qemu::TestKind::IrqBlk),
         Phase::Qemu(qemu::TestKind::ProcFault),
         Phase::Qemu(qemu::TestKind::ProcKill),
         Phase::Qemu(qemu::TestKind::Shell),
@@ -368,6 +370,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::SchedIo),
         Phase::Qemu(qemu::TestKind::SchedIoPartial),
         Phase::Qemu(qemu::TestKind::IrqUart),
+        Phase::Qemu(qemu::TestKind::IrqBlk),
         Phase::Qemu(qemu::TestKind::ProcFault),
         Phase::Qemu(qemu::TestKind::ProcKill),
         Phase::Qemu(qemu::TestKind::Shell),
@@ -539,6 +542,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
             Some(vec![Phase::Qemu(qemu::TestKind::SchedIoPartial)])
         }
         Command::Test(TestFilter::IrqUart) => Some(vec![Phase::Qemu(qemu::TestKind::IrqUart)]),
+        Command::Test(TestFilter::IrqBlk) => Some(vec![Phase::Qemu(qemu::TestKind::IrqBlk)]),
         Command::Test(TestFilter::ProcFault) => Some(vec![Phase::Qemu(qemu::TestKind::ProcFault)]),
         Command::Test(TestFilter::ProcKill) => Some(vec![Phase::Qemu(qemu::TestKind::ProcKill)]),
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
@@ -675,6 +679,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::SchedIo),
                 Phase::Qemu(qemu::TestKind::SchedIoPartial),
                 Phase::Qemu(qemu::TestKind::IrqUart),
+                Phase::Qemu(qemu::TestKind::IrqBlk),
                 Phase::Qemu(qemu::TestKind::ProcFault),
                 Phase::Qemu(qemu::TestKind::ProcKill),
                 Phase::Qemu(qemu::TestKind::Shell),
@@ -760,6 +765,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
             Phase::Qemu(qemu::TestKind::IrqUart),
+            Phase::Qemu(qemu::TestKind::IrqBlk),
             Phase::Qemu(qemu::TestKind::ProcFault),
             Phase::Qemu(qemu::TestKind::ProcKill),
             Phase::Qemu(qemu::TestKind::Shell),
@@ -838,6 +844,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::SchedIo),
             Phase::Qemu(qemu::TestKind::SchedIoPartial),
             Phase::Qemu(qemu::TestKind::IrqUart),
+            Phase::Qemu(qemu::TestKind::IrqBlk),
             Phase::Qemu(qemu::TestKind::ProcFault),
             Phase::Qemu(qemu::TestKind::ProcKill),
         ];
@@ -846,7 +853,7 @@ mod tests {
             &plan[host_tests_end + 7..host_tests_end + 7 + expected.len()],
             expected
         );
-        assert_eq!(plan.len(), 58);
+        assert_eq!(plan.len(), 59);
     }
 
     #[test]
