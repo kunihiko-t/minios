@@ -77,8 +77,9 @@ frame allocatorの管理上端はこのヒープ初期位置まで下がり、�
 
 [`kernel/src/main.rs`](../../kernel/src/main.rs)の`GlobalAlloc`実装は、`heap.alloc`が失敗すると`heap.start() - PAGE_SIZE`を`allocate_at`で要求し、`extend_down`で取り込んでから再び`alloc`を試します。
 要求が収まるまでこれを1 pageずつ繰り返し、隣接pageが取れなければnullを返して`alloc` crateのOOM処理へ渡します。
-`dealloc`は空きlistへ戻すだけで、取り込んだpageをframe poolへ返す経路はありません。
-返却を省いたことで、ヒープは常に一つの連続領域であり続けます。
+`dealloc`は空きlistへ戻すだけでなく、その直後に`release_grown_pages`で下端の空きpageを連続するかぎり切り離し、呼び出し側が`FrameAllocator`へ返します。
+切り離せるのは`init`時点の下端（`init_start`）より下の成長分だけで、初期領域はpoolの管理範囲外のため返しません。
+領域は常に一つの連続領域であり続けるため、内部で空いたpageは下端へ連続するまで返却を待ちます。
 
 起動時の`frames_base`は、`FrameAllocator::<512>::CAPACITY_FRAMES`を超えるRAMの下端側を管理対象から外し、管理範囲をヒープの直下へ寄せます。
 これにより、ヒープが`allocate_at`で要求する番地は常にbitmapの管理範囲内に届きます。
@@ -115,6 +116,7 @@ $ cargo xtask test heap
 ...
 [ok] memory
 [MINIOS_TEST] heap: grew total=2101248 pool_free=29525
+[MINIOS_TEST] heap: returned total=1048576 pool_allocated=63
 [MINIOS_TEST] heap: total=1048576 largest_free=1046512 blocks=2
 [MINIOS_TEST] heap: ok
 phase 1/1 passed (elapsed: ...)
@@ -122,9 +124,8 @@ summary: PASSED all 1 phases (elapsed: ...)
 ```
 
 kernel側の`run_heap_test`は、`Vec`の成長と`Box`の再利用を確かめた後、`KERNEL_HEAP_LEN + PAGE_SIZE`の`try_reserve_exact`で初期領域を超える割り当てを要求します。
-heapの`total`とframe poolの`allocated`がともに増え、解放後にheap側の`allocated`が元へ戻った場合だけ`heap: ok`を出力します。
-frame poolの`allocated`は、取り込んだpageを返さないため減りません。
-host harnessが検査するのは`heap: ok`の行で、`grew`と`total`の行は値を読むための診断です。
+heapの`total`とframe poolの`allocated`がともに増え、解放後にheap側の`allocated`が元へ戻り、成長pageがpoolへ返されて`total`とpool側の`allocated`が成長前の基準へ戻った場合だけ`heap: ok`を出力します。
+host harnessが検査するのは`heap: ok`の行で、`grew`、`returned`、`total`の行は値を読むための診断です。
 
 ## よくある失敗
 
@@ -132,7 +133,7 @@ host harnessが検査するのは`heap: ok`の行で、`grew`と`total`の行は
 - `/cpus`の`#size-cells = <0>`を不正値として扱う：`cpu@n`の`reg`はsize fieldを持たず、`decode_reg`はcells数0を正当な形として受け付けます。
 - DTBの置き場所を確かめない：FDTがRAM最後の2 MiBの外にあるmachineではpayload窓がDTBを上書きし得るため、`discover`は`UnsupportedMachine`で拒否します。
 - ヒープ領域と離れたframeを`extend_down`へ渡す：`new_start + len`が`start`と一致しない領域は`NotContiguous`で拒否され、heapは成長しません。
-- 解放したヒープpageがpoolへ戻ると期待する：取り込んだpageは空きlistに残るだけで、`FrameStats`の`allocated`は減りません。
+- 解放したヒープpageがすぐpoolへ戻ると期待する：返せるのは下端に連続した空きpageだけなので、成長分の内部にspanが残る間は`FrameStats`の`allocated`は減りません。
 - 所有frame台帳の`push`失敗でframeを捨てる：`CapacityExceeded`と一緒に返るframeは呼び出し側が`deallocate`しないとリークします。
 
 ## 演習

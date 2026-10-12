@@ -489,11 +489,25 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        if let Some(ptr) = core::ptr::NonNull::new(ptr) {
-            // spanの検証失敗（領域外・二重解放）は安全側の見逃しとして
-            // 解放せずに残す。破壊よりリークを選ぶ。
-            let _ = self.with(|heap| unsafe { heap.dealloc(ptr) });
-        }
+        let Some(ptr) = core::ptr::NonNull::new(ptr) else {
+            return;
+        };
+        // spanの検証失敗（領域外・二重解放）は安全側の見逃しとして
+        // 解放せずに残す。破壊よりリークを選ぶ。
+        let _ = self.with(|heap| unsafe { heap.dealloc(ptr) });
+        // 成長分の下端がpage単位で空いたらframe poolへ返す。
+        // 初期領域はpoolの管理範囲外なので`init_start`を境に返さない。
+        // lock順序はallocと同じheap→framesである。
+        let mut frames = GlobalFrames;
+        self.with(|heap| {
+            heap.release_grown_pages(|start| {
+                // Safety: heapが切り離したpageは成長時にpoolから借りた
+                // frameであり、管理外になった今、所有者はここだけである。
+                if let Ok(frame) = unsafe { PhysFrame::from_start(start) } {
+                    let _ = frames.deallocate(frame);
+                }
+            })
+        });
     }
 }
 
@@ -977,6 +991,20 @@ fn run_heap_test() {
     if KERNEL_HEAP.stats().allocated != baseline.allocated {
         fatal_qemu_test(format_args!("heap: grown allocation was not released"));
     }
+    // 成長分がまとめて空くと、下端の空きpageはframe poolへ返され、
+    // 領域とpoolの占有は成長前の基準へ戻る。
+    let released = KERNEL_HEAP.stats();
+    let frames_released = GlobalFrames.stats();
+    if released.total != KERNEL_HEAP_LEN || frames_released.allocated != frames_before.allocated {
+        fatal_qemu_test(format_args!(
+            "heap: grown pages were not returned: stats={released:?} frames={frames_released:?}"
+        ));
+    }
+    crate::println!(
+        "[MINIOS_TEST] heap: returned total={} pool_allocated={}",
+        released.total,
+        frames_released.allocated
+    );
 
     crate::println!(
         "[MINIOS_TEST] heap: total={} largest_free={} blocks={}",

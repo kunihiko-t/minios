@@ -118,11 +118,11 @@ user heap、時刻と待機、fdの複製、spawnへの引数渡し、user libra
   FAT32はdirectory、cluster chain、write pathへ、syscallはfile、process、pipeへ、`main.rs`はboot段階ごとのmoduleへ分けます。
 - **user pointer検査の一本化**：各syscallが個別に行っているrangeとPTE権限の検査を`copy_from_user`と`copy_to_user`に集めます。
   検査漏れが起きる場所を一箇所に絞るためです。
-- **processの異常終了の統一**：fatal trapを起こしたprocessの回収経路が、単一実行時の`UserRun`と複数process時の`ProcessTable`で分かれています。
-  複数process時にfatal trapが起きても他のprocessが継続し、`waitpid`が異常終了codeを受け取れることを経路として固定します。
-- **`kill`**：親が子を止める手段がないため、`kill(pid)`を追加して`waitpid`へ終了codeを渡します。
-- **heap成長pageの返却**：OOMで取り込んだpageをheapが返さないため、長時間動かすとprocess用のframeが減り続けます。
-  free-listの末尾がpage境界で空いたときに`FrameAllocator`へ返す経路を追加します。
+- **processの異常終了の統一**（完了）：fatal trapを起こしたprocessの回収経路が、単一実行時の`UserRun`と複数process時の`ProcessTable`で分かれていました。
+  複数process時にfatal trapが起きても他のprocessが継続し、`waitpid`が異常終了codeを受け取れる経路として`cargo xtask test proc-fault`で固定しています。
+- **`kill`**（完了）：`kill(pid)`（番号28）を追加し、対象を`Killed`へmarkしてrun loopが`waitpid`へ終了code `EXIT_CODE_KILLED`（75）を渡します（`cargo xtask test proc-kill`で検証）。
+- **heap成長pageの返却**（完了）：`dealloc`の直後に`Heap::release_grown_pages`が下端の連続した空きpageを`init_start`まで切り離し、`GlobalAlloc`実装が`FrameAllocator`へ返します。
+  初期領域はpoolの管理範囲外のため返さず、`cargo xtask test heap`で返却後の基準復元を検証しています。
 - **FAT32 write pathの整合性**：FSInfoのfree cluster数とcluster chainの検査をhost testで固定し、途中で電源が落ちた相当のimageを読み込んだときの振る舞いを決めます。
 - **host側のfuzz test**：FAT32 parser、ELF header、MiniBundle manifestの三つのparserに`cargo fuzz`の経路を置きます。
   release gateには含めず、手動実行の手順を`CONTRIBUTING.md`へ書きます。
