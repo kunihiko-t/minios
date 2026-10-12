@@ -1,11 +1,11 @@
 use crate::storage::SectorReader;
 
+#[cfg(not(target_arch = "riscv32"))]
+use super::parse::is_valid_component;
 use super::parse::{
     PendingLfn, is_extended_partition, matches_component, normalize_input_name, parse_boot_sector,
     parse_dir_entry, read_u32,
 };
-#[cfg(not(target_arch = "riscv32"))]
-use super::parse::is_valid_component;
 use super::{DirEntry, DirLoc, Fat32, FatError, Geometry, ParseError};
 #[cfg(not(target_arch = "riscv32"))]
 use super::{FileDesc, FileStat};
