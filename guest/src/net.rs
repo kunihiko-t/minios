@@ -4,9 +4,9 @@
 //! `sendto`/`recvfrom`がdatagramを運ぶ。`recvfrom`は未受信なら
 //! datagram到着までcaller processをblockする。
 
-use minios_abi::syscall::SOCKADDR_LEN;
+use minios_abi::syscall::{EMFILE, SOCKADDR_LEN};
 
-use crate::{Result, check, sys};
+use crate::{Result, check, process::sleep_ms, sys};
 
 /// `sendto`/`recvfrom`が受け渡すIPv4 socket address。`ip`はdotted-quad順を
 /// 整数で保持し（`10.0.2.15`なら`0x0A00020F`）、wire上はLE 8 byte
@@ -59,6 +59,21 @@ impl UdpSocket {
     /// UDP socketを開く。
     pub fn new() -> Result<Self> {
         check(sys::sys_socket()).map(|index| Self { index })
+    }
+
+    /// table満杯で`EMFILE`になる間はsleepして再試行する。sleep中は
+    /// 他processへCPUが渡るので、占有側が終了して自動回収されれば
+    /// 有限回で取れる。他processがsocketを持ち続ける場合だけ
+    /// `RETRY_LIMIT`を超えて最後の`EMFILE`を返す。
+    pub fn new_waiting() -> Result<Self> {
+        const RETRY_LIMIT: usize = 1_000;
+        for _ in 0..RETRY_LIMIT {
+            match Self::new() {
+                Err(errno) if errno.0 == EMFILE => sleep_ms(1),
+                other => return other,
+            }
+        }
+        Self::new()
     }
 
     /// `data`を`dst`へ1 datagramとして送る。戻り値は送ったbyte数。

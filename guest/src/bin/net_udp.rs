@@ -23,7 +23,9 @@ const PAYLOAD: &[u8] = b"minios udp echo\n";
 minios_guest::entry!(main);
 
 fn main(_args: Args) -> i32 {
-    let socket = UdpSocket::new().unwrap();
+    // net-sock検査ではnet-hogがtableを満杯にしている間に起きるため、
+    // 解放を待つ`new_waiting`で開く。単独のnet-udp検査では直ちに取れる。
+    let socket = UdpSocket::new_waiting().unwrap();
     assert_eq!(socket.send_to(PAYLOAD, ECHO_ADDR), Ok(PAYLOAD.len()));
 
     let mut buf = [0u8; 512];
