@@ -872,6 +872,11 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         qemu_test::run_net_ping_test(machine, &mut frames);
     }
 
+    #[cfg(feature = "qemu-test-smp-boot")]
+    {
+        qemu_test::smp_boot::run(hart_id);
+    }
+
     if let Some(payload) = payload {
         payload::run_boot_payload(&kernel_space, &plan, &mut frames, &mut memory, payload);
     }
@@ -977,7 +982,8 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
         feature = "qemu-test-heap",
         feature = "qemu-test-virtio",
         feature = "qemu-test-net-arp",
-        feature = "qemu-test-net-ping"
+        feature = "qemu-test-net-ping",
+        feature = "qemu-test-smp-boot"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -999,7 +1005,8 @@ fn successful_qemu_test_shutdown() -> ! {
         feature = "qemu-test-heap",
         feature = "qemu-test-virtio",
         feature = "qemu-test-net-arp",
-        feature = "qemu-test-net-ping"
+        feature = "qemu-test-net-ping",
+        feature = "qemu-test-smp-boot"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {

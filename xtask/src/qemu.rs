@@ -37,6 +37,7 @@ const HEAP_MARKER: &str = "[MINIOS_TEST] heap: ok";
 const VIRTIO_MARKER: &str = "[MINIOS_TEST] virtio: ok";
 const NET_ARP_MARKER: &str = "[MINIOS_TEST] net-arp: ok";
 const NET_PING_MARKER: &str = "[MINIOS_TEST] net-ping: ok";
+const SMP_BOOT_MARKER: &str = "[MINIOS_TEST] smp-boot: ok";
 const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
 /// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
 const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
@@ -196,6 +197,7 @@ pub enum TestKind {
     ProcFault,
     ProcKill,
     Shell,
+    SmpBoot,
 }
 
 impl TestKind {
@@ -273,6 +275,7 @@ impl TestKind {
             }
             Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
             Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
+            Self::SmpBoot => "qemu-test-smp-boot",
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -362,6 +365,7 @@ impl TestKind {
             Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
             Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
+            Self::SmpBoot => SMP_BOOT_MARKER,
         }
     }
 
@@ -1108,6 +1112,12 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
             completed.status.code(),
             &completed.output,
         );
+    }
+
+    if kind == TestKind::SmpBoot {
+        let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
+        let (command, command_line) = qemu_command_with_harts(&kernel, 2);
+        return run_marker_test(kind, command, command_line, deadline);
     }
 
     let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
@@ -3591,7 +3601,11 @@ fn qemu_command_with_payload_and_net(kernel: &Path, bundle: &Path) -> (Command, 
 }
 
 fn qemu_command(kernel: &Path) -> (Command, String) {
-    let args = qemu_args(kernel);
+    qemu_command_with_harts(kernel, 1)
+}
+
+fn qemu_command_with_harts(kernel: &Path, harts: usize) -> (Command, String) {
+    let args = qemu_args_with_harts(kernel, harts);
     let command_line = render_command(QEMU_PROGRAM, &args);
     let mut command = Command::new(QEMU_PROGRAM);
     command.args(&args);
@@ -3616,13 +3630,17 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn qemu_args(kernel: &Path) -> Vec<String> {
+    qemu_args_with_harts(kernel, 1)
+}
+
+fn qemu_args_with_harts(kernel: &Path, harts: usize) -> Vec<String> {
     vec![
         "-machine".to_owned(),
         "virt".to_owned(),
         "-m".to_owned(),
         "128M".to_owned(),
         "-smp".to_owned(),
-        "1".to_owned(),
+        harts.to_string(),
         "-bios".to_owned(),
         "default".to_owned(),
         "-kernel".to_owned(),

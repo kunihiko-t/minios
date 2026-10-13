@@ -6,7 +6,8 @@
     feature = "qemu-test-elf",
     feature = "qemu-test-memory",
     feature = "qemu-test-net-arp",
-    feature = "qemu-test-net-ping"
+    feature = "qemu-test-net-ping",
+    feature = "qemu-test-smp-boot"
 ))]
 use super::*;
 
@@ -892,4 +893,87 @@ fn fatal_memory_test() -> ! {
         arch::riscv64::sbi::ResetType::Shutdown,
         arch::riscv64::sbi::ResetReason::SystemFailure,
     )
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-smp-boot"))]
+pub(crate) mod smp_boot {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// secondary hartの専用stack。HSM entryが`sp`をここへ切り替えるまで
+    /// Rustのコードは走らせられないため、bssの領域をそのまま使い切る。
+    /// `u128`要素で16 byte整列を担保する。
+    const SECONDARY_STACK_LEN: usize = 16 * 1024;
+    static mut SECONDARY_STACK: [u128; SECONDARY_STACK_LEN / 16] = [0; SECONDARY_STACK_LEN / 16];
+
+    static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
+    static SECONDARY_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// SBI HSM `hart_start`が呼ぶentry。`a0`=hart id、`a1`=opaqueで、
+    /// opaqueにはboot側がstack topを渡す。`sp`を立ててから
+    /// `secondary_main`へtail jumpする。entryの最初に`stvec`をpark
+    /// loopへ向け、stack未設定の区間のfaultを無限loopで留める。
+    #[unsafe(naked)]
+    unsafe extern "C" fn secondary_entry() -> ! {
+        core::arch::naked_asm!(
+            "lla t0, 1f",
+            "csrw stvec, t0",
+            "mv sp, a1",
+            "j {main}",
+            "1: wfi",
+            "j 1b",
+            main = sym secondary_main
+        )
+    }
+
+    /// secondary hartの起動確認だけを行い、以降はparkする。schedulerへの
+    /// 参加はsmp-sched段階の仕事で、ここではS-modeへ自力到達した証拠を
+    /// atomic flagとして残す。
+    extern "C" fn secondary_main(hart_id: usize) -> ! {
+        SECONDARY_HART.store(hart_id, Ordering::Relaxed);
+        SECONDARY_READY.store(true, Ordering::Release);
+        // `sie`が0なので`wfi`は何にも起こされない。spurious wakeupだけ吸収する。
+        loop {
+            // Safety: `wfi`は参照を持たない命令である。
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        }
+    }
+
+    /// `-smp 2`環境でboot hartがSBI HSM経由でsecondary hartを起動し、
+    /// secondaryがS-mode codeを実行したことをmarkerで観測する。
+    pub(crate) fn run(boot_hart: usize) {
+        // QEMU `virt`の`-smp 2`ではhart 0/1の二つ。boot側でない方を起こす。
+        let secondary = if boot_hart == 0 { 1 } else { 0 };
+        // Safety: SECONDARY_STACKはこのtest専用の静的領域で、起動される
+        // secondary hartだけがstackとして使う。参照は作らずraw pointerで
+        // 渡す。
+        let stack_top = (&raw mut SECONDARY_STACK)
+            .cast::<u8>()
+            .wrapping_add(SECONDARY_STACK_LEN) as usize;
+        if let Err(error) = arch::riscv64::sbi::hart_start(
+            secondary,
+            secondary_entry as *const () as usize,
+            stack_top,
+        ) {
+            fatal_qemu_test(format_args!(
+                "smp-boot: hart_start secondary={secondary} boot={boot_hart} entry=0x{:x} stack=0x{stack_top:x}: {error:?}",
+                secondary_entry as *const () as usize
+            ));
+        }
+        let deadline = time::ticks() + 100;
+        while !SECONDARY_READY.load(Ordering::Acquire) {
+            if time::ticks() >= deadline {
+                fatal_qemu_test(format_args!(
+                    "smp-boot: secondary hart {secondary} did not start"
+                ));
+            }
+        }
+        if SECONDARY_HART.load(Ordering::Relaxed) != secondary {
+            fatal_qemu_test(format_args!("smp-boot: wrong hart id"));
+        }
+        crate::println!("[MINIOS_TEST] smp-boot: secondary hart={secondary}");
+        crate::println!("[MINIOS_TEST] smp-boot: ok");
+        successful_qemu_test_shutdown()
+    }
 }

@@ -158,10 +158,10 @@ networkを扱うには、外部割り込みでdeviceの完了を受け取る基�
 最後に、単一hartの前提を外します。
 この段階は、heapの「割り込み内で割り当てない」規約と、`ProcessTable`のlockなし設計の両方を置き換えるため、前の段階が落ち着いてから着手します。
 
-- **hartごとのboot**：SBI HSMで二つ目以降のhartを起動し、hartごとのtrap stackとscheduler stateを持たせます。
+- **hartごとのboot**（一部完了）：SBI HSMで二つ目以降のhartを起動します。`smp-boot`が`-smp 2`でsecondary hartのS-mode到達を検証済みですが、hartごとのtrap stackとscheduler stateはこれからです。
 - **spinlock**：heap、`ProcessTable`、fd table、pipe bufferをlockで守ります。
 - **IPI**：process終了やpipeの起床を別hartへ通知します。
-- **QEMUの`-smp 2`**：release gateのQEMU経路を`-smp 1`と`-smp 2`の両方で実行します。
+- **QEMUの`-smp 2`**：release gateのQEMU経路を`-smp 1`と`-smp 2`の両方で実行します（現状は`smp-boot`のみ`-smp 2`）。
 
 受け入れ条件は、全既存経路が`-smp 2`でも同じframe列を出すことと、`cargo xtask test smp-sched`が二つのhartで同時に進むprocessを観測することです。
 

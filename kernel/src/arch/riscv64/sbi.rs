@@ -9,6 +9,11 @@ const SBI_TIME_SET_TIMER: usize = 0;
 // SBI仕様がSRST拡張に割り当てた拡張IDであり、OpenSBIの実装と一致させる。
 const SBI_EXT_SYSTEM_RESET: usize = 0x5352_5354;
 const SBI_SYSTEM_RESET: usize = 0;
+// SBI仕様がHSM拡張に割り当てた拡張ID ("HSM") と`hart_start`の関数IDである。
+#[cfg(feature = "qemu-test-smp-boot")]
+const SBI_EXT_HSM: usize = 0x0048_534d;
+#[cfg(feature = "qemu-test-smp-boot")]
+const SBI_HSM_HART_START: usize = 0;
 
 #[repr(usize)]
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +32,13 @@ pub enum ResetReason {
 pub fn set_timer(deadline: u64) -> Result<usize, SbiError> {
     // RV64の`a0`は64ビット幅なので、絶対時刻を分割せずSBI TIMEへ渡せる。
     sbi_call(deadline as usize, 0, 0, SBI_TIME_SET_TIMER, SBI_EXT_TIME).into_result()
+}
+
+/// `hart_id`のhartを`start_addr`のS-mode entryで起動する。`opaque`は
+/// 起動されたhartの`a1`へ届く。SBI HSMの`hart_start` (FID 0) である。
+#[cfg(feature = "qemu-test-smp-boot")]
+pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<usize, SbiError> {
+    sbi_call(hart_id, start_addr, opaque, SBI_HSM_HART_START, SBI_EXT_HSM).into_result()
 }
 
 pub fn system_reset(reset_type: ResetType, reason: ResetReason) -> ! {

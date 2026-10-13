@@ -26,7 +26,7 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
 - `mod.rs`：RISC-V専用のassembly codeと`csr`、`sbi`、`trap`をまとめる境界です。
 - `csr.rs`：`scause`、`sepc`、`stval`、`time`、`sstatus`、`sie`の読み取りと、S-modeや各bitの不変条件を要求する`unsafe`な書き込みを提供します。
   `activate_sv39`はroot PPNから`MODE=8`の`satp`値を作り、`csrw satp`の直後に`sfence.vma`を実行します。
-- `sbi.rs`：`set_timer(deadline)`、型の付いたreset種別と理由、`system_reset`、割り込みを無効にした`wfi`を提供します。
+- `sbi.rs`：`set_timer(deadline)`、型の付いたreset種別と理由、`system_reset`、割り込みを無効にした`wfi`、SBI HSMの`hart_start`を提供します。
   共通の`SbiRet`と`SbiError`には、ホストでテストできるlibrary型を再利用します。
 - `user.S`：`sscratch`と`sp`を交換して専用kernel trap stackへ全registerを保存し、`sret`でU-modeと往復します。
 - `trap.S`：S-modeで発生したtimerなどのtrapを保存し、既存のS-mode handlerへ渡します。
@@ -234,5 +234,6 @@ queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`と�
 - `cargo xtask test net-arp`：`-netdev user`を持つ`virtio-net-device`を起動し、仮想networkのgateway 10.0.2.2へARP requestを送ってreplyを受け取ります。reply到達とdeviceのused-buffer割り込みがPLIC経由でclaimされたことを併せて検証します。
 - `cargo xtask test net-ping`：同じ構成でstackをkernel上で組み、ARP解決からICMP echo往復を行います。
 - `cargo xtask test net-udp`：payload経由のguestがsocket syscallsで`10.0.2.2`（slirpのhost alias）:7777のechoと往復します。harness側は`127.0.0.1:7777`でUDP echoを返し、`recvfrom`が実際に割り込み起床でdatagramを受け取ることを検証します。
+- `cargo xtask test smp-boot`：`-smp 2`で起動し、boot hartがSBI HSMの`hart_start`（EID `0x48534D`）でsecondary hartを起こします。secondaryは専用のbss stackへ`sp`を切り替え、`stvec`をpark loopへ向けてからatomic flagを立てて`wfi`で停車します。boot hartはflag到達をdeadline内に観測します。現段階ではsecondary hartはscheduleに参加せず、spinlock・IPI・per-hartのscheduler stateは今後の仕事です。
 
 addressと占有範囲は[メモリーマップ](memory-map.md)、用語は[用語集](glossary.md)を参照してください。
