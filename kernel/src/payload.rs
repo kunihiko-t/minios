@@ -153,6 +153,16 @@ pub(crate) fn run_boot_payload(
         fatal_payload_error(format_args!("MiniOS payload: timer, {error:?}\r\n"));
     }
 
+    // network stackはここでprobeする。lazyにすると最初の`socket`呼び出しに
+    // device initのコストが乗り、そのprocessのquantumを使い切って途中で
+    // preemptされ得る。deviceが無ければ失敗を捨て、`socket`側のlazy probe
+    // がそのまま再試行する。
+    // Safety: dispatch前で借用は残っていない。
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        init_net_stack();
+    }
+
     // Ready frameを最後のplain text出力の後に送り、以降のUARTをcontrol frame
     // へ限定する。
     control::send_ready();
