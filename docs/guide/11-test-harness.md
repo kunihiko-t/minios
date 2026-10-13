@@ -158,7 +158,7 @@ harnessは`127.0.0.1:7777`でechoを返し、guestは`recvfrom`でblockしたま
 `net-sock`では二つのimageを同じnetwork構成へ渡し、net-hog (pid 0) がsocket tableの全4 socketを開いて終了し、net-udp (pid 1) が同じtableからsocketを得てechoまで済ませます。
 table獲得の順序はschedulerのdispatch次第なので、net-udpが先にslotを掴んでhogが解放を待つrunもあります。どちらの順でも、片方の終了後にもう片方が成功するにはsocketの自動回収が必須です。
 開いたsocketがprocess終了時に自動回収されることが、両processの終了コード42の直接証拠になります（回収されなければ後続は`EMFILE`で失敗します）。
-`smp-boot`は`-smp 2`で起動する唯一のtestで、boot hartがSBI HSMの`hart_start`でsecondary hartを起こし、secondaryがS-modeへ到達してatomic flagを立てることをdeadline内に観測します。
+`smp-boot`は`-smp 2`で起動する唯一のtestで、boot hartがSBI HSMの`hart_start`でsecondary hartを起こし、secondaryがS-modeへ到達してconsole lock経由でprintしてatomic flagを立てることをdeadline内に観測します。
 `file`ではfile_read guestのimageをpayload loaderとvirtio-blk diskの両方とともに起動し、guestが`read_file` syscallで`DOCS/NOTE.TXT`を読んで内容を標準出力へ出し、終了コード42を返すことを要求します。
 `file-fd`ではfile_fd guestが同じfileを`open`して分割`read`でoffsetを進め、EOF、二重`close`と未割り当てfdの`EBADF`、存在しないfileの`ENOENT`を確かめてから終了コード42を返すことを要求します。
 `file-write`ではfile_write guestが`GUEST.TXT`を`create`して内容を`write`し、閉じてから`open`で読み直して内容を往復させます。
