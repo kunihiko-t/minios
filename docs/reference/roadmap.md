@@ -147,6 +147,7 @@ networkを扱うには、外部割り込みでdeviceの完了を受け取る基�
   virtio_net_hdrは`VIRTIO_NET_F_MRG_RXBUF`をnegotiateした12 byte layoutで統一し、rx bufferは常時deviceへpostしたまま`drain_rx`が回収・再postします。
 - **最小のnetwork stack**（完了）：`net/stack.rs`が`Link` traitでdeviceを抽象化し、ARP cache・自分宛ARP requestへのreply・ICMP echoへのreply・4 socketのUDP tableと受信queueを持ちます（`net-ping`で検証）。
   guestへは`socket`、`sendto`、`recvfrom`の三つのsyscallで公開し、未受信の`recvfrom`は`BlockedOnIo`で巻き戻し待機してvirtio-netの受信割り込みで起きます（`net-udp`で検証）。
+  socket indexは呼び出しprocessが所有し、終了時に自動回収されます（`net-sock`で検証）。
   TCPは対象外です。
 
 受け入れ条件は`cargo xtask test irq-uart`、`irq-blk`、`net-ping`、`net-udp`の四経路です。

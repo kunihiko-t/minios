@@ -543,16 +543,20 @@ impl ControlSource for UartControlSource<'_> {
         unsafe { crate::sleep_current_process(millis) }
     }
 
-    /// guestの`socket`をnetwork stackのtableへ委譲する。table満杯は
-    /// `EMFILE`、net device未接続は`borrow_net_stack`の`ENODEV`。
+    /// guestの`socket`をnetwork stackのtableへ委譲し、呼び出しprocessの
+    /// pidを所有者として記録する。table満杯は`EMFILE`、net device未接続は
+    /// `borrow_net_stack`の`ENODEV`。process contextを持たない呼び出しは
+    /// `ENOSYS`。
     #[cfg(target_arch = "riscv64")]
     fn socket(&mut self) -> Result<usize, isize> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let pid = unsafe { crate::current_pid() }.ok_or(minios_abi::syscall::ENOSYS)?;
         let stack = unsafe { crate::borrow_net_stack() }?;
-        stack.socket_open().ok_or(minios_abi::syscall::EMFILE)
+        stack.socket_open(pid).ok_or(minios_abi::syscall::EMFILE)
     }
 
     /// guestの`sendto`をnetwork stackへ委譲し、成功時は送信byte数を返す。
+    /// socketの所有者でない呼び出しはstack側の`BadSocket`→`EBADF`で拒否する。
     #[cfg(target_arch = "riscv64")]
     fn send_to(
         &mut self,
@@ -562,9 +566,10 @@ impl ControlSource for UartControlSource<'_> {
         dst_port: u16,
     ) -> Result<usize, isize> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let pid = unsafe { crate::current_pid() }.ok_or(minios_abi::syscall::ENOSYS)?;
         let stack = unsafe { crate::borrow_net_stack() }?;
         stack
-            .socket_send_to(sock, dst_ip, dst_port, data)
+            .socket_send_to(pid, sock, dst_ip, dst_port, data)
             .map(|()| data.len())
             .map_err(net_errno)
     }
@@ -572,6 +577,7 @@ impl ControlSource for UartControlSource<'_> {
     /// guestの`recvfrom`をnetwork stackへ委譲する。queue空ならcallerを
     /// `BlockedOnIo`へmarkして`EAGAIN`を返し、virtio-netの割り込みで
     /// 起きたretryが`stack.poll()`で新着frameをqueueへ取り込む。
+    /// socketの所有者でない呼び出しは`BadSocket`→`EBADF`で拒否する。
     #[cfg(target_arch = "riscv64")]
     fn recv_from(
         &mut self,
@@ -579,9 +585,10 @@ impl ControlSource for UartControlSource<'_> {
         output: &mut [u8],
     ) -> Result<Option<([u8; 4], u16, usize)>, isize> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let pid = unsafe { crate::current_pid() }.ok_or(minios_abi::syscall::ENOSYS)?;
         let stack = unsafe { crate::borrow_net_stack() }?;
         stack.poll().map_err(net_errno)?;
-        match stack.socket_recv_from(sock, output) {
+        match stack.socket_recv_from(pid, sock, output) {
             Ok(None) => {
                 // disk I/Oの`WouldBlock`と同じく、割り込み完了待ちで
                 // callerをmarkしてから`EAGAIN`へ流す。

@@ -230,6 +230,7 @@ queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`と�
 - `net/ipv4.rs`・`net/icmp.rs`・`net/udp.rs`：IPv4 header（checksum付き）、ICMP echo、UDP datagramのcodec。TCPは対象外で、UDPのIPv4 checksumは0として送ります。
 - `net/stack.rs`：`Link` traitでframeの送受を抽象化した最小network stackです。ARP cacheと自分宛ARP requestへのreply、ICMP echoへのreply、socket table（4個、各4 datagram queue）を持ち、`poll`がrxをdrainしてsocket queueへdemuxします。大きなstaging bufferはheapへ置き、`Stack`自体のby-value構築は小さいためsyscall経路でもkernel stackを溢れさせません。
   guestからは`socket`/`sendto`/`recvfrom`で触れ、`recvfrom`の未受信は`BlockedOnIo`へmarkして`EAGAIN`でecallを巻き戻します。virtio-netのused-buffer割り込みがPLIC経由でclaimされるとblkと同じ通知flagでwakeし、再実行された`recvfrom`が`poll`で新着frameをqueueへ取り込みます。stack本体は`proc_runtime.rs`の`borrow_net_stack`が初回syscall時にFDTのslotからprobeし、QEMU user-net既定のguest IP 10.0.2.15で作ります。
+  socket indexは`socket`を呼んだprocessのpidを所有者として記録し、他processの操作は`EBADF`で拒否します。fd tableと違ってsocket tableはprocess外の共有resourceなので、process回収時に`close_sockets_for`が所有者のsocketをまとめて解放します。
 - `cargo xtask test net-arp`：`-netdev user`を持つ`virtio-net-device`を起動し、仮想networkのgateway 10.0.2.2へARP requestを送ってreplyを受け取ります。reply到達とdeviceのused-buffer割り込みがPLIC経由でclaimされたことを併せて検証します。
 - `cargo xtask test net-ping`：同じ構成でstackをkernel上で組み、ARP解決からICMP echo往復を行います。
 - `cargo xtask test net-udp`：payload経由のguestがsocket syscallsで`10.0.2.2`（slirpのhost alias）:7777のechoと往復します。harness側は`127.0.0.1:7777`でUDP echoを返し、`recvfrom`が実際に割り込み起床でdatagramを受け取ることを検証します。

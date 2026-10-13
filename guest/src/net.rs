@@ -48,7 +48,8 @@ impl SockAddr {
 }
 
 /// `socket`が返すUDP socket。socket indexはfile fdとは別の名前空間で、
-/// process終了まで有効である（`close` APIは現行ABIにない）。
+/// 開いたprocessに所有される。明示的な`close` APIはなく、process終了時に
+/// kernelが自動的に回収する。
 #[derive(Debug)]
 pub struct UdpSocket {
     index: usize,

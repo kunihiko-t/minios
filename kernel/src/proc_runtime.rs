@@ -120,6 +120,21 @@ pub(crate) unsafe fn borrow_net_stack()
     Ok(stack.as_mut().expect("probed above"))
 }
 
+/// `pid`を所有者とするsocketを全て閉じる。process回収時にsocket tableの
+/// 占有を解放するための経路で、stackが未probeならprobeせずno-opとする。
+///
+/// # Safety
+///
+/// `borrow_net_stack`と同じく、handlerの借用が残っていない時点でだけ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn close_net_sockets_for(pid: usize) {
+    let stack = unsafe { &mut *&raw mut NET_STACK };
+    if let Some(stack) = stack.as_mut() {
+        stack.close_sockets_for(pid);
+    }
+}
+
 /// run終了時にnetwork stackを閉じ、queue/rx frameをpoolへ返す。
 ///
 /// # Safety

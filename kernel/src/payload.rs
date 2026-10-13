@@ -3,13 +3,16 @@ use crate::proc_runtime::*;
 use crate::user_trap::*;
 
 /// 終了したprocessをtableから取り出して全所有frameを回収する。
-/// fd tableはprocess内に閉じるため`take`とともに死ぬ。回収に失敗した
-/// 場合は一回だけ再試行し、それでも駄目ならpayload全体を中止する。
+/// fd tableはprocess内に閉じるため`take`とともに死ぬ。socket tableは
+/// process外の共有resourceなので、所有者をpidで引いてここで解放する。
+/// 回収に失敗した場合は一回だけ再試行し、それでも駄目ならpayload全体を中止する。
 #[cfg(target_arch = "riscv64")]
 fn reclaim_process_slot(table: &mut ProcessTable, pid: usize, frames: &mut dyn FrameSource) {
     let Some(mut process) = table.take(pid) else {
         return;
     };
+    // Safety: 実行窓の外側であり、trap handlerからの借用は残っていない。
+    unsafe { close_net_sockets_for(pid) };
     if process.reclaim(frames).is_err() && process.reclaim(frames).is_err() {
         fatal_payload_error(format_args!("MiniOS payload: reclaim pid={pid} failed\r\n"));
     }

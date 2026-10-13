@@ -56,6 +56,9 @@ pub const GUEST_SCHED_R: &str = "minios-guest-sched-r";
 
 /// guestのUDP echo検査binary。`sendto`/`recvfrom`を実device経由で試す。
 pub const GUEST_NET_UDP: &str = "minios-guest-net-udp";
+/// socket tableを満杯にして終了する検査binary。所有socketの自動回収を
+/// 後続processの`socket`成功で確認する。
+pub const GUEST_NET_HOG: &str = "minios-guest-net-hog";
 /// guest build target。
 pub const GUEST_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// linker scriptが_startへ置くentry address (=USER_START)。
