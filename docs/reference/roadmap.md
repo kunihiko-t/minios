@@ -160,8 +160,8 @@ networkを扱うには、外部割り込みでdeviceの完了を受け取る基�
 
 - **hartごとのboot**（一部完了）：SBI HSMで二つ目以降のhartを起動します。`smp-boot`が`-smp 2`でsecondary hartのS-mode到達を、`smp-timer`がsecondary側のper-hart trap handlerでのtimer割り込み受信を検証済みです。hartごとのtrap stackとscheduler stateはこれからです。
 - **spinlock**（一部完了）：`SpinLock` primitiveを導入し、UART出力をhart間で直列化済みです。heap、`ProcessTable`、fd table、pipe bufferへの適用はこれからです。
-- **IPI**：process終了やpipeの起床を別hartへ通知します。
-- **QEMUの`-smp 2`**：release gateのQEMU経路を`-smp 1`と`-smp 2`の両方で実行します（現状は`smp-boot`と`smp-timer`のみ`-smp 2`）。
+- **IPI**（一部完了）：process終了やpipeの起床を別hartへ通知します。`smp-ipi`がboot hartからsecondary hartへのSBI IPI配送（supervisor software割り込みの受信と`sip.SSIP`クリア）を検証済みですが、scheduler経路への接続はこれからです。
+- **QEMUの`-smp 2`**：release gateのQEMU経路を`-smp 1`と`-smp 2`の両方で実行します（現状は`smp-boot`・`smp-timer`・`smp-ipi`のみ`-smp 2`）。
 
 受け入れ条件は、全既存経路が`-smp 2`でも同じframe列を出すことと、`cargo xtask test smp-sched`が二つのhartで同時に進むprocessを観測することです。
 

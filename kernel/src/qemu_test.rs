@@ -8,7 +8,8 @@
     feature = "qemu-test-net-arp",
     feature = "qemu-test-net-ping",
     feature = "qemu-test-smp-boot",
-    feature = "qemu-test-smp-timer"
+    feature = "qemu-test-smp-timer",
+    feature = "qemu-test-smp-ipi"
 ))]
 use super::*;
 
@@ -900,7 +901,11 @@ fn fatal_memory_test() -> ! {
 /// asm stub、専用bss stack、`hart_start`呼び出しをまとめる。
 #[cfg(all(
     target_arch = "riscv64",
-    any(feature = "qemu-test-smp-boot", feature = "qemu-test-smp-timer")
+    any(
+        feature = "qemu-test-smp-boot",
+        feature = "qemu-test-smp-timer",
+        feature = "qemu-test-smp-ipi"
+    )
 ))]
 pub(crate) mod smp {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1098,6 +1103,105 @@ pub(crate) mod smp_timer {
             fatal_qemu_test(format_args!("smp-timer: wrong hart id"));
         }
         crate::println!("[MINIOS_TEST] smp-timer: ok");
+        successful_qemu_test_shutdown()
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-smp-ipi"))]
+pub(crate) mod smp_ipi {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::smp;
+    use super::*;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static IPI_HIT: AtomicBool = AtomicBool::new(false);
+    static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
+    static SECONDARY_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// secondary hart専用のsoftware割り込みhandler。IPIはhartごとの
+    /// `sip.SSIP`をpendingにするだけなので、flagを立ててからpendingを
+    /// クリアし、`sie.SSIE`を降ろして再割り込みを止め、`stvec`をpark
+    /// loopへ差し替えて`sret`する。
+    #[unsafe(naked)]
+    unsafe extern "C" fn ipi_trap() -> ! {
+        core::arch::naked_asm!(
+            "lla t0, {hit}",
+            "li t1, 1",
+            "sb t1, 0(t0)",
+            "csrci sip, 2",
+            "li t1, 0x2",
+            "csrc sie, t1",
+            "lla t0, 1f",
+            "csrw stvec, t0",
+            "sret",
+            "1: wfi",
+            "j 1b",
+            hit = sym IPI_HIT
+        )
+    }
+
+    /// secondary hartがboot hartからのSBI IPIを専用handlerで受けることを
+    /// 確かめる。SSIE/SIEを立ててから`ARMED`を公開し、boot hartはその後に
+    /// `send_ipi`するため順序の穴はない。
+    extern "C" fn secondary_main(hart_id: usize) -> ! {
+        SECONDARY_HART.store(hart_id, Ordering::Relaxed);
+        use arch::riscv64::csr;
+        // Safety: 割り込まれるのは下の`wfi`loopだけで、registerを使い回さない。
+        unsafe {
+            csr::write_stvec(ipi_trap as *const () as usize);
+            csr::write_sie(csr::read_sie() | (1 << 1));
+            csr::write_sstatus(csr::read_sstatus() | (1 << 1));
+        }
+        ARMED.store(true, Ordering::Release);
+        while !IPI_HIT.load(Ordering::Acquire) {
+            // Safety: SSIE/SIEを立てた`wfi`なのでIPIが起こす。
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        }
+        crate::println!("[MINIOS_TEST] smp-ipi: secondary running hart={hart_id}");
+        SECONDARY_READY.store(true, Ordering::Release);
+        loop {
+            // Safety: `sie`はhandlerが0にしているので`wfi`は二度と起きない。
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        }
+    }
+
+    /// `-smp 2`環境でboot hartがSBI IPI経由のsupervisor software割り込みを
+    /// secondary hartへ届け、secondaryのhandlerが`sip.SSIP`をクリアして
+    /// 復帰することをdeadline内に観測する。
+    pub(crate) fn run(boot_hart: usize) {
+        let secondary = match smp::start(boot_hart, secondary_main) {
+            Ok(secondary) => secondary,
+            Err(error) => fatal_qemu_test(format_args!(
+                "smp-ipi: hart_start boot={boot_hart}: {error:?}"
+            )),
+        };
+        let deadline = time::ticks() + 100;
+        while !ARMED.load(Ordering::Acquire) {
+            if time::ticks() >= deadline {
+                fatal_qemu_test(format_args!(
+                    "smp-ipi: secondary hart {secondary} did not arm"
+                ));
+            }
+        }
+        if let Err(error) = arch::riscv64::sbi::send_ipi(1 << secondary, 0) {
+            fatal_qemu_test(format_args!(
+                "smp-ipi: send_ipi secondary={secondary}: {error:?}"
+            ));
+        }
+        let deadline = time::ticks() + 100;
+        while !SECONDARY_READY.load(Ordering::Acquire) {
+            if time::ticks() >= deadline {
+                fatal_qemu_test(format_args!(
+                    "smp-ipi: secondary hart {secondary} did not fire (IPI_HIT={})",
+                    IPI_HIT.load(Ordering::Relaxed)
+                ));
+            }
+        }
+        if SECONDARY_HART.load(Ordering::Relaxed) != secondary {
+            fatal_qemu_test(format_args!("smp-ipi: wrong hart id"));
+        }
+        crate::println!("[MINIOS_TEST] smp-ipi: ok");
         successful_qemu_test_shutdown()
     }
 }

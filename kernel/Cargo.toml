@@ -30,6 +30,9 @@ qemu-test-smp-boot = []
 # `-smp 2`環境でsecondary hartがper-hartのtrap handlerでtimer割り込みを
 # 受けられることを確かめる。
 qemu-test-smp-timer = []
+# `-smp 2`環境でboot hartがSBI IPI経由のsoftware割り込みをsecondary
+# hartへ届けられることを確かめる。
+qemu-test-smp-ipi = []
 qemu-test-fdt = []
 qemu-test-heap = []
 qemu-test-virtio = []

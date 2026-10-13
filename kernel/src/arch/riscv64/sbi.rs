@@ -10,10 +10,23 @@ const SBI_TIME_SET_TIMER: usize = 0;
 const SBI_EXT_SYSTEM_RESET: usize = 0x5352_5354;
 const SBI_SYSTEM_RESET: usize = 0;
 // SBI仕様がHSM拡張に割り当てた拡張ID ("HSM") と`hart_start`の関数IDである。
-#[cfg(any(feature = "qemu-test-smp-boot", feature = "qemu-test-smp-timer"))]
+#[cfg(any(
+    feature = "qemu-test-smp-boot",
+    feature = "qemu-test-smp-timer",
+    feature = "qemu-test-smp-ipi"
+))]
 const SBI_EXT_HSM: usize = 0x0048_534d;
-#[cfg(any(feature = "qemu-test-smp-boot", feature = "qemu-test-smp-timer"))]
+#[cfg(any(
+    feature = "qemu-test-smp-boot",
+    feature = "qemu-test-smp-timer",
+    feature = "qemu-test-smp-ipi"
+))]
 const SBI_HSM_HART_START: usize = 0;
+// SBI仕様がIPI拡張に割り当てた拡張ID ("sPI") と`send_ipi`の関数IDである。
+#[cfg(feature = "qemu-test-smp-ipi")]
+const SBI_EXT_IPI: usize = 0x0073_5049;
+#[cfg(feature = "qemu-test-smp-ipi")]
+const SBI_IPI_SEND_IPI: usize = 0;
 
 #[repr(usize)]
 #[derive(Debug, Clone, Copy)]
@@ -36,9 +49,21 @@ pub fn set_timer(deadline: u64) -> Result<usize, SbiError> {
 
 /// `hart_id`のhartを`start_addr`のS-mode entryで起動する。`opaque`は
 /// 起動されたhartの`a1`へ届く。SBI HSMの`hart_start` (FID 0) である。
-#[cfg(any(feature = "qemu-test-smp-boot", feature = "qemu-test-smp-timer"))]
+#[cfg(any(
+    feature = "qemu-test-smp-boot",
+    feature = "qemu-test-smp-timer",
+    feature = "qemu-test-smp-ipi"
+))]
 pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<usize, SbiError> {
     sbi_call(hart_id, start_addr, opaque, SBI_HSM_HART_START, SBI_EXT_HSM).into_result()
+}
+
+/// `hart_mask_base`をbit 0の起点として`hart_mask`で選んだhart群へ
+/// supervisor software interruptを送る。SBI IPIの`send_ipi` (FID 0) で、
+/// 対象hartでは`sip.SSIP`がpendingになる。
+#[cfg(feature = "qemu-test-smp-ipi")]
+pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> Result<usize, SbiError> {
+    sbi_call(hart_mask, hart_mask_base, 0, SBI_IPI_SEND_IPI, SBI_EXT_IPI).into_result()
 }
 
 pub fn system_reset(reset_type: ResetType, reason: ResetReason) -> ! {

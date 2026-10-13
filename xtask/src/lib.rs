@@ -263,6 +263,7 @@ impl Phase {
             Self::Qemu(qemu::TestKind::Shell) => "QEMU shell test".to_owned(),
             Self::Qemu(qemu::TestKind::SmpBoot) => "QEMU smp-boot test".to_owned(),
             Self::Qemu(qemu::TestKind::SmpTimer) => "QEMU smp-timer test".to_owned(),
+            Self::Qemu(qemu::TestKind::SmpIpi) => "QEMU smp-ipi test".to_owned(),
             _ => unreachable!("Cargo phases returned above"),
         }
     }
@@ -322,6 +323,7 @@ fn test_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Shell),
         Phase::Qemu(qemu::TestKind::SmpBoot),
         Phase::Qemu(qemu::TestKind::SmpTimer),
+        Phase::Qemu(qemu::TestKind::SmpIpi),
     ]
 }
 
@@ -392,6 +394,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::Qemu(qemu::TestKind::Shell),
         Phase::Qemu(qemu::TestKind::SmpBoot),
         Phase::Qemu(qemu::TestKind::SmpTimer),
+        Phase::Qemu(qemu::TestKind::SmpIpi),
     ]
 }
 
@@ -570,6 +573,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::Shell) => Some(vec![Phase::Qemu(qemu::TestKind::Shell)]),
         Command::Test(TestFilter::SmpBoot) => Some(vec![Phase::Qemu(qemu::TestKind::SmpBoot)]),
         Command::Test(TestFilter::SmpTimer) => Some(vec![Phase::Qemu(qemu::TestKind::SmpTimer)]),
+        Command::Test(TestFilter::SmpIpi) => Some(vec![Phase::Qemu(qemu::TestKind::SmpIpi)]),
         Command::Check => Some(check_phases()),
         Command::Setup | Command::Build | Command::Run | Command::Bundle(_) | Command::Fuzz(_) => {
             None
@@ -713,6 +717,7 @@ mod tests {
                 Phase::Qemu(qemu::TestKind::Shell),
                 Phase::Qemu(qemu::TestKind::SmpBoot),
                 Phase::Qemu(qemu::TestKind::SmpTimer),
+                Phase::Qemu(qemu::TestKind::SmpIpi),
             ]
         );
     }
@@ -805,6 +810,7 @@ mod tests {
             Phase::Qemu(qemu::TestKind::Shell),
             Phase::Qemu(qemu::TestKind::SmpBoot),
             Phase::Qemu(qemu::TestKind::SmpTimer),
+            Phase::Qemu(qemu::TestKind::SmpIpi),
         ];
         assert_eq!(check_phases(), expected);
         assert_eq!(check_phases().len(), expected.len());
@@ -893,7 +899,7 @@ mod tests {
             &plan[host_tests_end + 7..host_tests_end + 7 + expected.len()],
             expected
         );
-        assert_eq!(plan.len(), 65);
+        assert_eq!(plan.len(), 66);
     }
 
     #[test]
