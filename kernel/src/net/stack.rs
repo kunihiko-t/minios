@@ -79,6 +79,9 @@ struct QueuedDatagram {
 
 #[derive(Clone)]
 struct UdpSocket {
+    /// socketを開いたprocessのpid。`send_to`/`recv_from`は所有者しか
+    /// 通さず、processの終了時に`close_sockets_for`がまとめて回収する。
+    owner: usize,
     local_port: u16,
     queue: [Option<QueuedDatagram>; SOCKET_QUEUE_LEN],
 }
@@ -333,36 +336,47 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// UDP socketを開き、indexを返す。local portはephemeral範囲から割当。
-    pub fn socket_open(&mut self) -> Option<usize> {
+    /// `owner`のpidを持つUDP socketを開き、indexを返す。local portは
+    /// ephemeral範囲から割当。
+    pub fn socket_open(&mut self, owner: usize) -> Option<usize> {
         let index = self.sockets.iter().position(|slot| slot.is_none())?;
         self.sockets[index] = Some(UdpSocket {
+            owner,
             local_port: EPHEMERAL_PORT_BASE + index as u16,
             queue: [const { None }; SOCKET_QUEUE_LEN],
         });
         Some(index)
     }
 
-    /// socketを閉じてqueueを捨てる。未使用indexはno-op。
-    pub fn socket_close(&mut self, index: usize) {
-        if index < MAX_SOCKETS {
-            self.sockets[index] = None;
+    /// `owner`のsocketを全て閉じてqueueを捨てる。processの終了時の
+    /// 自動回収に使い、対象が無ければno-op。
+    pub fn close_sockets_for(&mut self, owner: usize) {
+        for slot in &mut self.sockets {
+            if slot.as_ref().is_some_and(|socket| socket.owner == owner) {
+                *slot = None;
+            }
         }
     }
 
-    pub fn socket_local_port(&self, index: usize) -> Option<u16> {
-        self.sockets.get(index)?.as_ref().map(|s| s.local_port)
+    /// `index`が`owner`所有のliveなsocketならlocal portを返す。
+    pub fn socket_local_port(&self, owner: usize, index: usize) -> Option<u16> {
+        let socket = self.sockets.get(index)?.as_ref()?;
+        (socket.owner == owner).then_some(socket.local_port)
     }
 
     /// `data`を`dst_ip:dst_port`へUDPで送る。source portはsocketのlocal port。
+    /// socketの所有者でない呼び出しは`BadSocket`で拒否する。
     pub fn socket_send_to(
         &mut self,
+        owner: usize,
         index: usize,
         dst_ip: [u8; 4],
         dst_port: u16,
         data: &[u8],
     ) -> Result<(), StackError> {
-        let src_port = self.socket_local_port(index).ok_or(StackError::BadSocket)?;
+        let src_port = self
+            .socket_local_port(owner, index)
+            .ok_or(StackError::BadSocket)?;
         let dst_mac = self.resolve(dst_ip)?;
         let mut datagram = [0u8; ETH_FRAME_MAX - ETH_HEADER_LEN - 20];
         let dgram_len = encode_datagram(&mut datagram, src_port, dst_port, data)
@@ -371,9 +385,10 @@ impl<L: Link> Stack<L> {
     }
 
     /// socketのqueueから1件取り出す。未読が無ければ`None`で、呼び出し側は
-    /// `poll`を回して到着を待つ。
+    /// `poll`を回して到着を待つ。所有者でない呼び出しは`BadSocket`で拒否する。
     pub fn socket_recv_from(
         &mut self,
+        owner: usize,
         index: usize,
         buf: &mut [u8],
     ) -> Result<Option<([u8; 4], u16, usize)>, StackError> {
@@ -382,6 +397,9 @@ impl<L: Link> Stack<L> {
             .get_mut(index)
             .and_then(Option::as_mut)
             .ok_or(StackError::BadSocket)?;
+        if socket.owner != owner {
+            return Err(StackError::BadSocket);
+        }
         Ok(socket.pop(buf))
     }
 }
@@ -549,16 +567,16 @@ mod tests {
         link.rx.push(ipv4_frame(PROTO_UDP, &datagram[..other]));
 
         let mut stack = Stack::new(link, OUR_IP);
-        let index = stack.socket_open().expect("socket");
+        let index = stack.socket_open(7).expect("socket");
         // socket index 0はEPHEMERAL_PORT_BASE。portを+1に合わせるため
         // index 1を使うsocketを開く。
-        let second = stack.socket_open().expect("second socket");
+        let second = stack.socket_open(7).expect("second socket");
         assert_eq!(second, 1);
         stack.poll().expect("drains");
 
         let mut buf = [0u8; 64];
         let (src_ip, src_port, got) = stack
-            .socket_recv_from(second, &mut buf)
+            .socket_recv_from(7, second, &mut buf)
             .expect("socket")
             .expect("datagram queued");
         assert_eq!(src_ip, PEER_IP);
@@ -567,10 +585,34 @@ mod tests {
         // index 0側は空。
         assert!(
             stack
-                .socket_recv_from(index, &mut buf)
+                .socket_recv_from(7, index, &mut buf)
                 .expect("socket")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn socket_ops_reject_foreign_owners_and_reap_frees_slots() {
+        let mut stack = Stack::new(FakeLink::new(), OUR_IP);
+        // tableを満杯にして別ownerの操作が`BadSocket`になることを見る。
+        for _ in 0..MAX_SOCKETS {
+            stack.socket_open(3).expect("open");
+        }
+        assert_eq!(stack.socket_open(3), None);
+        assert_eq!(
+            stack.socket_send_to(9, 0, PEER_IP, 80, b"x"),
+            Err(StackError::BadSocket)
+        );
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            stack.socket_recv_from(9, 0, &mut buf),
+            Err(StackError::BadSocket)
+        );
+        assert_eq!(stack.socket_local_port(9, 0), None);
+        // owner 3が終了すると全slotが解放され、indexは再利用される。
+        stack.close_sockets_for(3);
+        assert_eq!(stack.socket_open(4), Some(0));
+        assert_eq!(stack.socket_local_port(4, 0), Some(EPHEMERAL_PORT_BASE));
     }
 
     #[test]

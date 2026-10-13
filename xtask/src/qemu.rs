@@ -192,6 +192,7 @@ pub enum TestKind {
     NetArp,
     NetPing,
     NetUdp,
+    NetSock,
     ProcFault,
     ProcKill,
     Shell,
@@ -267,7 +268,9 @@ impl TestKind {
             Self::IrqBlk => "qemu-test-irq-blk",
             Self::NetArp => "qemu-test-net-arp",
             Self::NetPing => "qemu-test-net-ping",
-            Self::NetUdp => unreachable!("the net-udp test boots the normal kernel"),
+            Self::NetUdp | Self::NetSock => {
+                unreachable!("net-udp/net-sock tests boot the normal kernel")
+            }
             Self::ProcFault => unreachable!("proc-faultは通常kernelを使う"),
             Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
@@ -353,8 +356,8 @@ impl TestKind {
             }
             Self::NetArp => NET_ARP_MARKER,
             Self::NetPing => NET_PING_MARKER,
-            Self::NetUdp => {
-                unreachable!("the net-udp test verifies raw control frames")
+            Self::NetUdp | Self::NetSock => {
+                unreachable!("net-udp/net-sock verify raw control frames")
             }
             Self::ProcFault => unreachable!("proc-faultはcontrol frameを検証する"),
             Self::ProcKill => unreachable!("proc-killはcontrol frameを検証する"),
@@ -1059,15 +1062,23 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         return run_marker_test(kind, command, command_line, deadline);
     }
 
-    if kind == TestKind::NetUdp {
+    if matches!(kind, TestKind::NetUdp | TestKind::NetSock) {
         let echo = UdpEcho::start()?;
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
-        let bundle = PayloadBundle::create_net_udp()?;
+        let bundle = if kind == TestKind::NetUdp {
+            PayloadBundle::create_net_udp()?
+        } else {
+            PayloadBundle::create_net_sock()?
+        };
         let (command, command_line) = qemu_command_with_payload_and_net(&kernel, bundle.path());
         let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
         bundle.remove();
         echo.stop();
-        return verify_net_udp_result(&command_line, completed.status.code(), &completed.output);
+        return if kind == TestKind::NetUdp {
+            verify_net_udp_result(&command_line, completed.status.code(), &completed.output)
+        } else {
+            verify_net_sock_result(&command_line, completed.status.code(), &completed.output)
+        };
     }
 
     if kind == TestKind::Shell {
@@ -2028,6 +2039,74 @@ fn verify_net_udp_result(
         });
     }
     if !has_exact_payload_frames(output.as_bytes(), &NET_UDP_EXPECTED_FRAMES) {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
+/// net-sock検証: 先に走るnet-hog (pid 0) がsocket tableを満杯にして終了し、
+/// 後続のnet-udp (pid 1) が同じtableからsocketを得てechoまで済ませること
+/// を確認する。hogはblockしないsyscallだけを行うため最初のquantumで
+/// 終わり、ProcExitはpid 0→1の順で確定的である。hogのsocketが回収
+/// されなければpid 1は`EMFILE`で落ちて(70,42)に化けるため、両者の
+/// code 42が自動回収の直接証拠になる。
+fn verify_net_sock_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    let Some(frames) = collect_payload_frames(output.as_bytes()) else {
+        return Err(QemuError::PayloadFrames {
+            command: command.to_owned(),
+            output: output.to_owned(),
+        });
+    };
+
+    let mut stdout = Vec::new();
+    let mut diagnostics = String::new();
+    let mut proc_exits = Vec::new();
+    for (kind, payload) in &frames {
+        match kind {
+            FrameKind::Stdout => stdout.extend_from_slice(payload),
+            FrameKind::Diagnostic => diagnostics.push_str(&String::from_utf8_lossy(payload)),
+            FrameKind::ProcExit => {
+                let Ok(decoded) = ProcExitPayload::decode(payload) else {
+                    return Err(QemuError::PayloadFrames {
+                        command: command.to_owned(),
+                        output: output.to_owned(),
+                    });
+                };
+                proc_exits.push((decoded.pid, decoded.code));
+            }
+            _ => {}
+        }
+    }
+
+    let position = |marker: &[u8]| {
+        stdout
+            .windows(marker.len())
+            .position(|window| window == marker)
+    };
+    let spawned_ok = diagnostics.contains("spawned pid=0 name=net-hog\n")
+        && diagnostics.contains("spawned pid=1 name=net-udp\n");
+    let (hog, echo) = (
+        position(b"net-hog: held 4 sockets\n"),
+        position(b"net-udp: echo 16 bytes from 10.0.2.2:7777\n"),
+    );
+    let ordered = matches!((hog, echo), (Some(hog), Some(echo)) if hog < echo);
+    let exits_ok = proc_exits == [(0, 42), (1, 42)];
+    let done_ok = diagnostics.contains("MiniOS payload: ok processes=2");
+    if !spawned_ok || !ordered || !exits_ok || !done_ok {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
@@ -3002,6 +3081,34 @@ impl PayloadBundle {
     fn create_net_udp() -> Result<Self, QemuError> {
         let elf = built_bin_elf_bytes(crate::guest::GUEST_NET_UDP)?;
         Self::create_with(assemble_test_bundle(b"version=1\nname=net-udp\n", &elf)?)
+    }
+
+    /// net-sock検査用bundle。socket tableを満杯にして終了するguestと、
+    /// その後でsocketを開いてechoするguestの2 imageをmanifest v2で組む。
+    /// 前者が保持したsocketの自動回収を、後者の`socket`成功で検証する。
+    /// process indexは宣言順 (net-hog=0, net-udp=1)。
+    fn create_net_sock() -> Result<Self, QemuError> {
+        let hog = built_bin_elf_bytes(crate::guest::GUEST_NET_HOG)?;
+        let udp = built_bin_elf_bytes(crate::guest::GUEST_NET_UDP)?;
+        let images = [
+            crate::bundle::BundleImage {
+                name: "net-hog",
+                args: &[],
+                elf: &hog,
+            },
+            crate::bundle::BundleImage {
+                name: "net-udp",
+                args: &[],
+                elf: &udp,
+            },
+        ];
+        let bytes = crate::bundle::build_multi_bundle(&images)
+            .map(|bundle| bundle.bytes().to_vec())
+            .map_err(|error| QemuError::Bundle {
+                stage: "net-sock bundle layout",
+                error: error.to_string(),
+            })?;
+        Self::create_with(bytes)
     }
 
     fn create_sched() -> Result<Self, QemuError> {

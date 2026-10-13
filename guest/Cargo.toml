@@ -239,3 +239,9 @@ path = "src/bin/net_udp.rs"
 test = false
 bench = false
 doctest = false
+[[bin]]
+name = "minios-guest-net-hog"
+path = "src/bin/net_hog.rs"
+test = false
+bench = false
+doctest = false

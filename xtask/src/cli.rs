@@ -88,6 +88,7 @@ pub enum TestFilter {
     NetArp,
     NetPing,
     NetUdp,
+    NetSock,
     ProcFault,
     ProcKill,
     Shell,
@@ -108,7 +109,7 @@ pub fn help() -> &'static str {
   cargo xtask run\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
   cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|proc-fault|proc-kill|shell]\n\
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell]\n\
   cargo xtask check\n\
   cargo xtask fuzz --target <fat32|elf|boot-payload> [--seed <n>] [--iters <n>] [--max-bytes <n>] [--input-timeout <secs>] [--time-limit <secs>] [--alloc-cap <n>] [--corpus <dir>] [--output <dir>]\n\
   cargo xtask fuzz --target <fat32|elf|boot-payload> --input <file>"
@@ -246,6 +247,9 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         [command, test] if command == "test" && test == "net-udp" => {
             Ok(Command::Test(TestFilter::NetUdp))
+        }
+        [command, test] if command == "test" && test == "net-sock" => {
+            Ok(Command::Test(TestFilter::NetSock))
         }
         [command, test] if command == "test" && test == "proc-fault" => {
             Ok(Command::Test(TestFilter::ProcFault))
@@ -534,6 +538,7 @@ mod tests {
             (vec!["test", "net-arp"], TestFilter::NetArp),
             (vec!["test", "net-ping"], TestFilter::NetPing),
             (vec!["test", "net-udp"], TestFilter::NetUdp),
+            (vec!["test", "net-sock"], TestFilter::NetSock),
             (vec!["test", "proc-fault"], TestFilter::ProcFault),
             (vec!["test", "proc-kill"], TestFilter::ProcKill),
             (vec!["test", "shell"], TestFilter::Shell),
@@ -561,7 +566,7 @@ mod tests {
             "cargo xtask run",
             "cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]",
             "cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]",
-            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|proc-fault|proc-kill|shell]",
+            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell]",
             "cargo xtask check",
         ] {
             assert!(help.contains(command), "missing help entry: {command}");
