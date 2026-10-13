@@ -929,9 +929,12 @@ pub(crate) mod smp_boot {
 
     /// secondary hartの起動確認だけを行い、以降はparkする。schedulerへの
     /// 参加はsmp-sched段階の仕事で、ここではS-modeへ自力到達した証拠を
-    /// atomic flagとして残す。
+    /// atomic flagとして残す。printはflagより先に済ませ、boot hartが
+    /// 観測してshutdownする前にUARTへ確実に届くようにする（consoleの
+    /// print lock経由なのでboot側の出力と混ざらない）。
     extern "C" fn secondary_main(hart_id: usize) -> ! {
         SECONDARY_HART.store(hart_id, Ordering::Relaxed);
+        crate::println!("[MINIOS_TEST] smp-boot: secondary running hart={hart_id}");
         SECONDARY_READY.store(true, Ordering::Release);
         // `sie`が0なので`wfi`は何にも起こされない。spurious wakeupだけ吸収する。
         loop {

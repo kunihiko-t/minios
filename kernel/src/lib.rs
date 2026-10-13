@@ -12,6 +12,9 @@
 // RV32 lib buildは対象外（vm/user/processをコンパイルしない）。
 #[cfg(not(target_arch = "riscv32"))]
 extern crate alloc;
+// `SpinLock`の排他検証だけstdのthreadを使う。
+#[cfg(test)]
+extern crate std;
 
 // RV32ターゲット追加後は`not(riscv64)`がRV32のlibビルドにも一致してしまうため、
 // ホストテスト用モジュールは`test`に限定する。RISC-Vのlib側には置かない。
@@ -45,8 +48,12 @@ pub mod pipe;
 #[cfg(not(target_arch = "riscv32"))]
 pub mod process;
 pub mod sbi;
+// spinlockはatomic前提のため、NEORV32向けのrv32im (atomic無し) から外す。
+// RV32実機はsingle-hartでありmulti-hart経路はRV64の仕事である。
 #[cfg(test)]
 pub mod shell;
+#[cfg(not(target_arch = "riscv32"))]
+pub mod spin;
 // storageは全targetでcompileする: fat32/sd/virtio_blkはalloc非依存の
 // 純粋なtransport/parserであり、xtaskのhost側image検証もこの実装を再利用する。
 pub mod storage;

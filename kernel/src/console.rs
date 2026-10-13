@@ -6,6 +6,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::drivers::neorv32_uart::Neorv32Uart as Backend;
 #[cfg(target_arch = "riscv64")]
 use crate::drivers::uart::Uart as Backend;
+#[cfg(target_arch = "riscv64")]
+use minios_kernel::spin::{SpinGuard, SpinLock};
 
 pub fn init() {
     // QEMUの16550は初期化不要だが、NEORV32はボーレート設定の書き込みが必須である。
@@ -41,13 +43,37 @@ fn control_guest_error(text: &[u8]) {
     crate::control::send_guest_error(text);
 }
 
-/// control frameのheaderやpayloadなど、整形しないbyte列をUARTへそのまま書く。
+/// UART送信の排他lock。secondary hartからの出力も同じFIFOへ来るため、
+/// plain textは`_print`の`write_fmt`単位、control frameはheader+payloadの
+/// 単位で直列化する。`emergency_print`はpanic/fatal時にspin待ちできない
+/// ため素通りし、interleaveしうるのは許容する。
+/// 保持中に割り込みhandlerがprintする経路はない（ISRはprintしない規約）。
 #[cfg(target_arch = "riscv64")]
-pub fn write_bytes(bytes: &[u8]) {
+static UART_LOCK: SpinLock<()> = SpinLock::new(());
+
+#[cfg(target_arch = "riscv64")]
+fn uart_guard() -> SpinGuard<'static, ()> {
+    UART_LOCK.lock()
+}
+
+/// 整形しないbyte列をUARTへそのまま書く。callerは`uart_guard`で排他を
+/// 保持していなければならない。
+#[cfg(target_arch = "riscv64")]
+fn write_bytes(bytes: &[u8]) {
     let mut uart = Backend::for_target();
     for byte in bytes {
         uart.write_byte(*byte);
     }
+}
+
+/// control frameの`header`+`payload`を1 lock区間で書く。frameがまたがる
+/// byte列へ他hartの出力が割り込まないよう、`write_bytes`を個別に呼ぶ
+/// 代わりに必ずこれを使う。
+#[cfg(target_arch = "riscv64")]
+pub fn write_frame(header: &[u8], payload: &[u8]) {
+    let _guard = uart_guard();
+    write_bytes(header);
+    write_bytes(payload);
 }
 
 /// control mode中の通常出力を載せるDiagnostic frameの一次buffer。
@@ -99,12 +125,17 @@ fn format_into_buffer(arguments: fmt::Arguments<'_>) -> DiagnosticBuffer {
 
 pub fn _print(arguments: fmt::Arguments<'_>) {
     // Ready後の通常出力はDiagnostic frameだけをUARTへ流す(RV64のみ)。
+    // frame送信側の`send_frame`が自前でlockするのでこの経路はlockしない。
     #[cfg(target_arch = "riscv64")]
     if control_mode() {
         let buffer = format_into_buffer(arguments);
         control_diagnostic(buffer.text());
         return;
     }
+    // RV64ではsecondary hartからのprintも来るため、1 write_fmtを直列化する。
+    // RV32実機はsingle-hartなのでlockは要らない。
+    #[cfg(target_arch = "riscv64")]
+    let _guard = uart_guard();
     let mut uart = Backend::for_target();
     let _ = uart.write_fmt(arguments);
 }
@@ -175,6 +206,8 @@ pub fn stdin_pending() -> bool {
 
 pub fn write_byte(byte: u8) {
     // シェルの1文字エコーも、通常出力と同じUARTのMMIO経路へ順に送る。
+    #[cfg(target_arch = "riscv64")]
+    let _guard = uart_guard();
     Backend::for_target().write_byte(byte);
 }
 

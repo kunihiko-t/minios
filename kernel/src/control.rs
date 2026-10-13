@@ -679,8 +679,8 @@ fn send_frame(kind: FrameKind, payload: &[u8]) {
     }
     .encode();
     // headerを送ってからpayloadを送る順序を、host側decoderの契約として守る。
-    crate::console::write_bytes(&header);
-    crate::console::write_bytes(payload);
+    // frameが他hartの出力に割り込まれないよう1 lock区間で書く。
+    crate::console::write_frame(&header, payload);
 }
 
 /// guestの実行準備が整ったことをhostへ通知し、以降のUARTをcontrol frameへ限定する。
