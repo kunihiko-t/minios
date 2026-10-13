@@ -155,8 +155,9 @@ MiniContainer control protocolのframeを解析し、Ready、標準出力、標�
 deviceが完了を返す前にpollが勝つとmarkerが出ないため、割り込み経路を通った証拠になります。
 `net-udp`ではnet_udp guestのimageを通常カーネルと`-netdev user`のvirtio-net deviceとともに起動し、guestが`socket`/`sendto`/`recvfrom`でhost alias 10.0.2.2:7777のUDP echoと往復します。
 harnessは`127.0.0.1:7777`でechoを返し、guestは`recvfrom`でblockしたままvirtio-netの受信割り込みで起きてから、payloadと送信元`SockAddr`を検証して終了コード42を返します。
-`net-sock`では二つのimageを同じnetwork構成へ渡し、先に走るnet-hog (pid 0) がsocket tableの全4 socketを開いてすぐ終了し、後続のnet-udp (pid 1) が同じtableからsocketを得てechoまで済ませます。
-開いたsocketがprocess終了時に自動回収されることが、両processの終了コード42の直接証拠になります（回収されなければpid 1は`EMFILE`で失敗します）。
+`net-sock`では二つのimageを同じnetwork構成へ渡し、net-hog (pid 0) がsocket tableの全4 socketを開いて終了し、net-udp (pid 1) が同じtableからsocketを得てechoまで済ませます。
+table獲得の順序はschedulerのdispatch次第なので、net-udpが先にslotを掴んでhogが解放を待つrunもあります。どちらの順でも、片方の終了後にもう片方が成功するにはsocketの自動回収が必須です。
+開いたsocketがprocess終了時に自動回収されることが、両processの終了コード42の直接証拠になります（回収されなければ後続は`EMFILE`で失敗します）。
 `smp-boot`は`-smp 2`で起動する唯一のtestで、boot hartがSBI HSMの`hart_start`でsecondary hartを起こし、secondaryがS-modeへ到達してatomic flagを立てることをdeadline内に観測します。
 `file`ではfile_read guestのimageをpayload loaderとvirtio-blk diskの両方とともに起動し、guestが`read_file` syscallで`DOCS/NOTE.TXT`を読んで内容を標準出力へ出し、終了コード42を返すことを要求します。
 `file-fd`ではfile_fd guestが同じfileを`open`して分割`read`でoffsetを進め、EOF、二重`close`と未割り当てfdの`EBADF`、存在しないfileの`ENOENT`を確かめてから終了コード42を返すことを要求します。

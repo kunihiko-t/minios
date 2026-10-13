@@ -2057,12 +2057,13 @@ fn verify_net_udp_result(
     Ok(output.to_owned())
 }
 
-/// net-sock検証: 先に走るnet-hog (pid 0) がsocket tableを満杯にして終了し、
-/// 後続のnet-udp (pid 1) が同じtableからsocketを得てechoまで済ませること
-/// を確認する。hogはblockしないsyscallだけを行うため最初のquantumで
-/// 終わり、ProcExitはpid 0→1の順で確定的である。hogのsocketが回収
-/// されなければpid 1は`EMFILE`で落ちて(70,42)に化けるため、両者の
-/// code 42が自動回収の直接証拠になる。
+/// net-sock検証: net-hog (pid 0) がsocket tableを満杯にして終了し、
+/// net-udp (pid 1) が同じtableからsocketを得てechoまで済ませることを
+/// 確認する。table獲得の順序はscheduler次第なので、net-udpが先にslotを
+/// 掴んでhogが待つrunもある。どちらの順でも、片方がsocketを持ち続けて
+/// 終了した後にもう片方が成功するには終了時の自動回収が必須で、両者の
+/// code 42がその直接証拠になる（回収されなければ後続は`EMFILE`で70に
+/// 化ける）。
 fn verify_net_sock_result(
     command: &str,
     status: Option<i32>,
@@ -2102,21 +2103,18 @@ fn verify_net_sock_result(
         }
     }
 
-    let position = |marker: &[u8]| {
-        stdout
-            .windows(marker.len())
-            .position(|window| window == marker)
-    };
     let spawned_ok = diagnostics.contains("spawned pid=0 name=net-hog\n")
         && diagnostics.contains("spawned pid=1 name=net-udp\n");
-    let (hog, echo) = (
-        position(b"net-hog: held 4 sockets\n"),
-        position(b"net-udp: echo 16 bytes from 10.0.2.2:7777\n"),
-    );
-    let ordered = matches!((hog, echo), (Some(hog), Some(echo)) if hog < echo);
-    let exits_ok = proc_exits == [(0, 42), (1, 42)];
+    let markers_ok = stdout
+        .windows(b"net-hog: held 4 sockets\n".len())
+        .any(|window| window == b"net-hog: held 4 sockets\n")
+        && stdout
+            .windows(b"net-udp: echo 16 bytes from 10.0.2.2:7777\n".len())
+            .any(|window| window == b"net-udp: echo 16 bytes from 10.0.2.2:7777\n");
+    let exits_ok =
+        proc_exits.len() == 2 && proc_exits.contains(&(0, 42)) && proc_exits.contains(&(1, 42));
     let done_ok = diagnostics.contains("MiniOS payload: ok processes=2");
-    if !spawned_ok || !ordered || !exits_ok || !done_ok {
+    if !spawned_ok || !markers_ok || !exits_ok || !done_ok {
         return Err(QemuError::PayloadFrames {
             command: command.to_owned(),
             output: output.to_owned(),
