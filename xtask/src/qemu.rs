@@ -39,6 +39,7 @@ const NET_ARP_MARKER: &str = "[MINIOS_TEST] net-arp: ok";
 const NET_PING_MARKER: &str = "[MINIOS_TEST] net-ping: ok";
 const SMP_BOOT_MARKER: &str = "[MINIOS_TEST] smp-boot: ok";
 const SMP_TIMER_MARKER: &str = "[MINIOS_TEST] smp-timer: ok";
+const SMP_IPI_MARKER: &str = "[MINIOS_TEST] smp-ipi: ok";
 const PAYLOAD_READY_FRAME: &[u8] = b"MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
 /// Ready frameと同じbyte列の`&str`。live出力のwindow照合で待つ。
 const PAYLOAD_READY_TEXT: &str = "MCF1\x01\0\0\0\x04\0\0\0\x01\0\x02\0";
@@ -200,6 +201,7 @@ pub enum TestKind {
     Shell,
     SmpBoot,
     SmpTimer,
+    SmpIpi,
 }
 
 impl TestKind {
@@ -279,6 +281,7 @@ impl TestKind {
             Self::ProcKill => unreachable!("proc-killは通常kernelを使う"),
             Self::SmpBoot => "qemu-test-smp-boot",
             Self::SmpTimer => "qemu-test-smp-timer",
+            Self::SmpIpi => "qemu-test-smp-ipi",
             Self::Shell => unreachable!("the shell test boots the normal kernel"),
         }
     }
@@ -370,6 +373,7 @@ impl TestKind {
             Self::Shell => unreachable!("the shell test verifies an interactive transcript"),
             Self::SmpBoot => SMP_BOOT_MARKER,
             Self::SmpTimer => SMP_TIMER_MARKER,
+            Self::SmpIpi => SMP_IPI_MARKER,
         }
     }
 
@@ -1118,7 +1122,10 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         );
     }
 
-    if matches!(kind, TestKind::SmpBoot | TestKind::SmpTimer) {
+    if matches!(
+        kind,
+        TestKind::SmpBoot | TestKind::SmpTimer | TestKind::SmpIpi
+    ) {
         let kernel = cargo::build_kernel_for_test(kind.feature()).map_err(QemuError::Build)?;
         let (command, command_line) = qemu_command_with_harts(&kernel, 2);
         return run_marker_test(kind, command, command_line, deadline);

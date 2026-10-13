@@ -27,7 +27,7 @@ cargo xtask setup
 cargo xtask build
 cargo xtask run
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer|smp-ipi]
 cargo xtask check
 ```
 
@@ -102,8 +102,9 @@ parserを変更したときに手動で実行するもので、詳しい手順�
 50. QEMUシェルテスト
 51. QEMU smp-bootテスト
 52. QEMU smp-timerテスト
+53. QEMU smp-ipiテスト
 
-速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、UART受信割り込み、VirtIO block完了割り込み、VirtIO netのARP往復、ICMP echo往復、UDP socket往復、socket所有権と自動回収、killによるprocess終了、対話シェル、`-smp 2`でのsecondary hart起動、secondary hartのtimer割り込み受信という依存関係の順に、ゲストの全経路を確認します。
+速いホストテストを先に実行してから、起動、トラップ、タイマー、メモリー、VM、ELF、U-mode、kernel stackの溢れ検出、FDT、ヒープ、VirtIO block、payload、payload-args、payload-stdin、file読み取り、file descriptor、file書き込み、file削除、位置指定I/O、file改名、directory作成と削除、process起動、user heap、時刻と待機、fdの複製、spawnへのargv、user shell、スケジューラー、stdin待ちprocessを含むスケジューラー、分割frame受信、UART受信割り込み、VirtIO block完了割り込み、VirtIO netのARP往復、ICMP echo往復、UDP socket往復、socket所有権と自動回収、killによるprocess終了、対話シェル、`-smp 2`でのsecondary hart起動、secondary hartのtimer割り込み受信、secondary hartへのsoftware割り込み配送という依存関係の順に、ゲストの全経路を確認します。
 
 RV32 release buildのphaseでは、ELFの実ロード範囲からIMEMの使用量・容量・残量も表示します。
 容量と起点はリンカーの`ORIGIN(IMEM)`・`LENGTH(IMEM)`由来のELFシンボルを使い、`.data`のIMEMロード分と配置の隙間を使用量に含めます。BSSのDMEM領域は含めません。
@@ -112,7 +113,7 @@ ELFを読めない場合やロード領域が容量を超える場合はphaseを
 
 ### QEMUの三つの検証モード
 
-起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、kernel-stack、FDT、ヒープ、VirtIO、net-arp、net-ping、smp-boot、smp-timerのテストは**マーカーモード**です。
+起動、トラップ、タイマー、メモリー、VM、ELF、user-entry、user-trap、user-syscall、kernel-stack、FDT、ヒープ、VirtIO、net-arp、net-ping、smp-boot、smp-timer、smp-ipiのテストは**マーカーモード**です。
 テストごとのCargo機能を有効にしてカーネルをビルドし、UARTの記録、終了ステータス0、次の完全一致するマーカーを要求します。
 
 ```text
@@ -161,6 +162,7 @@ table獲得の順序はschedulerのdispatch次第なので、net-udpが先にslo
 開いたsocketがprocess終了時に自動回収されることが、両processの終了コード42の直接証拠になります（回収されなければ後続は`EMFILE`で失敗します）。
 `smp-boot`は`-smp 2`で起動し、boot hartがSBI HSMの`hart_start`でsecondary hartを起こし、secondaryがS-modeへ到達してconsole lock経由でprintしてatomic flagを立てることをdeadline内に観測します。
 `smp-timer`も`-smp 2`で起動し、secondary hartが自分専用の`stvec` handlerでtimer割り込み（hartごとの`stimecmp`）を受けて`sret`で復帰することを観測します。handlerは`STIP`がpendingのまま再発火しないよう`sie.STIE`を降ろしてから`stvec`をpark loopへ差し替えます。
+`smp-ipi`も`-smp 2`で起動し、secondaryが`SSIE`を立てて待機したことをatomic flagで公開してから、boot hartがSBI IPIの`send_ipi`で対象hartへsoftware割り込みを送ります。secondaryのhandlerは`sip.SSIP`をクリアし、`sie.SSIE`を降ろして`sret`で復帰します。
 `file`ではfile_read guestのimageをpayload loaderとvirtio-blk diskの両方とともに起動し、guestが`read_file` syscallで`DOCS/NOTE.TXT`を読んで内容を標準出力へ出し、終了コード42を返すことを要求します。
 `file-fd`ではfile_fd guestが同じfileを`open`して分割`read`でoffsetを進め、EOF、二重`close`と未割り当てfdの`EBADF`、存在しないfileの`ENOENT`を確かめてから終了コード42を返すことを要求します。
 `file-write`ではfile_write guestが`GUEST.TXT`を`create`して内容を`write`し、閉じてから`open`で読み直して内容を往復させます。
@@ -318,6 +320,7 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 63. QEMU shell test
 64. QEMU smp-boot test
 65. QEMU smp-timer test
+66. QEMU smp-ipi test
 ```
 
 各見出しは`[現在/総数]`、各段階の結果は経過時間を表示します。
@@ -356,12 +359,12 @@ QEMUのバージョンと各段階の秒数は環境によって変わります�
 
 ```console
 $ cargo xtask check
-[1/65] cargo fmt --all -- --check
-phase 1/65 passed (elapsed: ...s)
+[1/66] cargo fmt --all -- --check
+phase 1/66 passed (elapsed: ...s)
 ...
-[65/65] QEMU smp-timer test
-phase 65/65 passed (elapsed: ...s)
-summary: PASSED all 65 phases (elapsed: ...s)
+[66/66] QEMU smp-ipi test
+phase 66/66 passed (elapsed: ...s)
+summary: PASSED all 66 phases (elapsed: ...s)
 ```
 
 この実行例の段階数と上の段階一覧は、`xtask`が組み立てた検査計画と一致するか文書検査で確認します。

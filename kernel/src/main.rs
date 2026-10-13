@@ -882,6 +882,11 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
         qemu_test::smp_timer::run(hart_id);
     }
 
+    #[cfg(feature = "qemu-test-smp-ipi")]
+    {
+        qemu_test::smp_ipi::run(hart_id);
+    }
+
     if let Some(payload) = payload {
         payload::run_boot_payload(&kernel_space, &plan, &mut frames, &mut memory, payload);
     }
@@ -989,7 +994,8 @@ fn fatal_payload_error(arguments: core::fmt::Arguments<'_>) -> ! {
         feature = "qemu-test-net-arp",
         feature = "qemu-test-net-ping",
         feature = "qemu-test-smp-boot",
-        feature = "qemu-test-smp-timer"
+        feature = "qemu-test-smp-timer",
+        feature = "qemu-test-smp-ipi"
     )
 ))]
 fn successful_qemu_test_shutdown() -> ! {
@@ -1013,7 +1019,8 @@ fn successful_qemu_test_shutdown() -> ! {
         feature = "qemu-test-net-arp",
         feature = "qemu-test-net-ping",
         feature = "qemu-test-smp-boot",
-        feature = "qemu-test-smp-timer"
+        feature = "qemu-test-smp-timer",
+        feature = "qemu-test-smp-ipi"
     )
 ))]
 fn fatal_qemu_test(arguments: core::fmt::Arguments<'_>) -> ! {

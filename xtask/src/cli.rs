@@ -94,6 +94,7 @@ pub enum TestFilter {
     Shell,
     SmpBoot,
     SmpTimer,
+    SmpIpi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +112,7 @@ pub fn help() -> &'static str {
   cargo xtask run\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
   cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer]\n\
+  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer|smp-ipi]\n\
   cargo xtask check\n\
   cargo xtask fuzz --target <fat32|elf|boot-payload> [--seed <n>] [--iters <n>] [--max-bytes <n>] [--input-timeout <secs>] [--time-limit <secs>] [--alloc-cap <n>] [--corpus <dir>] [--output <dir>]\n\
   cargo xtask fuzz --target <fat32|elf|boot-payload> --input <file>"
@@ -267,6 +268,9 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         [command, test] if command == "test" && test == "smp-timer" => {
             Ok(Command::Test(TestFilter::SmpTimer))
+        }
+        [command, test] if command == "test" && test == "smp-ipi" => {
+            Ok(Command::Test(TestFilter::SmpIpi))
         }
         [command] if command == "check" => Ok(Command::Check),
         [command, options @ ..] if command == "bundle" => {
@@ -552,6 +556,7 @@ mod tests {
             (vec!["test", "shell"], TestFilter::Shell),
             (vec!["test", "smp-boot"], TestFilter::SmpBoot),
             (vec!["test", "smp-timer"], TestFilter::SmpTimer),
+            (vec!["test", "smp-ipi"], TestFilter::SmpIpi),
         ] {
             assert_eq!(parse(&owned(&args)), Ok(Command::Test(expected)));
         }
@@ -576,7 +581,7 @@ mod tests {
             "cargo xtask run",
             "cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]",
             "cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]",
-            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer]",
+            "cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer|smp-ipi]",
             "cargo xtask check",
         ] {
             assert!(help.contains(command), "missing help entry: {command}");
