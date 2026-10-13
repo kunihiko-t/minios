@@ -27,6 +27,9 @@ qemu-test-net-arp = []
 qemu-test-net-ping = []
 # `-smp 2`環境でsecondary hartをSBI HSM経由で起動できることを確かめる。
 qemu-test-smp-boot = []
+# `-smp 2`環境でsecondary hartがper-hartのtrap handlerでtimer割り込みを
+# 受けられることを確かめる。
+qemu-test-smp-timer = []
 qemu-test-fdt = []
 qemu-test-heap = []
 qemu-test-virtio = []
