@@ -103,7 +103,8 @@ fn probe_net_stack() -> Result<minios_kernel::net::stack::Stack<RuntimeNetDevice
 }
 
 /// `socket`/`sendto`/`recvfrom` syscall向けのnetwork stackを借りる。
-/// 初回だけFDT probeを行い、以降は同じstackを返す。
+/// stackはpayloadのdispatch開始前に`init_net_stack`がprobeする。そこで
+/// deviceが無かった場合だけ、ここでFDT probeをlazyに再試行する。
 ///
 /// # Safety
 ///
@@ -118,6 +119,24 @@ pub(crate) unsafe fn borrow_net_stack()
         *stack = Some(probe_net_stack()?);
     }
     Ok(stack.as_mut().expect("probed above"))
+}
+
+/// dispatch開始前にnetwork stackをprobeする。deviceが無ければ失敗を捨て、
+/// 後の`socket`呼び出しがlazy probeを再試行するのに任せる。probeの
+/// コスト (device init・frame割当・rx bufferのpost) を最初の`socket`
+/// syscallへ乗せないための経路で、乗るとそのprocessのquantumを
+/// wall-clockで使い切り、slot確保の途中でpreemptされ得る。
+///
+/// # Safety
+///
+/// `borrow_net_stack`と同じく、他の借用が残っていない時点でだけ呼ぶこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn init_net_stack() {
+    let stack = unsafe { &mut *&raw mut NET_STACK };
+    if stack.is_none() {
+        *stack = probe_net_stack().ok();
+    }
 }
 
 /// `pid`を所有者とするsocketを全て閉じる。process回収時にsocket tableの
