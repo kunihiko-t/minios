@@ -18,9 +18,21 @@ minios_guest::entry!(main);
 fn main(_args: Args) -> i32 {
     let mut held = [None, None, None, None];
     for (index, slot) in held.iter_mut().enumerate() {
-        *slot = Some(UdpSocket::new().unwrap_or_else(|_| panic!("socket {index} failed")));
+        match UdpSocket::new() {
+            Ok(sock) => *slot = Some(sock),
+            Err(errno) => {
+                println!("net-hog: socket {index} failed errno={}", errno.0);
+                return 70;
+            }
+        }
     }
-    assert!(UdpSocket::new().is_err());
+    match UdpSocket::new() {
+        Err(_) => {}
+        Ok(_) => {
+            println!("net-hog: fifth socket unexpectedly opened");
+            return 70;
+        }
+    }
     println!("net-hog: held {MAX_SOCKETS} sockets");
     42
 }
