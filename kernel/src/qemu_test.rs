@@ -7,7 +7,8 @@
     feature = "qemu-test-memory",
     feature = "qemu-test-net-arp",
     feature = "qemu-test-net-ping",
-    feature = "qemu-test-smp-boot"
+    feature = "qemu-test-smp-boot",
+    feature = "qemu-test-smp-timer"
 ))]
 use super::*;
 
@@ -895,9 +896,14 @@ fn fatal_memory_test() -> ! {
     )
 }
 
-#[cfg(all(target_arch = "riscv64", feature = "qemu-test-smp-boot"))]
-pub(crate) mod smp_boot {
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+/// `-smp 2`でsecondary hartを起動するtest共通の仕組み。HSM entryの
+/// asm stub、専用bss stack、`hart_start`呼び出しをまとめる。
+#[cfg(all(
+    target_arch = "riscv64",
+    any(feature = "qemu-test-smp-boot", feature = "qemu-test-smp-timer")
+))]
+pub(crate) mod smp {
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -907,25 +913,58 @@ pub(crate) mod smp_boot {
     const SECONDARY_STACK_LEN: usize = 16 * 1024;
     static mut SECONDARY_STACK: [u128; SECONDARY_STACK_LEN / 16] = [0; SECONDARY_STACK_LEN / 16];
 
-    static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
-    static SECONDARY_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
+    /// secondary hart側で走らせるRust関数へのentry。`start`が
+    /// `hart_start`の前に書き、asm entryが読んでtail jumpする。
+    static SECONDARY_MAIN: AtomicUsize = AtomicUsize::new(0);
 
     /// SBI HSM `hart_start`が呼ぶentry。`a0`=hart id、`a1`=opaqueで、
     /// opaqueにはboot側がstack topを渡す。`sp`を立ててから
-    /// `secondary_main`へtail jumpする。entryの最初に`stvec`をpark
-    /// loopへ向け、stack未設定の区間のfaultを無限loopで留める。
+    /// `SECONDARY_MAIN`へ登録された関数へ`a0`を保ったままjumpする。
+    /// entryの最初に`stvec`をpark loopへ向け、stack未設定の区間の
+    /// faultを無限loopで留める。
     #[unsafe(naked)]
     unsafe extern "C" fn secondary_entry() -> ! {
         core::arch::naked_asm!(
             "lla t0, 1f",
             "csrw stvec, t0",
             "mv sp, a1",
-            "j {main}",
+            "lla t0, {main_slot}",
+            "ld t0, 0(t0)",
+            "jr t0",
             "1: wfi",
             "j 1b",
-            main = sym secondary_main
+            main_slot = sym SECONDARY_MAIN
         )
     }
+
+    /// QEMU `virt`の`-smp 2`でboot側でないhartを起動し、`a0`=hart idを
+    /// 保ったまま`main`へ入らせる。戻り値は起動したhart id。
+    pub(crate) fn start(
+        boot_hart: usize,
+        main: extern "C" fn(usize) -> !,
+    ) -> Result<usize, arch::riscv64::sbi::SbiError> {
+        SECONDARY_MAIN.store(main as usize, Ordering::Relaxed);
+        let secondary = if boot_hart == 0 { 1 } else { 0 };
+        // Safety: SECONDARY_STACKはこのtest専用の静的領域で、起動される
+        // secondary hartだけがstackとして使う。参照は作らずraw pointerで
+        // 渡す。
+        let stack_top = (&raw mut SECONDARY_STACK)
+            .cast::<u8>()
+            .wrapping_add(SECONDARY_STACK_LEN) as usize;
+        arch::riscv64::sbi::hart_start(secondary, secondary_entry as *const () as usize, stack_top)
+            .map(|_| secondary)
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-smp-boot"))]
+pub(crate) mod smp_boot {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::smp;
+    use super::*;
+
+    static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
+    static SECONDARY_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
 
     /// secondary hartの起動確認だけを行い、以降はparkする。schedulerへの
     /// 参加はsmp-sched段階の仕事で、ここではS-modeへ自力到達した証拠を
@@ -946,24 +985,12 @@ pub(crate) mod smp_boot {
     /// `-smp 2`環境でboot hartがSBI HSM経由でsecondary hartを起動し、
     /// secondaryがS-mode codeを実行したことをmarkerで観測する。
     pub(crate) fn run(boot_hart: usize) {
-        // QEMU `virt`の`-smp 2`ではhart 0/1の二つ。boot側でない方を起こす。
-        let secondary = if boot_hart == 0 { 1 } else { 0 };
-        // Safety: SECONDARY_STACKはこのtest専用の静的領域で、起動される
-        // secondary hartだけがstackとして使う。参照は作らずraw pointerで
-        // 渡す。
-        let stack_top = (&raw mut SECONDARY_STACK)
-            .cast::<u8>()
-            .wrapping_add(SECONDARY_STACK_LEN) as usize;
-        if let Err(error) = arch::riscv64::sbi::hart_start(
-            secondary,
-            secondary_entry as *const () as usize,
-            stack_top,
-        ) {
-            fatal_qemu_test(format_args!(
-                "smp-boot: hart_start secondary={secondary} boot={boot_hart} entry=0x{:x} stack=0x{stack_top:x}: {error:?}",
-                secondary_entry as *const () as usize
-            ));
-        }
+        let secondary = match smp::start(boot_hart, secondary_main) {
+            Ok(secondary) => secondary,
+            Err(error) => fatal_qemu_test(format_args!(
+                "smp-boot: hart_start boot={boot_hart}: {error:?}"
+            )),
+        };
         let deadline = time::ticks() + 100;
         while !SECONDARY_READY.load(Ordering::Acquire) {
             if time::ticks() >= deadline {
@@ -977,6 +1004,100 @@ pub(crate) mod smp_boot {
         }
         crate::println!("[MINIOS_TEST] smp-boot: secondary hart={secondary}");
         crate::println!("[MINIOS_TEST] smp-boot: ok");
+        successful_qemu_test_shutdown()
+    }
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "qemu-test-smp-timer"))]
+pub(crate) mod smp_timer {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::smp;
+    use super::*;
+
+    static TIMER_HIT: AtomicBool = AtomicBool::new(false);
+    static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
+    static SECONDARY_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// secondary hart専用のtimer trap handler。割り込まれる側は`wfi`
+    /// loopだけなのでregisterの保存を省略する。`stimecmp`は期限切れの
+    /// まま`STIP`を出し続けるため、`sie.STIE`を降ろして再割り込みを
+    /// 止めてから`stvec`をpark loopへ差し替えて`sret`する。
+    #[unsafe(naked)]
+    unsafe extern "C" fn timer_trap() -> ! {
+        core::arch::naked_asm!(
+            "lla t0, {hit}",
+            "li t1, 1",
+            "sb t1, 0(t0)",
+            "li t1, 0x20",
+            "csrc sie, t1",
+            "lla t0, 1f",
+            "csrw stvec, t0",
+            "sret",
+            "1: wfi",
+            "j 1b",
+            hit = sym TIMER_HIT
+        )
+    }
+
+    /// secondary hartが自分の`stimecmp`経由のtimer割り込みを専用handlerで
+    /// 受けることを確かめる。SBIのtimer設定はhartごとなので、これが通れば
+    /// per-hartの割り込み配送とper-hartのtrap entryが動いた証拠になる。
+    extern "C" fn secondary_main(hart_id: usize) -> ! {
+        SECONDARY_HART.store(hart_id, Ordering::Relaxed);
+        use arch::riscv64::csr;
+        // Safety: 割り込まれるのは下の`wfi`loopだけで、registerを使い回さない。
+        unsafe {
+            csr::write_stvec(timer_trap as *const () as usize);
+        }
+        // 2 tick先にdeadlineをarmする。`stimecmp`はhartごとのCSRなので
+        // このtimerはsecondary hartへだけ届く。
+        let deadline = csr::read_time().wrapping_add(2 * time::CYCLES_PER_TICK);
+        if let Err(error) = arch::riscv64::sbi::set_timer(deadline) {
+            fatal_qemu_test(format_args!(
+                "smp-timer: set_timer on hart {hart_id}: {error:?}"
+            ));
+        }
+        // Safety: `stvec`とtimer deadlineを先に設定済み。STIE(5)とSIE(1)を
+        // 立ててtimer割り込みを受ける。
+        unsafe {
+            csr::write_sie(csr::read_sie() | (1 << 5));
+            csr::write_sstatus(csr::read_sstatus() | (1 << 1));
+        }
+        while !TIMER_HIT.load(Ordering::Acquire) {
+            // Safety: STIE/SIEを立てた`wfi`なのでtimer割り込みが起こす。
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        }
+        crate::println!("[MINIOS_TEST] smp-timer: secondary running hart={hart_id}");
+        SECONDARY_READY.store(true, Ordering::Release);
+        loop {
+            // Safety: `sie`はhandlerが0にしているので`wfi`は二度と起きない。
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        }
+    }
+
+    /// `-smp 2`環境でsecondary hartが自分専用のtrap handlerでtimer
+    /// 割り込みを受けることをdeadline内に観測する。
+    pub(crate) fn run(boot_hart: usize) {
+        let secondary = match smp::start(boot_hart, secondary_main) {
+            Ok(secondary) => secondary,
+            Err(error) => fatal_qemu_test(format_args!(
+                "smp-timer: hart_start boot={boot_hart}: {error:?}"
+            )),
+        };
+        let deadline = time::ticks() + 100;
+        while !SECONDARY_READY.load(Ordering::Acquire) {
+            if time::ticks() >= deadline {
+                fatal_qemu_test(format_args!(
+                    "smp-timer: secondary hart {secondary} did not fire (TIMER_HIT={})",
+                    TIMER_HIT.load(Ordering::Relaxed)
+                ));
+            }
+        }
+        if SECONDARY_HART.load(Ordering::Relaxed) != secondary {
+            fatal_qemu_test(format_args!("smp-timer: wrong hart id"));
+        }
+        crate::println!("[MINIOS_TEST] smp-timer: ok");
         successful_qemu_test_shutdown()
     }
 }
