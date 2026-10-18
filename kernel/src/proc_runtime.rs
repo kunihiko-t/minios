@@ -482,7 +482,7 @@ pub(crate) unsafe fn block_current_on_io() {
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
 pub(crate) unsafe fn spawn_process(
-    name: &'static str,
+    name: &str,
     elf: &[u8],
     arguments: &[&str],
 ) -> Result<
@@ -596,7 +596,7 @@ pub(crate) unsafe fn kill_pid(target: usize) -> Result<(), isize> {
 #[cfg(target_arch = "riscv64")]
 #[allow(clippy::deref_addrof)]
 pub(crate) unsafe fn exec_current_process(
-    name: &'static str,
+    name: &str,
     elf: &[u8],
 ) -> Result<
     UserContext,

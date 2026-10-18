@@ -227,13 +227,11 @@ impl ControlSource for UartControlSource<'_> {
             .read_file(path, |chunk| elf.extend_from_slice(chunk))
             .map_err(fat_errno)?;
 
-        // `Process.name`は`&'static str`必須のため、argv[0]をleakする。
-        // spawn回数比例の小さいleakとして明示的に許容する。
+        // `Process`が名前を所有するため、ここでは借用のまま渡す。
         let (name, arguments) = match argv.split_first() {
             Some((first, rest)) => (*first, rest),
             None => (path.rsplit('/').next().unwrap_or(path), &[][..]),
         };
-        let name = alloc::string::String::from(name).leak();
 
         // Safety: 同上。返り値のprocess所有権はinsertか回収まで持つ。
         let process = match unsafe { crate::spawn_process(name, &elf, arguments) } {
@@ -293,10 +291,8 @@ impl ControlSource for UartControlSource<'_> {
             .read_file(path, |chunk| elf.extend_from_slice(chunk))
             .map_err(fat_errno)?;
 
-        // `spawn`と同じく`Process.name`は`&'static str`必須のため、
-        // basenameをleakする。
+        // `Process`が名前を所有するため、ここでは借用のまま渡す。
         let name = path.rsplit('/').next().unwrap_or(path);
-        let name = alloc::string::String::from(name).leak();
 
         // Safety: 同上。失敗してもprocessは旧imageのまま残る。
         match unsafe { crate::exec_current_process(name, &elf) } {

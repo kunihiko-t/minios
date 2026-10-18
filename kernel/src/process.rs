@@ -5,6 +5,7 @@
 //! 参照は保持せず、各操作の呼び出し側が都度渡す。`ProcessTable`はheap-backedな
 //! live process集合でround-robin選択を担う状態機械であり、host test可能にする。
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -352,7 +353,10 @@ impl FileFdTable {
 /// 終了時の明示的なcloseは要らない。
 /// `pid`は`ProcessTable::insert`が採番する。`usize::MAX`は未割当を示す。
 pub struct Process {
-    name: &'static str,
+    /// `spawn`と`exec`のたびにheapへ確保し、processのdropで解放する。
+    /// 静的領域やleakした`String`を指させると、shellが繰り返す`spawn`で
+    /// kernel heapが減り続ける。
+    name: String,
     pid: usize,
     image: Option<LoadedImage>,
     /// `exec`で置き換えられた旧image。trap実行窓では旧callerのsatpが
@@ -385,7 +389,7 @@ impl Process {
     /// 要らない。`kernel_mappings`はsupervisor専用の借用mappingとして
     /// 各user spaceへ複写される。
     pub fn spawn<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
-        name: &'static str,
+        name: &str,
         elf: &[u8],
         arguments: &[&str],
         file_fds: FileFdTable,
@@ -439,7 +443,7 @@ impl Process {
         let user_satp = sv39_satp_bits(user_root);
 
         Ok(Self {
-            name,
+            name: String::from(name),
             pid: usize::MAX,
             image: Some(image),
             retired_image: None,
@@ -462,7 +466,7 @@ impl Process {
     /// できず、run loopがkernel satpへ戻った直後に回収する。
     pub fn exec<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
         &mut self,
-        name: &'static str,
+        name: &str,
         elf: &[u8],
         arguments: &[&str],
         allocator: &mut dyn FrameSource,
@@ -512,7 +516,7 @@ impl Process {
         debug_assert!(self.retired_image.is_none());
         self.retired_image = old;
         self.user_satp = sv39_satp_bits(user_root);
-        self.name = name;
+        self.name = String::from(name);
         Ok(context)
     }
 
@@ -522,8 +526,8 @@ impl Process {
         self.retired_image.take()
     }
 
-    pub const fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// `ProcessTable::insert`が採番したpid。未insertなら`usize::MAX`。
