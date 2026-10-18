@@ -510,18 +510,31 @@ mod tests {
                 let descs = &*(self.desc_addr as *const [super::Desc; super::QUEUE_LEN]);
                 let header = &*(descs[0].addr as *const super::RequestHeader);
 
-                assert_eq!(header.request_type, super::BLK_REQUEST_IN);
                 assert_eq!(descs[0].flags, super::DESC_NEXT);
-                assert_eq!(descs[1].flags, super::DESC_NEXT | super::DESC_WRITE);
-                assert_eq!(descs[1].len, 512);
                 assert_eq!(descs[2].flags, super::DESC_WRITE);
                 assert_eq!(descs[2].len, 1);
-
-                core::ptr::copy_nonoverlapping(
-                    self.sector_data.as_ptr(),
-                    descs[1].addr as *mut u8,
-                    512,
-                );
+                match header.request_type {
+                    super::BLK_REQUEST_IN => {
+                        assert_eq!(descs[1].flags, super::DESC_NEXT | super::DESC_WRITE);
+                        assert_eq!(descs[1].len, 512);
+                        core::ptr::copy_nonoverlapping(
+                            self.sector_data.as_ptr(),
+                            descs[1].addr as *mut u8,
+                            512,
+                        );
+                    }
+                    #[cfg(not(target_arch = "riscv32"))]
+                    super::BLK_REQUEST_OUT => {
+                        assert_eq!(descs[1].flags, super::DESC_NEXT);
+                        assert_eq!(descs[1].len, 512);
+                        core::ptr::copy_nonoverlapping(
+                            descs[1].addr as *const u8,
+                            self.sector_data.as_mut_ptr(),
+                            512,
+                        );
+                    }
+                    other => panic!("unexpected request type {other}"),
+                }
                 *(descs[2].addr as *mut u8) = self.result_status;
 
                 let slot = (used.idx % super::QUEUE_LEN as u16) as usize;
@@ -706,6 +719,33 @@ mod tests {
         assert_eq!(
             blk.read_sector(0, &mut buf),
             Err(VirtioError::DeviceStatus(1))
+        );
+    }
+
+    // Catches a write that marks the data descriptor device-writable, sends
+    // the wrong sector data, or ignores the device's status byte.
+    #[cfg(not(target_arch = "riscv32"))]
+    #[test]
+    fn write_sector_sends_device_readable_data_and_propagates_device_status() {
+        use crate::storage::SectorWriter;
+
+        let (device, region) = device_and_region();
+        let mut blk = VirtioBlk::init(device, region).unwrap();
+        let mut source = [0u8; 512];
+        for (index, byte) in source.iter_mut().enumerate() {
+            *byte = (index % 241) as u8;
+        }
+        assert_eq!(blk.write_sector(4096, &source), Err(VirtioError::BadLba));
+        blk.write_sector(3, &source).unwrap();
+        assert_eq!(blk.mmio.sector_data, source);
+        assert!(blk.in_flight.is_none());
+
+        let (mut device, region) = device_and_region();
+        device.result_status = 2; // VIRTIO_BLK_S_UNSUPP
+        let mut blk = VirtioBlk::init(device, region).unwrap();
+        assert_eq!(
+            blk.write_sector(0, &source),
+            Err(VirtioError::DeviceStatus(2))
         );
     }
 
