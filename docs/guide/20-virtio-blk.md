@@ -4,7 +4,7 @@
 
 FDTが報告するvirtio-mmio slotから、block deviceを探し出す流れを説明できるようになります。
 reset、ACK、DRIVER、FEATURES_OK、DRIVER_OKの順に進むvirtio v2の初期化手順と、`VIRTIO_F_VERSION_1`だけを要求するfeature negotiationを追います。
-header、data、statusの3-desc chainでsectorを要求し、used ringをpollして完了を待つ仕組みを確認します。
+header、data、statusの3-desc chainでsectorを要求し、used ringの完了を短期pollと割り込み起床で回収する仕組みを確認します。
 QEMU検査用のFAT32 disk imageをxtaskが組み立て、QEMUへ接続する手順を確認します。
 
 ## 背景
@@ -16,8 +16,9 @@ QEMU `virt`は、`virtio,mmio`互換のtransport slotを複数持ちます。
 各slotは固定のregister fileであり、deviceを接続したslotだけが有効な`DeviceID`を返します。
 **virtqueue**は、driverがrequestを置くdescriptor tableとavail ring、deviceが完了を返すused ringの三つから成る共有メモリ上のqueueです。
 
-MiniOSのvirtio-blk driverは、完了を割り込みではなくused ringのpollで待ちます。
-PLIC driverを持たない現段階でもdiskを使えるようにするためで、割り込み完了への置き換えは[ロードマップ](../reference/roadmap.md)の割り込み駆動I/Oで扱います。
+MiniOSのvirtio-blk driverは、requestの投入後にused ringを短期間pollします。
+完了が来なければprocessを`BlockedOnIo`へ退避し、PLIC経由のused-buffer割り込みで起こして同じrequestの完了を回収します。
+schedulerに退避先のprocessがないkernel shellやprobeの文脈では、従来どおりboundedのpollで完了まで待ちます。
 
 ## 実装
 
@@ -72,7 +73,9 @@ statusには事前に`0xff`を書き、avail ringのslotへchain先頭のdescrip
 `fence(Release)`の後で`avail.idx`を進め、`fence(SeqCst)`の後で`QueueNotify`へ0を書きます。
 この順序により、deviceはdescriptorとbufferの更新を見てからrequestを受け取ります。
 
-完了待ちは`used.idx`が前回値から変わるまでのbusy loopで、`POLL_LIMIT`（5,000,000回）を超えると`Timeout`を返します。
+完了待ちは`used.idx`が前回値から変わるまでのbusy loopです。
+process実行窓では`QUICK_POLL_LIMIT`（4,096回）で打ち切って`WouldBlock`を返し、callerを`BlockedOnIo`へ退避させます。
+それ以外の文脈では`POLL_LIMIT`（5,000,000回）を超えると`Timeout`を返します。
 完了後は`fence(Acquire)`でdeviceの書き込みを確定させ、used要素を読み、`InterruptStatus`の値を`InterruptACK`へ書き戻します。
 used要素の`id`が0以外なら`BadUsedId`、status byteが0以外なら`DeviceStatus`を返します。
 requestは常に一件ずつ発行して完了まで待つため、descriptor 0..2を毎回使い回せます。

@@ -5,6 +5,7 @@ MiniOSは、RustとRISC-VでOSの基礎を段階的に学ぶための小さな`n
 OpenSBIからS-modeで起動し、UARTシェル、トラップ、100 Hzのタイマー、ビットマップ方式の物理ページアロケーター、Sv39のカーネルアドレス空間を備えています。
 静的なRISC-V 64 ELFを検証してU-modeで実行するloaderと、複数のprocessをタイマー割り込みで切り替えるround-robin schedulerを備えています。
 virtio-blk上のFAT32 volumeを読み書きでき、user programはfile descriptor、process生成、pipeなどのsystem callを使えます。
+virtio-net上の最小のnetwork stack（ARP、IPv4、ICMP echo、UDP）もあり、guestは`socket`、`sendto`、`recvfrom`を使えます。
 system callの一覧は[MiniContainer Guest ABI](docs/reference/minicontainer-abi.md#syscall-abi-v1)にあります。
 最初のuser programはMiniBundle boot payloadとしてQEMU loaderから渡し、そのprogramが`spawn`でFAT32上のELFを別のprocessとして起動できます。
 user modeのshell `SH.ELF`は、`cat HELLO.TXT | wc`のようなpipelineと`<`、`>`のredirectで、FAT32の`BIN`に置いたtoolを起動します。
@@ -64,12 +65,12 @@ user shellは`cargo xtask test user-shell`がscriptを流して動かし、そ�
 | --- | --- | --- |
 | ホスト | Apple Silicon搭載macOS、Ubuntu 24.04 | macOSはQEMU 11.1.0、UbuntuはGitHub ActionsとQEMU 8.2系で検証 |
 | Rust | 安定版1.98.0 | rustfmt、Clippy、RV64GCとRV32IMのベアメタルターゲットを固定 |
-| QEMUゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、1ハート、128 MiB RAM |
+| QEMUゲスト | RISC-V RV64GCおよびQEMU `virt` | OpenSBI、S-mode、既定1ハート、128 MiB RAM |
 | NEORV32 | RISC-V RV32IM | M-mode、内蔵IMEM 32,768バイト、内蔵DMEM 16,192バイト |
 | QEMUコンソール | 16550互換UART | MMIOベース`0x1000_0000`、シリアル標準入出力 |
 | NEORV32コンソール | UART0 | MMIOベース`0xfff5_0000`、96 MHz、19,200 baud |
 
-Windowsホスト、別のQEMUマシン、マルチハート、NEORV32以外の実機は保証しません。
+Windowsホスト、別のQEMUマシン、multi-hartでの通常実行、NEORV32以外の実機は保証しません。
 
 ## NEORV32向けRV32ビルド
 
@@ -144,22 +145,22 @@ cargo xtask check
 MiniOSが実行対象にするのは、静的RISC-V 64 ELFだけです。
 OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保証しません。
 
-次の機能は未実装です。
+次の機能は未実装か、検証済みの範囲が限られています。
 
-- **network**：virtio-netとprotocol stackはありません。
-- **マルチハート**：1ハートだけを起動し、kernel内の共有状態はlockを前提にしていません。
-- **割り込み駆動のI/O**：UART入力とvirtio-blkの完了はpollingで待ちます。
+- **TCP**：network stackはARP、IPv4、ICMP echo、UDPだけを扱います。
+- **SMPでの通常実行**：2 hart目の起動、hartごとのtimer割り込み、IPI配送は`smp-*`のQEMU経路で確認していますが、通常実行は1 hartで、schedulerとkernel内の共有状態はlockで保護していません。
 - **NEORV32以外の実機driver**：実機経路はNEORV32のUARTとSDカードだけです。
 
 実装済みの機能にも、教材として小さく保つための上限があります。
 
 - 同時に動かせるprocessは4個までで、各processが開けるfileはfd 0、1、2とは別に16個までです。
 - pipeのbufferは256 byteで、満杯のときは書き込み側が待ちます。
+- UDP socketは同時に4個までで、TCPは扱いません。
 - user shellのpipelineはshellと合わせてprocess上限に収まる3個のcommandまでで、1行は256 byteまでです。
 - guestのheapは`sbrk`で伸ばせますが、縮めることはできません。
 - FAT32へ新しく作れるfile名とdirectory名は、8.3形式へ正規化できる名前だけです。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。
-- ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長しますが、取り込んだpageは返しません。
+- ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長します。下端の空きがpage単位で揃うと、取り込んだpageをframe poolへ返します。
 - ハードウェアアドレス、タイムベース、RAMの上端はOpenSBIが渡すDevice Treeから発見しますが、対象machineはQEMU `virt`の配置契約に限定しています。
 - シェルが受け付ける入力は印字可能なASCIIで最大128バイトです。
 

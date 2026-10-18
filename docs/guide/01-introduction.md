@@ -9,7 +9,8 @@ MiniOSの到達点と学習範囲を把握します。
 
 通常のRustプログラムは、プロセス、仮想メモリー、標準入出力などをOSから提供してもらいます。
 カーネルを作るときは、その提供元を自分で用意します。
-MiniOSの主教材では、対象をRISC-V 64、QEMU `virt`、OpenSBI、1ハート、128 MiB RAMに固定し、一つずつ観察できる規模に保っています。
+MiniOSの主教材では、基本構成をRISC-V 64、QEMU `virt`、OpenSBI、1ハート、128 MiB RAMに固定し、一つずつ観察できる規模に保っています。
+multi-hartの検証経路だけは`smp-*`のQEMUテストで2ハートを使います。
 同じコンソールとシェルの境界を使い、NEORV32上でRISC-V 32のM-mode起動も試せます。
 Rustの基本構文、Gitの基本操作、CPUが命令を順に実行することを知っていれば読み始められます。
 
@@ -25,12 +26,12 @@ Rustの基本構文、Gitの基本操作、CPUが命令を順に実行するこ�
 - 静的RISC-V 64 ELFを検証し、inactiveな`LoadedImage`として保持する実行前loader
 - U-mode遷移、user trap context、`write`と`exit`のsystem call、実行用frameの回収
 - 予約済みMiniBundleを検証し、boot payloadをU-modeで実行する経路
-- ヒープを使わない固定長入力と六つのコマンドを持つ対話シェル
-- NEORV32のIMEMとDMEMへ配置するRV32IMカーネルと、三つのコマンドを持つUARTシェル
+- ヒープを使わない固定長入力を持つ対話シェル
+- NEORV32のIMEMとDMEMへ配置するRV32IMカーネルと、UARTシェル
 - ホストテスト、RISC-Vクロスビルド、QEMUテストを統合する`cargo xtask`
 
-動的ヒープ、scheduler、ファイルシステム、ネットワーク、マルチハート、NEORV32以外の実機対応は、現在の実装には含めません。
-これらは[第12章](12-next-steps.md)の発展課題として扱います。
+ここまでの実装に、動的ヒープ、scheduler、virtio-blkとFAT32、file descriptor、process間の連携、network、SMPの一部が続きます。
+第13章以降で機能を追加し、その先の計画は[発展ロードマップ](../reference/roadmap.md)にあります。
 
 ソースコードを読む入口も確認しておきましょう。
 OpenSBIから最初に実行される[`entry.S`](../../kernel/src/arch/riscv64/entry.S)は、スタックとBSSを準備します。
@@ -47,16 +48,19 @@ $ cargo xtask
 missing xtask command
 
 MiniOS development commands:
-  cargo xtask setup
-  cargo xtask build
-  cargo xtask run
-  cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
-  cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|payload|payload-args|shell]
-  cargo xtask check
+cargo xtask setup
+cargo xtask build
+cargo xtask run
+cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
+cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]
+cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer|smp-ipi]
+cargo xtask check
+cargo xtask fuzz --target <fat32|elf|boot-payload> [--seed <n>] [--iters <n>] [--max-bytes <n>] [--input-timeout <secs>] [--time-limit <secs>] [--alloc-cap <n>] [--corpus <dir>] [--output <dir>]
+cargo xtask fuzz --target <fat32|elf|boot-payload> --input <file>
 ```
 
 この操作では、終了ステータス1が正しい結果です。
-コマンドが省略されたという診断と、これから使う六つの入口が表示されれば、ホスト側の教材を実行できています。
+コマンドが省略されたという診断と、開発コマンドの入口が表示されれば、ホスト側の教材を実行できています。
 
 ## よくある失敗
 
