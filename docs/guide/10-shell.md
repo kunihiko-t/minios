@@ -135,7 +135,7 @@ shutdown  Halt the CPU
 minios> echo hello
 hello
 minios> memory
-imem: 24500 / 32768 bytes
+imem: 24596 / 32768 bytes
 dmem: 4 / 16192 bytes
 ```
 

@@ -15,7 +15,7 @@ M3のRust guestはRV64とQEMU `virt`専用であり、この文書はFPGA実機�
 2. FPGA実行の自動試験路がなく、trapとPMPの正否をCIで検証できません。
 3. M3はNEORV32でのguest実行を対象外と定めています。
 4. U-mode、system call、分離の教育目標はQEMU RV64で自動試験付きに達成済みです。
-5. IMEM残量8,268 byteに案Bが収まる見込みでも、storage実装（約9 KiB）との同居では予算が逼迫します。
+5. IMEM残量8,172 byteに案Bが収まる見込みでも、storage実装（約9 KiB）との同居では予算が逼迫します。
 
 案Aは分離を教えられません。
 案Bの再訪条件のうちIMEM 32 KiB化は満たされました。残りはguest配送路と、simまたは実機の試験路です。
@@ -26,7 +26,7 @@ RV32IMカーネル（release）の実測値です。
 
 | 領域 | 全体 | 使用 | 残量 |
 | --- | ---: | ---: | ---: |
-| IMEM | 32,768 byte | `.text` 24,496 byte＋`.data`初期値4 byte | 8,268 byte |
+| IMEM | 32,768 byte | `.text` 24,592 byte＋`.data`初期値4 byte | 8,172 byte |
 | DMEM | 16,192 byte | `.data` 4 byte、`.bss` 0 byte、boot stack 4,096 byte | 約12,092 byte |
 
 `.text`はRV32向け`opt-level=z`での実測です。旧来の24,288 byte指定はNEORV32が2のべき乗へ丸めるため、実効32 KiBを契約にしています。
