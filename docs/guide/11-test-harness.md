@@ -200,6 +200,7 @@ parentは`waitpid`でblockしてchildのexitを回収し、自分のfd 3のoffse
 disk image内のPIPECH.ELFは継承したfd 3から読んだbyteを標準出力へ写して42で終了します。
 書き込めないout pointerの`EFAULT`、pipe fdの`fstat`（kind=PIPE・size=0）、`lseek`の`ESPIPE`、read端への`write`とwrite端への`read`の`EBADF`、write端全閉後のEOF(0)、read端全閉後の`write`の`EPIPE`、両端を閉じたslotの再利用も確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 parentが`waitpid`でblockするため、childのstdoutとExit frameはparentの`pipe verified`より必ず先に出る、確定的なexact照合を要求します。
+同じphaseは、read端を保持したまま満杯のpipeへもう1 byte書く`deadlock` guestを通常kernelで起動し、run loopが`MiniOS payload: deadlock:`を出して異常終了することも確認します。
 `user-heap`ではuser_heap guestが`SbrkAllocator`をglobal allocatorとして登録し、`sbrk(0)`の初期breakがpage境界かつ`USER_START`以上であることを確かめます。
 4,096個の`u32`を`Vec`へ積んで複数pageへまたがるheapの中身を検証し、`alloc::format!`で組んだ`heap vec len=4096 sum=25163776`を標準出力へ出します。
 `sbrk(-1)`の`EINVAL`と巨大な要求の`ENOMEM`がbreakを動かさないことも確かめてから、`heap verified`を出して終了コード42を返すことを要求します。
