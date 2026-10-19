@@ -32,7 +32,7 @@ UNIXでは`fork`でaddress spaceを複製してから`exec`で置き換えます
 `spawn`の実装は、storage sessionの`read_file`でfile全体をheapの`Vec`へ読み込みます。
 不在pathは`ENOENT`、directoryは`EISDIR`となり、`fat_errno`がFAT32のerrorをerrnoへ写します。
 process名はargvを渡せば`argv[0]`、渡さなければpathのbasenameです。
-`Process.name`が`&'static str`を要求するため、どちらも`String::leak`で確保します。
+どちらも`Process`が所有する`String`として確保し、processのdropで解放します。
 
 ELFからprocessを組み立てるのは[`Process::spawn`](../../kernel/src/process.rs)です。
 user imageの読み込み、kernel trap stackの確保、`argv`の書き込み、初期`UserContext`の構築を順に行い、途中で失敗すれば確保済みのframeをすべて返します。
@@ -87,6 +87,7 @@ blockした場合、`dispatch_waitpid`は`sepc`を4 byte戻して`SyscallFlow::B
 対象が終了して`wake_on_exit`がprocessを`Runnable`へ戻すと、同じecallが再実行され、今度は台帳からcodeを得ます。
 run loopは`Blocked`を受けると`block_on_stdin`を呼びますが、この関数はrunnableのときだけ遷移するため、`BlockedOnPid`は上書きされません。
 MiniOSのprocessには親子関係の記録がなく、liveなpidであれば自分以外のどのprocessでも待てます。
+manifest v2で起動したtask同士が互いの終了codeを回収できるのは、この仕様によるものです。
 
 ### killと`Killed` mark
 

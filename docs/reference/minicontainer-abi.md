@@ -170,7 +170,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 14 | `rmdir` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、空のdirectoryを削除する。戻り値は0か負のerrno |
 | 15 | `getpid` | なし | 呼び出したprocessのpidを返す |
 | 16 | `spawn` | `a0=path pointer`、`a1=path length`、`a2=argv pointer`、`a3=argc` | `open`と同じpath規約で、pathのELF fileを新しいprocessとして起動する。`a3`が1以上なら`a2`の`argc`個のentryがchildのargvになり、0なら`a2`は読まずargvはpathのbasename 1個になる。戻り値はchildのpidか負のerrno |
-| 17 | `waitpid` | `a0=pid` | `pid`のprocessの終了codeを返す。対象がliveなら呼び出しprocessをblockし、対象の終了後に同じecallが再実行されてcodeを返す。負のerrnoは`ECHILD`/`EINVAL` |
+| 17 | `waitpid` | `a0=pid` | `pid`のprocessの終了codeを返す。childに限らず、自分以外のliveなprocessを待てる。対象がliveなら呼び出しprocessをblockし、対象の終了後に同じecallが再実行されてcodeを返す。負のerrnoは`ECHILD`/`EINVAL` |
 | 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 | 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 | 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ263 byteの`DirEnt`として書き込む。`a1`=0はroot directoryを指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（263）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
@@ -237,7 +237,7 @@ argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたた�
 `spawn`が失敗した場合、途中まで確保したframe・address space・imageはすべて解放され、新しいprocessは登録されません。pathがfileを指さない（`ENOENT`）、directoryを指す（`EISDIR`）、ELFとして受理できない（`EINVAL`）、process tableが満杯または資源が足りない（`ENOMEM`）場合がerrnoです。
 `kill`は`a0`のpidを持つprocessへ終了を要求し、成功時は0を返します。呼び出し側はblockせず、対象は`Killed`としてmarkされた後run loopが回収し、終了code`75`を`waitpid`から回収できます。対象がstdin・pid・pipe・timer待ちでも回収されるため、永久にblockしたprocessも終了できます。自分自身への`kill`は`exit`の役目として`EINVAL`、存在しないpidは`ECHILD`です。
 
-`waitpid`は`a0`のpidを持つprocessの終了codeを返します。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
+`waitpid`は`a0`のpidを持つprocessの終了codeを返します。待てる対象は`spawn`したchildに限らず、自分以外のliveなprocessです。manifest v2でkernelが起動したtask同士も相互に待てます。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
 対象が自分自身・存在しない・既にreap済み・異常終了でstatusを持たない場合は`ECHILD`、wait連鎖が呼び出し側へ戻るcycleは`EINVAL`を返します。複数のprocessが同じpidを待つこともでき、終了時に全員がwakeしますが、codeを回収できるのは先に再実行された1つだけで、残りは`ECHILD`を受け取ります。kernelは終了codeをprocess数上限分だけ台帳へ保持し、超過分は最古からdropします。
 
 `stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの8 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、残り4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1、`STAT_KIND_PIPE` = 2、`STAT_KIND_CONSOLE` = 3）です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile、pipe、consoleのentryを受理して未割り当てfdに`EBADF`を返します。pipeとconsoleのentryの`size`は常に0です。
