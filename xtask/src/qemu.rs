@@ -894,7 +894,17 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
         bundle.remove();
         disk.remove();
-        return verify_file_pipe_result(&command_line, completed.status.code(), &completed.output);
+        let normal =
+            verify_file_pipe_result(&command_line, completed.status.code(), &completed.output)?;
+
+        // 同じkernelで、pipe待ちだけが残るdeadlock診断も確認する。
+        let deadlock = PayloadBundle::create_deadlock()?;
+        let (command, command_line) = qemu_command_with_payload(&kernel, deadlock.path());
+        let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
+        deadlock.remove();
+        let diagnostic =
+            verify_deadlock_result(&command_line, completed.status.code(), &completed.output)?;
+        return Ok(format!("{normal}{diagnostic}"));
     }
 
     if kind == TestKind::FileSeek {
@@ -2516,6 +2526,32 @@ fn verify_file_pipe_result(
     Ok(output.to_owned())
 }
 
+/// pipe待ちだけが残るpayloadがdeadlock診断を出して止まることを検証する。
+/// OpenSBIのSystemFailure shutdownでもQEMUは0を返すため、終了statusでは
+/// なく出力のmarkerで判定する。
+fn verify_deadlock_result(
+    command: &str,
+    status: Option<i32>,
+    output: &str,
+) -> Result<String, QemuError> {
+    const MARKER: &str = "MiniOS payload: deadlock:";
+    if status != Some(0) {
+        return Err(QemuError::Failed {
+            command: command.to_owned(),
+            status,
+            output: output.to_owned(),
+        });
+    }
+    if !output.contains(MARKER) {
+        return Err(QemuError::MissingMarker {
+            command: command.to_owned(),
+            expected: MARKER,
+            output: output.to_owned(),
+        });
+    }
+    Ok(output.to_owned())
+}
+
 /// Ready以降のcontrol frameを`(kind, payload)`列として集める。Readyがない、
 /// frame列が途中で切れる、またはdecode不能な場合は`None`を返す。
 fn collect_payload_frames(output: &[u8]) -> Option<Vec<(FrameKind, &[u8])>> {
@@ -3063,6 +3099,13 @@ impl PayloadBundle {
     fn create_file_pipe() -> Result<Self, QemuError> {
         let elf = built_bin_elf_bytes(crate::guest::GUEST_FILE_PIPE)?;
         Self::create_with(payload_file_pipe_bundle_bytes(&elf)?)
+    }
+
+    /// deadlock検出検査用bundle。read端を保持したまま満杯のpipeへもう
+    /// 1 byte書くguestをboot payloadにする。
+    fn create_deadlock() -> Result<Self, QemuError> {
+        let elf = built_bin_elf_bytes(crate::guest::GUEST_DEADLOCK)?;
+        Self::create_with(assemble_test_bundle(b"version=1\nname=deadlock\n", &elf)?)
     }
 
     /// user-heap検査用bundle。

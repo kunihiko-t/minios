@@ -210,7 +210,16 @@ pub(crate) fn run_boot_payload(
             );
         }
         let Some(pid) = table.pick_next() else {
-            // 占有slotが残るのに選べない＝全processがstdinかsleepなどで待っている。
+            // stdin・device・timerのどれも起床源にならないなら、残りは
+            // pid待ちかpipe待ちの閉路であり、`wfi`で待っても状態は変わらない。
+            if table.deadlocked() {
+                fatal_payload_error(format_args!(
+                    "MiniOS payload: deadlock: processes={} blocked on pid or pipe with no wake source\r\n",
+                    table.len()
+                ));
+            }
+            // 占有slotが残るのに選べない＝全processがstdinかsleepなど、
+            // 外部から起こせる待ちに入っている。
             // ここはS-mode割り込みを遮断したままなので、timer割り込みは
             // trapせず`sip.STIP`がpendingになるだけでtickは進まない。external
             // 割り込みも同様にSEIPへ積まれるため、claim/dispatchを明示的に呼ぶ。

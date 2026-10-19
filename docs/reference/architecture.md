@@ -121,6 +121,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 - `read`は入力未到着のとき`SyscallFlow::Blocked`を返し、`sepc`をecallへ戻してkernelへ戻ります。
   processは`BlockedOnStdin`として再選対象から外れ、UARTのdata-readyを検出した時点で起こされ、同じecallをやり直して完了します。
   全processが待ちへ入ったidleでは、dispatch loopがtimerとexternalのpendingを確認してから`wfi`で眠り、UART受信割り込みか次のtickで起床します。
+  残りがpid待ちかpipe待ちだけで、stdin・device I/O・timerの起床源もない場合は、`ProcessTable::deadlocked`が閉路を判定してpayloadを異常終了します。
   `waitpid`も同じBlocked再実行モデルで、対象processがliveなら呼び出しprocessを`BlockedOnPid`へ移し、対象の終了で起こして終了codeを返します。
   `pipe`の`read`/`write`も同じモデルで、空のread（write端がlive）と満杯のwrite（read端がlive）は呼び出しprocessを`BlockedOnPipe`へ移し、同pipeへのdata到着・空き発生・端のclose・process終了で起こしてecallをやり直します。
   file I/Oも同じモデルで、virtioのrequest完了が短期poll内に来ない場合は呼び出しprocessを`BlockedOnIo`へ移し、used-buffer割り込みが届いた時点で起こして同じecallをやり直します。

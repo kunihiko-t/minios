@@ -170,7 +170,7 @@ decoderが再開可能でなければ、残りのbyteをheaderの先頭として
 - dispatch loopで`sstatus.SIE`を立てたままにする：S-mode実行中に届いたtickが`sscratch`未設定の`__user_trap_entry`へ飛び、context保存先が壊れます。
 - `reload_context`を呼ばずに次のprocessを選ぶ：`Process`内の`context`が古いままになり、次のdispatchで今回の中断位置ではなく前回回収した位置から再開します。
 - `take`を`swap_remove`へ変える：末尾のprocessが抜けた位置へ移り、round-robinの順序が終了のたびに入れ替わります。
-- 全processをpipe待ちやpid待ちにする：`pick_next`が`None`になるとloopはstdinの到着とtimer tickだけを待ち、tickで起きるのはsleep中のprocessだけなので、stdinを送らない限り進みません。
+- 全processをpipe待ちやpid待ちにする：stdin・device I/O・timerの起床源も残らなければ、run loopは`ProcessTable::deadlocked`で閉路を検出し、`deadlock`診断を出してpayloadを異常終了します。
 - `sleep`で`sepc`を戻す：起床後に同じecallを再実行すると、その時点から新しい期限を計算して眠り直すため、`sleep`がいつまでも戻りません。
 
 ## 演習

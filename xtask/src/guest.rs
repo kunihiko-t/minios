@@ -34,6 +34,8 @@ pub const GUEST_FILE_EXEC: &str = "minios-guest-file-exec";
 pub const GUEST_FILE_FDINHERIT: &str = "minios-guest-file-fdinherit";
 /// `pipe`のfd継承・block・EOF/EPIPE・slot再利用を検証するguest bin名。
 pub const GUEST_FILE_PIPE: &str = "minios-guest-file-pipe";
+/// pipe待ちだけが残るdeadlockを再現するguest bin名。
+pub const GUEST_DEADLOCK: &str = "minios-guest-deadlock";
 /// `sbrk`とheap割り当て（`Vec`/`String`）を検証するguest bin名。
 pub const GUEST_USER_HEAP: &str = "minios-guest-user-heap";
 /// `clock`/`sleep`/`yield`を検証するguest bin名。

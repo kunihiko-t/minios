@@ -925,6 +925,20 @@ impl ProcessTable {
         None
     }
 
+    /// `pick_next`が`None`を返したときに、全processがpid待ちかpipe待ちなら
+    /// `true`。stdin、device I/O、timerのいずれの起床源も残っていないため、
+    /// `wfi`で待っても条件は変わらない。run loopはdeadlockとしてpayloadを
+    /// 異常終了する。空のtableと回収待ちの`Killed`は対象外である。
+    pub fn deadlocked(&self) -> bool {
+        !self.procs.is_empty()
+            && self.procs.iter().all(|process| {
+                matches!(
+                    process.state,
+                    ProcessState::BlockedOnPid(_) | ProcessState::BlockedOnPipe(_)
+                )
+            })
+    }
+
     /// stdinへbyteが届いたら呼び、blocked processをrunnableへ戻す。
     /// pid待ちとpipe待ちのprocessも起こされるが、再dispatchで条件未達なら再び
     /// blockする（疑似wakeは許容する）。sleep中のprocessはecallを
@@ -1668,6 +1682,40 @@ mod tests {
 
         table.wake_sleepers(5);
         assert_eq!(table.pick_next(), Some(0));
+    }
+
+    // Catches treating a pid/pipe-only idle as waitable, or treating an
+    // empty table or a pending Killed slot as a deadlock: only stdin,
+    // device I/O, and timer sleepers can produce progress from outside,
+    // and the run loop collects Killed slots before the next pick.
+    #[test]
+    fn deadlock_is_only_reported_without_a_wake_source() {
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        table.insert(fixture.spawn("p0")).expect("insert p0");
+        table.insert(fixture.spawn("p1")).expect("insert p1");
+
+        table.get_mut(0).expect("slot 0 is live").block_on_pipe(0);
+        table.get_mut(1).expect("slot 1 is live").block_on_pid(0);
+        assert!(table.deadlocked());
+
+        table.get_mut(1).expect("slot 1 is live").block_until(5);
+        assert!(!table.deadlocked());
+
+        // block_on_stdinはrunnableからだけ遷移するため、いったん起こす。
+        let p1 = table.get_mut(1).expect("slot 1 is live");
+        p1.wake();
+        p1.block_on_stdin();
+        assert!(!table.deadlocked());
+
+        table.get_mut(1).expect("slot 1 is live").block_on_io();
+        assert!(!table.deadlocked());
+
+        // Killedはrun loopが回収する待ちであり、deadlockではない。
+        table.get_mut(1).expect("slot 1 is live").mark_killed();
+        assert!(!table.deadlocked());
+
+        assert!(!ProcessTable::new().deadlocked());
     }
 
     // Catches the all-blocked case collapsing into an empty-table verdict:
