@@ -29,8 +29,11 @@ UNIXでは`fork`でaddress spaceを複製してから`exec`で置き換えます
 
 ### spawnとpid採番
 
-`spawn`の実装は、storage sessionの`read_file`でfile全体をheapの`Vec`へ読み込みます。
+`spawn`の実装は、storage sessionの`open_file`でfileを開き、`FatElfSource`としてloaderへ渡します。
+`FatElfSource`は[`ElfSource`](../../kernel/src/elf/load.rs)を実装し、loaderが求めたoffsetを`read_range`で読みます。
+loaderはheader、program header表、`PT_LOAD`のbyteだけを1 pageずつ読むため、debug情報を含めて約100 KBあるguest ELFのうち、kernel heapに置くのは数KBのbufferだけです。
 不在pathは`ENOENT`、directoryは`EISDIR`となり、`fat_errno`がFAT32のerrorをerrnoへ写します。
+読み込み中のdisk I/Oが完了待ち（`WouldBlock`）になった場合は、組みかけのimageを回収してから`EAGAIN`でcallerを`BlockedOnIo`へ移し、syscallのやり直しでimageを最初から組み直します。
 process名はargvを渡せば`argv[0]`、渡さなければpathのbasenameです。
 どちらも`Process`が所有する`String`として確保し、processのdropで解放します。
 

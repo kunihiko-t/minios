@@ -120,7 +120,7 @@ impl LoadPlan {
             if plan.len == MAX_LOAD_SEGMENTS {
                 return Err(ElfError::TooManyLoadSegments);
             }
-            let Some(segment) = validate_segment(image.bytes(), header)? else {
+            let Some(segment) = validate_segment(image.file_len(), header)? else {
                 continue;
             };
             for existing in plan.segments() {
@@ -189,7 +189,10 @@ impl LoadPlan {
     }
 }
 
-fn validate_segment(bytes: &[u8], header: ProgramHeader) -> Result<Option<LoadSegment>, ElfError> {
+fn validate_segment(
+    file_len: usize,
+    header: ProgramHeader,
+) -> Result<Option<LoadSegment>, ElfError> {
     if header.file_size() > header.memory_size() {
         return Err(ElfError::FilesLargerThanMemory);
     }
@@ -206,11 +209,11 @@ fn validate_segment(bytes: &[u8], header: ProgramHeader) -> Result<Option<LoadSe
         .checked_add(header.file_size())
         .ok_or(ElfError::RangeOverflow)?;
     let file_offset = usize::try_from(header.offset()).map_err(|_| ElfError::RangeOverflow)?;
-    let file_len = usize::try_from(header.file_size()).map_err(|_| ElfError::RangeOverflow)?;
     let file_end = usize::try_from(file_end).map_err(|_| ElfError::RangeOverflow)?;
-    if file_end > bytes.len() {
+    if file_end > file_len {
         return Err(ElfError::RangeOverflow);
     }
+    let file_len = usize::try_from(header.file_size()).map_err(|_| ElfError::RangeOverflow)?;
 
     let memory_end = header
         .virtual_address()

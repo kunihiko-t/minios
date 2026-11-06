@@ -17,12 +17,20 @@ segmentの先頭と末尾がページ境界に一致しない場合は、周囲�
 
 ## 実装
 
-`ElfImage::parse`は入力byte sliceを借用し、ELF64、little-endian、RISC-V、`ET_EXEC`、program header表の範囲を検査します。
+検査は二段に分かれます。
+**`ElfHeader::parse`**はfile先頭64 byteとfile長だけを受け取り、ELF64、little-endian、RISC-V、`ET_EXEC`、program header表がfile内に収まることと、表のentry数が`MAX_PROGRAM_HEADERS`（64）以下であることを検査します。
+**`ElfImage::from_table`**は、headerが示したoffsetから読んだprogram header表を借用して各entryを検査します。
+memory上のfile全体を持つ場合は`ElfImage::parse`が両方をまとめて呼びます。
 MiniOSは動的loaderを持たないため、`PT_INTERP`または`PT_DYNAMIC`を含む実行ファイルを静的ELFとして受理しません。
 **`LoadPlan`**は最大8個の`PT_LOAD`を走査し、`p_filesz <= p_memsz`、alignment、`p_vaddr`と`p_offset`の合同条件、checked range、page単位の重複、user範囲、stackとの衝突、`W+X`、entry pointを検査します。
 空でないload segmentのpage合計は2,048ページまでで、すべてのheaderを検証し終えるまで物理フレームを確保しません。
 
 `load_image`は検証済み計画をmaterializeし、各user pageをゼロ化してからfile byteをコピーします。
+loaderはfileを**`ElfSource`** trait（file長と、指定offsetからの`read_exact_at`）越しに読みます。
+読む順序はheader、program header表、各segmentのpageの順で、bufferは表（最大3,584 byte）と1 page分だけです。
+`PT_LOAD`に含まれないbyte、たとえばdebug情報のsectionは一度も読みません。
+memory上のbyte slice（`&[u8]`）も`ElfSource`なので、boot payloadのimageとhost testは同じ関数を通ります。
+読めなかった場合は`LoadError::SourceRead`になり、原因のerrorは呼び出し側の`ElfSource`が保持します。
 segmentのleafはELF flagsから導いた最小権限と`U=1`を持ち、user stackは`0x3fff_0000..0x4000_0000`へ`R+W+U`で16ページを写像します。
 直下の`0x3ffe_f000..0x3fff_0000`はguard pageとして未写像のまま残します。
 
