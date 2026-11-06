@@ -2886,8 +2886,9 @@ fn verify_proc_kill_result(
 /// `b*…a*` の単調列になるため、この条件は順次実行を確実に弾く。
 ///
 /// Aは各markerの後に`yield`するため、切り替えはtime sliceの長さでなく
-/// Aの命令列で決まる。Bはa1直後のyieldで選ばれ、tickの残りでb1..b3と
-/// exitを済ませる。仮にBがtickの境目でpreemptされても、AはA自身の次の
+/// Aの命令列で決まる。Bは最初に一度yieldするため、spawn中に期限を過ぎた
+/// tickでAがa1の前にpreemptされても、Bは何も書かずにAへ順番を返す。
+/// Bはa1直後のyieldで選ばれ、tickの残りでb1..b3とexitを済ませる。仮にBがtickの境目でpreemptされても、AはA自身の次の
 /// markerを書いてすぐyieldし、Bはほぼ丸ごと1 tickを得る。AはBより1回
 /// 多くyieldしないとa3へ届かないため、b1 < a3とBが先に終わる順序は
 /// QEMUの速度に依らず保たれる。

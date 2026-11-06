@@ -147,7 +147,7 @@ guard pageで止まった診断の後にマーカーが出ることを要求し�
 MiniContainer control protocolのframeを解析し、Ready、標準出力、標準エラー、Exit、回収診断の順序と内容を検査します。
 `payload-args`ではmanifestの`name`と二つの`arg=`が、初期スタックの`argv`を通って順番どおり標準出力へ届くことを確認します。
 この経路には標準エラーframeがないため、検証部はReady、三つの標準出力、Exit、回収診断だけを要求します。
-`sched`ではmanifest v2の二つのimageを通常カーネルへ渡し、busy-waitするprocessの出力`a1`と`a3`の間に短命processの`b1`が挟まること、二つの`ProcExit`frameが届くこと、回収診断が`switches`を1以上として報告することを要求します。
+`sched`ではmanifest v2の二つのimageを通常カーネルへ渡し、出力のたびに`yield`するprocessの出力`a1`と`a3`の間に短命processの`b1`が挟まること、二つの`ProcExit`frameが届くこと、回収診断が`switches`を1以上として報告することを要求します。
 この順序条件は、プリエンプションを伴わない逐次実行を確実に弾きます。
 `sched-io`では三つのimageを渡し、`read`でstdin待ちするreader processの`r1`と`r2`の間に、busy-waitするprocessと短命processの出力がすべて挟まることを要求します。
 入力frameは`b3`を観測してから送るため、`b3 < r2`の順序は「block中も他processが進む」ことの直接証拠です。
