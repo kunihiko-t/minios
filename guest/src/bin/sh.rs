@@ -2,7 +2,8 @@
 //!
 //! stdinを1行ずつ読み、`|`で区切った最大7個のcommandをpipelineとして
 //! 起動する。最初のcommandには`< file`、最後のcommandには`> file`を付け
-//! られる。`/`を含まない名前`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を
+//! られる。`"…"`か`'…'`で囲んだ語は空白や演算子を含められる。
+//! `/`を含まない名前`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を
 //! 含む語はそのままpathとして解決する。built-inは`exit [code]`だけで、
 //! cwdは持たない。stdinのEOFで0で終了する。`-i`を渡すと`$ `を出す。
 //!
@@ -65,24 +66,61 @@ struct Pipeline<'a> {
     output: Option<&'a [u8]>,
 }
 
+/// 字句1個。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Token<'a> {
+    /// 1文字の演算子`|`、`<`、`>`。
+    Op(u8),
+    /// 語。引用符で囲んだ語は引用符を除いた中身で、演算子や空白も含められる。
+    Word(&'a [u8]),
+}
+
+/// 語を区切るbyte。
+const fn is_separator(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'|' | b'<' | b'>')
+}
+
 /// 空白で区切った語と、1文字の演算子`|`、`<`、`>`を順に返す。
-fn tokens(line: &[u8]) -> impl Iterator<Item = &[u8]> {
+///
+/// `"…"`か`'…'`で囲んだ部分は1個の語になり、中の空白と演算子は文字として
+/// 扱う（`cat "my notes.txt"`）。escapeはなく、引用符は語の全体を囲む必要が
+/// ある。閉じていない引用符や、語の途中の引用符は構文errorである。
+fn tokens(line: &[u8]) -> impl Iterator<Item = Result<Token<'_>, &'static str>> {
     let mut rest = line;
     core::iter::from_fn(move || {
         while let [b' ' | b'\t' | b'\r', tail @ ..] = rest {
             rest = tail;
         }
         let first = *rest.first()?;
-        let len = if matches!(first, b'|' | b'<' | b'>') {
-            1
-        } else {
-            rest.iter()
-                .position(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'|' | b'<' | b'>'))
-                .unwrap_or(rest.len())
-        };
-        let (token, tail) = rest.split_at(len);
+        if matches!(first, b'|' | b'<' | b'>') {
+            rest = &rest[1..];
+            return Some(Ok(Token::Op(first)));
+        }
+        if matches!(first, b'"' | b'\'') {
+            let body = &rest[1..];
+            let Some(close) = body.iter().position(|&byte| byte == first) else {
+                rest = &[];
+                return Some(Err("unterminated quote"));
+            };
+            let word = &body[..close];
+            rest = &body[close + 1..];
+            if rest.first().is_some_and(|&byte| !is_separator(byte)) {
+                rest = &[];
+                return Some(Err("quotes must enclose a whole word"));
+            }
+            return Some(Ok(Token::Word(word)));
+        }
+        let len = rest
+            .iter()
+            .position(|&byte| is_separator(byte))
+            .unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(len);
         rest = tail;
-        Some(token)
+        if word.iter().any(|&byte| matches!(byte, b'"' | b'\'')) {
+            rest = &[];
+            return Some(Err("quotes must enclose a whole word"));
+        }
+        Some(Ok(Token::Word(word)))
     })
 }
 
@@ -101,8 +139,8 @@ fn parse(line: &[u8]) -> Result<Option<Pipeline<'_>>, &'static str> {
     let mut redirect: Option<u8> = None;
     for token in tokens(line) {
         let stage = &mut pipeline.stages[pipeline.count - 1];
-        match token {
-            b"|" => {
+        match token? {
+            Token::Op(b'|') => {
                 if redirect.is_some() || stage.argc == 0 {
                     return Err("syntax error near '|'");
                 }
@@ -114,13 +152,13 @@ fn parse(line: &[u8]) -> Result<Option<Pipeline<'_>>, &'static str> {
                 }
                 pipeline.count += 1;
             }
-            b"<" | b">" => {
+            Token::Op(op) => {
                 if redirect.is_some() {
                     return Err("syntax error near redirection");
                 }
-                redirect = Some(token[0]);
+                redirect = Some(op);
             }
-            word => match redirect.take() {
+            Token::Word(word) => match redirect.take() {
                 Some(b'<') => {
                     if pipeline.count != 1 || pipeline.input.is_some() {
                         return Err("'<' is only allowed once on the first command");
