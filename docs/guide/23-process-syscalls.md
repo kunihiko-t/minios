@@ -246,16 +246,36 @@ echo redirected > OUT.TXT
 cat OUT.TXT
 wc < HELLO.TXT
 echo a b c | cat | wc
+echo a b c | cat | cat | cat | cat | cat | wc
+echo a | cat | cat | cat | cat | cat | cat | wc
+echo saved > notes.backup
+cat notes.backup
 nosuch
 ```
 
-標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`が順に届き、標準エラーには`sh: nosuch: not found (errno -2)`が届きます。
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`が順に届きます。
+標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`と、`sh: nosuch: not found (errno -2)`が届きます。
 pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
 このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。
 EOFを読んだshellは0で終了します。
 
 `cargo xtask run`は従来どおりkernel shellを起動します。
-user shellを手元で試すには、`cargo xtask test user-shell`のscriptを変えて期待frameとの差を見るのが手軽です。
+user shellを手元で対話的に試すには`cargo xtask sh`を使います。
+
+```console
+$ cargo xtask sh
+MiniOS sched: spawned pid=0 name=sh
+$ echo hi there
+hi there
+$ cat HELLO.TXT | wc
+1 3 18
+$ exit
+```
+
+`cargo xtask sh`はtestと同じ`SH.ELF`のboot payloadとdisk imageでQEMUを起動し、shellへ`-i`を渡してpromptを出させます。
+[`xtask/src/console.rs`](../../xtask/src/console.rs)が端末から読んだbyte列を`Stdin` frameへ包み、UARTから届く`Stdout`と`Stderr` frameのpayloadを端末へ書き戻します。
+端末でCtrl-Dを押すと長さ0の`Stdin` frame（EOF）が届き、shellは0で終了します。
+Ready frameより前のfirmwareとkernelのboot logは表示せず、起動に失敗したときだけ標準エラーへ出します。
 
 ## よくある失敗
 

@@ -5,6 +5,8 @@ pub enum Command {
     Setup,
     Build,
     Run,
+    /// user shell（`SH.ELF`）をboot payloadにして端末から対話的に使う。
+    Sh,
     Bundle(BundleOptions),
     Test(TestFilter),
     Check,
@@ -110,6 +112,7 @@ pub fn help() -> &'static str {
   cargo xtask setup\n\
   cargo xtask build\n\
   cargo xtask run\n\
+  cargo xtask sh\n\
   cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]\n\
   cargo xtask bundle --image <guest-bin> [--image <guest-bin>]... [--output <path>]\n\
   cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer|smp-ipi]\n\
@@ -123,6 +126,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         [command] if command == "setup" => Ok(Command::Setup),
         [command] if command == "build" => Ok(Command::Build),
         [command] if command == "run" => Ok(Command::Run),
+        [command] if command == "sh" => Ok(Command::Sh),
         [command] if command == "test" => Ok(Command::Test(TestFilter::All)),
         [command, test] if command == "test" && test == "all" => Ok(Command::Test(TestFilter::All)),
         [command, test] if command == "test" && test == "boot" => {
@@ -410,6 +414,7 @@ mod tests {
         assert_eq!(parse(&owned(&["setup"])), Ok(Command::Setup));
         assert_eq!(parse(&owned(&["build"])), Ok(Command::Build));
         assert_eq!(parse(&owned(&["run"])), Ok(Command::Run));
+        assert_eq!(parse(&owned(&["sh"])), Ok(Command::Sh));
         assert_eq!(parse(&owned(&["test"])), Ok(Command::Test(TestFilter::All)));
         assert_eq!(
             parse(&owned(&["test", "timer"])),

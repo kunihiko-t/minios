@@ -551,6 +551,122 @@ pub fn run_kernel() -> Result<(), QemuError> {
     }
 }
 
+/// user shell（`SH.ELF`）をboot payloadにしてQEMUを起動し、host端末とつなぐ。
+///
+/// shellは`-i`でpromptを出し、disk imageの`BIN`には`cat`、`wc`、`echo`を置く。
+/// 端末から読んだbyte列は`Stdin` frameへ包んでUARTへ送り（端末のEOFは長さ0の
+/// frame）、UARTから届く`Stdout`/`Stderr` frameのpayloadを端末の標準出力と
+/// 標準エラーへ書く。Ready frameより前のfirmwareとkernelのboot logは表示せず、
+/// Readyが来ないままQEMUが終わった場合だけ標準エラーへ出す。`Diagnostic`は
+/// 標準エラーへ流す。shellがEOFか`exit`で終わるとkernelがQEMUを止め、
+/// この関数も戻る。
+pub fn run_user_shell() -> Result<(), QemuError> {
+    use crate::console::{ConsoleEvent, FrameStream, stdin_frames};
+    use std::io::Read;
+    use std::sync::mpsc;
+
+    let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
+    let elf = built_bin_elf_bytes(crate::guest::GUEST_SH)?;
+    let bundle =
+        PayloadBundle::create_with(assemble_test_bundle(b"version=1\nname=sh\narg=-i\n", &elf)?)?;
+    let cat = built_bin_elf_bytes(crate::guest::GUEST_CAT)?;
+    let wc = built_bin_elf_bytes(crate::guest::GUEST_WC)?;
+    let echo = built_bin_elf_bytes(crate::guest::GUEST_ECHO)?;
+    let disk = crate::disk::DiskImage::create_with_files(&[
+        ("BIN/CAT.ELF", &cat),
+        ("BIN/WC.ELF", &wc),
+        ("BIN/ECHO.ELF", &echo),
+    ])
+    .map_err(|error| QemuError::Bundle {
+        stage: "disk image",
+        error,
+    })?;
+    let (mut command, command_line) =
+        qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| QemuError::Spawn {
+            command: command_line.clone(),
+            error: error.to_string(),
+        })?;
+    let mut uart_in = child.stdin.take().expect("QEMU stdin is piped");
+    let mut uart_out = child.stdout.take().expect("QEMU stdout is piped");
+
+    // 端末の入力はReady frameを受け取ってから送る。それより前はkernelが
+    // Stdin frameを読み始めていない。
+    let (ready_tx, ready_rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if ready_rx.recv().is_err() {
+            return;
+        }
+        let mut terminal = std::io::stdin().lock();
+        let mut chunk = [0u8; 1024];
+        loop {
+            // 読めなくなった端末はEOFと同じく扱い、shellへEOFを送る。
+            let read: usize = terminal.read(&mut chunk).unwrap_or_default();
+            if uart_in.write_all(&stdin_frames(&chunk[..read])).is_err() || read == 0 {
+                return;
+            }
+            let _ = uart_in.flush();
+        }
+    });
+
+    let mut stream = FrameStream::new();
+    let mut ready_tx = Some(ready_tx);
+    let mut boot_log = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    loop {
+        let read = uart_out.read(&mut chunk).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        for event in stream.push(&chunk[..read]) {
+            match event {
+                ConsoleEvent::Frame(FrameKind::Stdout, payload) => {
+                    let mut out = stdout.lock();
+                    let _ = out.write_all(&payload);
+                    let _ = out.flush();
+                }
+                ConsoleEvent::Text(payload) if ready_tx.is_some() => {
+                    boot_log.extend_from_slice(&payload);
+                }
+                ConsoleEvent::Frame(FrameKind::Stderr | FrameKind::Diagnostic, payload)
+                | ConsoleEvent::Text(payload) => {
+                    let _ = stderr.lock().write_all(&payload);
+                }
+                ConsoleEvent::Frame(FrameKind::GuestError, payload) => {
+                    let _ = writeln!(stderr.lock(), "\nguest error: {payload:?}");
+                }
+                ConsoleEvent::Frame(_, _) => {}
+            }
+        }
+        if stream.is_ready()
+            && let Some(tx) = ready_tx.take()
+        {
+            let _ = tx.send(());
+        }
+    }
+    let status = child.wait().map_err(|error| QemuError::Wait {
+        command: command_line.clone(),
+        error: error.to_string(),
+    })?;
+    bundle.remove();
+    disk.remove();
+    if status.success() && ready_tx.is_none() {
+        Ok(())
+    } else {
+        Err(QemuError::Failed {
+            command: command_line,
+            status: status.code(),
+            output: String::from_utf8_lossy(&boot_log).into_owned(),
+        })
+    }
+}
+
 pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError> {
     if kind == TestKind::Payload {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
