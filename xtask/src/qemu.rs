@@ -209,14 +209,10 @@ pub enum TestKind {
 impl TestKind {
     /// QEMU実行の期限。起動遅延は許容しつつ、停止したguestを早期に診断する。
     /// QEMU起動とguest build直後のkernel起動はhost負荷で揺れるため、5秒で
-    /// 踏んだ観測済みflakeを避けて10秒を基本にする。user-shellはscriptの
-    /// 1行ごとにprocessをspawnし（約35回）、1回のspawnがkernel mappingの
-    /// 複製に数百msかかるため、30秒を与える。
+    /// 踏んだ観測済みflakeを避けて10秒にする。全検査で同じ値である。
     pub fn deadline(self) -> Duration {
-        match self {
-            Self::UserShell => Duration::from_secs(30),
-            _ => Duration::from_secs(10),
-        }
+        let _ = self;
+        Duration::from_secs(10)
     }
 
     fn feature(self) -> &'static str {

@@ -546,7 +546,7 @@ pub(crate) unsafe fn spawn_process(
         file_fds,
         &mut frames,
         memory,
-        plan.mappings(),
+        plan.blocks(),
     )
 }
 
@@ -653,7 +653,7 @@ pub(crate) unsafe fn exec_current_process(
     };
     let memory = unsafe { &mut *(USER_SYSCALL_PROBE_MEMORY as *mut IdentityFrameStore) };
     let mut frames = GlobalFrames;
-    let context = process.exec(name, elf, &[], &mut frames, memory, plan.mappings())?;
+    let context = process.exec(name, elf, &[], &mut frames, memory, plan.blocks())?;
     // 新imageへ切り替わった後でだけclose-on-execのfdを閉じる。失敗した
     // `exec`はcallerが旧imageで動き続けるため、fdにも触れない。閉じた
     // pipe端は`close`と同じくpeerのEOF/EPIPEを再判定させる。

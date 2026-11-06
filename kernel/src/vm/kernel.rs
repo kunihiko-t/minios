@@ -209,6 +209,33 @@ impl KernelMapPlan {
             .map(|range| range.flags)
     }
 
+    /// `mappings`と同じ範囲を、2 MiB境界に揃って丸ごと入る部分は
+    /// megapage（Sv39のlevel 1 leaf）1個として、残りは4 KiB pageとして返す。
+    /// user address spaceへkernelを借用させるspawnとexecが使う。管理RAMの
+    /// 大半がmegapageになるため、写すleafは約3万個から数十個へ減る。
+    pub fn blocks(&self) -> impl Iterator<Item = KernelMapping> + '_ {
+        self.ranges.iter().flat_map(|range| {
+            let end = range.addresses.end;
+            let mut address = range.addresses.start;
+            core::iter::from_fn(move || {
+                if address >= end {
+                    return None;
+                }
+                let mega = address.is_multiple_of(MEGAPAGE_SIZE) && end - address >= MEGAPAGE_SIZE;
+                let mapping = KernelMapping {
+                    page: VirtPage::from_start(address as u64)
+                        .expect("validated kernel mapping ranges are page-aligned"),
+                    physical: PhysAddr::try_new(address as u64)
+                        .expect("kernel identity mappings fit the physical address field"),
+                    flags: range.flags,
+                    mega,
+                };
+                address += if mega { MEGAPAGE_SIZE } else { PAGE_SIZE };
+                Some(mapping)
+            })
+        })
+    }
+
     pub fn mappings(&self) -> impl Iterator<Item = KernelMapping> + '_ {
         self.ranges.iter().flat_map(|range| {
             range.addresses.clone().step_by(PAGE_SIZE).map(|address| {
@@ -224,11 +251,16 @@ impl KernelMapPlan {
     }
 }
 
+/// Sv39のmegapage（level 1 leaf）が覆うbyte数。
+pub const MEGAPAGE_SIZE: usize = 512 * PAGE_SIZE;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelMapping {
     page: VirtPage,
     physical: PhysAddr,
     flags: PageFlags,
+    /// `true`なら`page`から2 MiBを覆うmegapage、`false`なら4 KiB page。
+    mega: bool,
 }
 
 impl KernelMapping {
@@ -239,7 +271,13 @@ impl KernelMapping {
             page,
             physical,
             flags,
+            mega: false,
         }
+    }
+
+    /// 2 MiBのmegapageなら`true`。`page`と`physical`は2 MiB境界にある。
+    pub const fn is_mega(self) -> bool {
+        self.mega
     }
 
     pub const fn page(self) -> VirtPage {
@@ -259,7 +297,7 @@ impl KernelMapping {
 mod tests {
     extern crate std;
 
-    use super::{KernelMapError, KernelMapPlan};
+    use super::{KernelMapError, KernelMapPlan, MEGAPAGE_SIZE, PAGE_SIZE};
     use crate::{memory::KernelSections, vm::PageFlags};
     use std::{collections::BTreeSet, vec::Vec};
 
@@ -531,5 +569,25 @@ mod tests {
 
         assert_eq!(plan.flags_at(0x8780_0000), None);
         assert_eq!(plan.mappings().count(), 30_209);
+
+        // blocksは同じpage集合を、2 MiBに揃った部分をmegapageにして覆う。
+        let mut covered = Vec::new();
+        for block in plan.blocks() {
+            let start = block.page().start().as_u64() as usize;
+            assert_eq!(block.physical().as_u64() as usize, start);
+            let len = if block.is_mega() {
+                assert!(start.is_multiple_of(MEGAPAGE_SIZE));
+                MEGAPAGE_SIZE
+            } else {
+                PAGE_SIZE
+            };
+            covered.extend((start..start + len).step_by(PAGE_SIZE));
+        }
+        let pages: Vec<usize> = plan
+            .mappings()
+            .map(|mapping| mapping.page().start().as_u64() as usize)
+            .collect();
+        assert_eq!(covered, pages);
+        assert!(plan.blocks().count() < 1_000);
     }
 }

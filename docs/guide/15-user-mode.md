@@ -28,7 +28,11 @@ user `sp`を退避した後、入口は`sscratch`を0にします。
 
 kernel trap stackは[`KernelStack`](../../kernel/src/user/run.rs)が`KERNEL_STACK_PAGES`ページと直下のguard page一枚を、物理的に連続した区間として一度に確保します。
 syscall処理中に`satp`へ載っているのはuser address spaceであり、kernel identity mappingはそこへ借用されています。
+spawnとexecは`KernelMapPlan::blocks`で借用を写し、2 MiB境界に揃って丸ごと入る範囲をSv39のmegapage（level 1のleaf）1個として置きます。
+管理RAMの約3万pageを4 KiBずつ写すと1回のspawnに数百msかかるためで、megapageにすると写すleafは数十個になります。
 そこで`KernelStack::new`は、guard pageのidentity leafをuser address spaceから外します。
+guard pageがmegapageの中にある場合、`AddressSpace::unmap_identity`はそのmegapageだけを同じ写像の4 KiB leaf 512個を持つtableへ分割してから外します。
+分割したtableはそのprocessのaddress spaceが所有するため、他のprocessのmegapageには影響せず、`destroy`で回収されます。
 stackが溢れると、隣のframeを壊す代わりにS-modeのpage faultが起きます。
 入口はそのtrapを溢れたstackではなく専用stackへ移して`rust_kernel_trap_in_user_window`へ渡します。
 `stval`がguard page内なら`MiniOS kernel stack overflow`を出して停止し、それ以外のS-mode trapも`MiniOS kernel trap`として停止します。

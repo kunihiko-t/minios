@@ -132,7 +132,7 @@ pub(crate) fn run_user_mode_probe_test(
     let fixture = user_trap_fault_elf();
     #[cfg(feature = "qemu-test-user-syscall")]
     let fixture = user_syscall_probe_elf();
-    let image = match load_image_with_kernel_mappings(&fixture, frames, memory, plan.mappings()) {
+    let image = match load_image_with_kernel_mappings(&fixture, frames, memory, plan.blocks()) {
         Ok(image) => image,
         Err(error) => fatal_qemu_test(format_args!("user probe load: {error:?}")),
     };
@@ -219,7 +219,7 @@ pub(crate) fn run_user_exit_test(
 ) {
     let before = frames.stats();
     let fixture = user_exit_probe_elf();
-    let image = match load_image_with_kernel_mappings(&fixture, frames, memory, plan.mappings()) {
+    let image = match load_image_with_kernel_mappings(&fixture, frames, memory, plan.blocks()) {
         Ok(image) => image,
         Err(error) => fatal_qemu_test(format_args!("user-exit load: {error:?}")),
     };

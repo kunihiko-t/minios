@@ -98,7 +98,7 @@ pub(crate) fn run_boot_payload(
             minios_kernel::process::FileFdTable::new(),
             frames,
             memory,
-            plan.mappings(),
+            plan.blocks(),
         ) {
             Ok(process) => {
                 let pid = table
