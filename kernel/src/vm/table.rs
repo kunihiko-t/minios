@@ -223,6 +223,58 @@ impl<'alloc, 'memory, M: FrameStore> AddressSpaceBuilder<'alloc, 'memory, M> {
             .map_err(VmError::Store)
     }
 
+    /// `page`から2 MiBを、`physical`から始まる2 MiBへ借用のmegapage
+    /// （level 1 leaf）として写す。両方とも2 MiB境界でなければ
+    /// `Address`の誤り、既に何かが写っていれば`AlreadyMapped`。借用leafは
+    /// `map_borrowed`と同じく台帳に載らない。
+    pub fn map_borrowed_mega(
+        &mut self,
+        page: VirtPage,
+        physical: PhysAddr,
+        flags: PageFlags,
+    ) -> Result<(), VmError<M::Error>> {
+        let mega = crate::vm::kernel::MEGAPAGE_SIZE as u64;
+        if !page.start().as_u64().is_multiple_of(mega) || !physical.as_u64().is_multiple_of(mega) {
+            return Err(VmError::Address(crate::vm::AddressError::Unaligned));
+        }
+        let ppn = PhysPageNum::from_start(physical.as_u64()).map_err(VmError::Address)?;
+        let vpn = page.vpn();
+        let root_entry = self.read_entry(self.root, vpn[2])?;
+        let table = if root_entry.is_valid() {
+            if root_entry.is_leaf() {
+                return Err(VmError::AlreadyMapped);
+            }
+            root_entry.ppn().map_err(VmError::Pte)?.start()
+        } else {
+            let child = self.allocate_zeroed(FrameKind::PageTable)?;
+            let child_ppn = PhysPageNum::from_start(child.as_u64()).map_err(VmError::Address)?;
+            let branch = PageTableEntry::branch(child_ppn).map_err(VmError::Pte)?;
+            self.memory
+                .write_u64(self.root.as_u64() as usize, vpn[2], branch.bits())
+                .map_err(VmError::Store)?;
+            child
+        };
+        if self.read_entry(table, vpn[1])?.is_valid() {
+            return Err(VmError::AlreadyMapped);
+        }
+        let leaf = PageTableEntry::leaf(ppn, flags).map_err(VmError::Pte)?;
+        self.memory
+            .write_u64(table.as_u64() as usize, vpn[1], leaf.bits())
+            .map_err(VmError::Store)
+    }
+
+    /// `mapping`を大きさに応じて`map_borrowed_mega`か`map_borrowed`で写す。
+    pub fn map_borrowed_any(
+        &mut self,
+        mapping: crate::vm::KernelMapping,
+    ) -> Result<(), VmError<M::Error>> {
+        if mapping.is_mega() {
+            self.map_borrowed_mega(mapping.page(), mapping.physical(), mapping.flags())
+        } else {
+            self.map_borrowed(mapping.page(), mapping.physical(), mapping.flags())
+        }
+    }
+
     pub fn finish(mut self) -> AddressSpace {
         let storage = self
             .storage
@@ -379,7 +431,19 @@ impl AddressSpace {
                 return Err(VmError::NotMapped);
             }
             if entry.is_leaf() {
-                return Err(VmError::Pte(PteError::NotLeaf));
+                // level 1のleafは2 MiBのmegapageで、下位21 bitがoffsetになる。
+                // level 2の1 GiB leafはこのkernelが作らないため不正として扱う。
+                if level != 1 {
+                    return Err(VmError::Pte(PteError::NotLeaf));
+                }
+                let mask = crate::vm::kernel::MEGAPAGE_SIZE as u64 - 1;
+                let flags = entry.flags().map_err(VmError::Pte)?;
+                let physical =
+                    entry.ppn().map_err(VmError::Pte)?.start().as_u64() + (address.as_u64() & mask);
+                return Ok((
+                    PhysAddr::try_new(physical).map_err(VmError::Address)?,
+                    flags,
+                ));
             }
             table = entry.ppn().map_err(VmError::Pte)?.start();
         }
@@ -403,10 +467,14 @@ impl AddressSpace {
     /// identity写像のsupervisor leaf（借用したkernel mapping）を1page外す。
     /// kernel trap stackのguard pageを、そのstackで動くaddress spaceから消すために使う。
     /// 未写像のpage、identityでないleaf、`U=1`のleafには触れず`false`を返す。
-    /// 借用leafは台帳に載らないため、所有frameは変わらない。
+    /// pageが2 MiBのmegapageの中にあれば、まずそのmegapageを同じ写像の
+    /// 4 KiB leaf 512個のtableへ分割する。分割用のtableは`allocator`から
+    /// 確保して台帳へ載せるため`destroy`が回収し、他のaddress spaceの
+    /// megapageには影響しない。借用leaf自体は台帳に載らない。
     /// inactiveなspaceへ使う前提であり、activeなspaceでは呼び出し側が`sfence.vma`する。
     pub fn unmap_identity<M: FrameStore>(
         &mut self,
+        allocator: &mut dyn FrameSource,
         memory: &mut M,
         page: VirtPage,
     ) -> Result<bool, VmError<M::Error>> {
@@ -421,17 +489,64 @@ impl AddressSpace {
         }
         // `translate`が成功したので、途中のbranchはすべて有効である。
         let vpn = address.vpn();
-        let mut table = self.root;
-        for level in [2, 1] {
-            table = read_entry(memory, table, vpn[level])?
-                .ppn()
-                .map_err(VmError::Pte)?
-                .start();
-        }
+        let l1 = read_entry(memory, self.root, vpn[2])?
+            .ppn()
+            .map_err(VmError::Pte)?
+            .start();
+        let l1_entry = read_entry(memory, l1, vpn[1])?;
+        let table = if l1_entry.is_leaf() {
+            self.split_megapage(allocator, memory, l1, vpn[1], l1_entry)?
+        } else {
+            l1_entry.ppn().map_err(VmError::Pte)?.start()
+        };
         memory
             .write_u64(table.as_u64() as usize, vpn[0], 0)
             .map_err(VmError::Store)?;
         Ok(true)
+    }
+
+    /// `l1`のslot `index`にあるmegapage leaf `mega`を、同じ物理範囲と権限の
+    /// 4 KiB leaf 512個を持つ新しいtableへ置き換え、そのtableを返す。tableを
+    /// 埋め終えてからbranchへ差し替えるため、途中で失敗してもmegapageは
+    /// 元のまま残り、確保したtableは台帳から外してallocatorへ返す。
+    fn split_megapage<M: FrameStore>(
+        &mut self,
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+        l1: PhysAddr,
+        index: usize,
+        mega: PageTableEntry,
+    ) -> Result<PhysAddr, VmError<M::Error>> {
+        if allocator.allocator_id() != self.allocator_id {
+            return Err(VmError::OutOfFrames);
+        }
+        let mark = self.storage.len();
+        let result = (|| {
+            let table = self.push_zeroed(allocator, memory, FrameKind::PageTable)?;
+            let flags = mega.flags().map_err(VmError::Pte)?;
+            let base = mega.ppn().map_err(VmError::Pte)?.start().as_u64();
+            for slot in 0..512usize {
+                let start = base + (slot * crate::memory::frame::PAGE_SIZE) as u64;
+                let ppn = PhysPageNum::from_start(start).map_err(VmError::Address)?;
+                let leaf = PageTableEntry::leaf(ppn, flags).map_err(VmError::Pte)?;
+                memory
+                    .write_u64(table.as_u64() as usize, slot, leaf.bits())
+                    .map_err(VmError::Store)?;
+            }
+            let table_ppn = PhysPageNum::from_start(table.as_u64()).map_err(VmError::Address)?;
+            let branch = PageTableEntry::branch(table_ppn).map_err(VmError::Pte)?;
+            memory
+                .write_u64(l1.as_u64() as usize, index, branch.bits())
+                .map_err(VmError::Store)?;
+            Ok(table)
+        })();
+        if result.is_err() {
+            while self.storage.len() > mark {
+                let owned = self.storage.pop().expect("len above mark");
+                let _ = allocator.deallocate(owned.frame);
+            }
+        }
+        result
     }
 
     /// `finish`後のspaceから、台帳が所有するuser frame（`FrameKind::User`）の
@@ -864,18 +979,100 @@ mod tests {
         let mut space = builder.finish();
         let owned = space.owned_frames();
 
-        assert_eq!(space.unmap_identity(&mut store, kernel), Ok(true));
+        assert_eq!(
+            space.unmap_identity(&mut allocator, &mut store, kernel),
+            Ok(true)
+        );
         assert_eq!(
             space.translate(&store, kernel.start()),
             Err(VmError::NotMapped)
         );
         assert!(space.translate(&store, neighbour.start()).is_ok());
-        assert_eq!(space.unmap_identity(&mut store, kernel), Ok(false));
-        assert_eq!(space.unmap_identity(&mut store, aliased), Ok(false));
+        assert_eq!(
+            space.unmap_identity(&mut allocator, &mut store, kernel),
+            Ok(false)
+        );
+        assert_eq!(
+            space.unmap_identity(&mut allocator, &mut store, aliased),
+            Ok(false)
+        );
         assert!(space.translate(&store, aliased.start()).is_ok());
-        assert_eq!(space.unmap_identity(&mut store, user), Ok(false));
+        assert_eq!(
+            space.unmap_identity(&mut allocator, &mut store, user),
+            Ok(false)
+        );
         assert!(space.translate(&store, user.start()).is_ok());
         assert_eq!(space.owned_frames(), owned);
+    }
+
+    // Catches megapage mappings translating to the wrong frame or a guard
+    // unmap clearing the whole 2 MiB: the block must translate with the
+    // in-block offset, and unmapping one page must split the block into an
+    // owned 4 KiB table that keeps every other page mapped and is reclaimed.
+    #[test]
+    fn megapage_translates_and_splits_when_one_page_is_unmapped() {
+        let mut allocator = test_allocator::<16>(0x1000, 0x41_000);
+        let before = allocator.stats();
+        let mut store = TestFrameStore::default();
+        let mut builder = AddressSpaceBuilder::new(&mut allocator, &mut store).unwrap();
+        let base = VirtPage::from_start(0x8040_0000).unwrap();
+        let rw = PageFlags::supervisor_rw();
+        builder
+            .map_borrowed_mega(base, PhysAddr::try_new(0x8040_0000).unwrap(), rw)
+            .unwrap();
+        assert_eq!(
+            builder.map_borrowed(
+                VirtPage::from_start(0x8040_1000).unwrap(),
+                PhysAddr::try_new(0x8040_1000).unwrap(),
+                rw
+            ),
+            Err(VmError::AlreadyMapped)
+        );
+        assert_eq!(
+            builder.map_borrowed_mega(
+                VirtPage::from_start(0x8060_1000).unwrap(),
+                PhysAddr::try_new(0x8060_1000).unwrap(),
+                rw
+            ),
+            Err(VmError::Address(crate::vm::AddressError::Unaligned))
+        );
+        let mut space = builder.finish();
+        let owned = space.owned_frames();
+
+        let inside = VirtAddr::try_new(0x8045_6789).unwrap();
+        assert_eq!(
+            space.translate(&store, inside),
+            Ok((PhysAddr::try_new(0x8045_6789).unwrap(), rw))
+        );
+
+        let guard = VirtPage::from_start(0x8045_6000).unwrap();
+        assert_eq!(
+            space.unmap_identity(&mut allocator, &mut store, guard),
+            Ok(true)
+        );
+        assert_eq!(space.owned_frames(), owned + 1);
+        assert_eq!(
+            space.translate(&store, guard.start()),
+            Err(VmError::NotMapped)
+        );
+        for address in [0x8040_0000, 0x8045_5fff, 0x8045_7000, 0x805f_f000] {
+            let address = VirtAddr::try_new(address).unwrap();
+            assert_eq!(
+                space
+                    .translate(&store, address)
+                    .map(|(physical, _)| physical.as_u64()),
+                Ok(address.as_u64())
+            );
+        }
+        // 分割済みのtableからもう1 pageを外してもtableは増えない。
+        let other = VirtPage::from_start(0x8050_0000).unwrap();
+        assert_eq!(
+            space.unmap_identity(&mut allocator, &mut store, other),
+            Ok(true)
+        );
+        assert_eq!(space.owned_frames(), owned + 1);
+        space.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats(), before);
     }
 
     // Catches the ledger silently capping ownership at a fixed capacity:

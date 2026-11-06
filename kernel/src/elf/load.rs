@@ -301,9 +301,7 @@ pub fn load_image_with_kernel_mappings<
         if mapping.flags().user() {
             return Err(LoadError::UserAccessibleKernelMapping);
         }
-        builder
-            .map_borrowed(mapping.page(), mapping.physical(), mapping.flags())
-            .map_err(LoadError::Vm)?;
+        builder.map_borrowed_any(mapping).map_err(LoadError::Vm)?;
     }
     // segmentのbyteは1 pageずつこのbufferへ読んでからframeへcopyする。
     let mut page_buffer: Vec<u8> = vec![0u8; PAGE_SIZE];

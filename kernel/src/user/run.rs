@@ -81,7 +81,7 @@ impl KernelStack {
             .expect("contiguous allocation fills every slot")
             .start();
         let mut stack = Self { frames, guard };
-        if let Err(error) = stack.prepare(memory, space) {
+        if let Err(error) = stack.prepare(allocator, memory, space) {
             stack
                 .release(allocator)
                 .expect("newly allocated kernel stack frames remain owned during rollback");
@@ -92,6 +92,7 @@ impl KernelStack {
 
     fn prepare<M: FrameStore>(
         &self,
+        allocator: &mut dyn FrameSource,
         memory: &mut M,
         space: &mut AddressSpace,
     ) -> Result<(), KernelStackError<M::Error>> {
@@ -100,18 +101,21 @@ impl KernelStack {
                 .zero_frame(frame.start())
                 .map_err(KernelStackError::Memory)?;
         }
-        self.hide_guard(space, memory)
+        self.hide_guard(allocator, space, memory)
             .map_err(KernelStackError::Guard)
     }
 
     /// guard pageのidentity mappingを`space`から外す。`exec`の新imageにも使う。
+    /// guard pageがmegapageの中にあれば、`allocator`から確保したtableへ
+    /// 分割してから外す。
     pub fn hide_guard<M: FrameStore>(
         &self,
+        allocator: &mut dyn FrameSource,
         space: &mut AddressSpace,
         memory: &mut M,
     ) -> Result<(), VmError<M::Error>> {
         let page = VirtPage::from_start(self.guard as u64).map_err(VmError::Address)?;
-        space.unmap_identity(memory, page).map(|_| ())
+        space.unmap_identity(allocator, memory, page).map(|_| ())
     }
 
     pub const fn guard_page(&self) -> usize {

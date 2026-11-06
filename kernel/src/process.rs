@@ -553,9 +553,9 @@ impl Process {
 
         // kernel stackは既存を使い回すため、guard pageを新imageからも外す。
         // 失敗時の回収対象はimageだけである。
-        if let Err(error) = self
-            .kernel_stack
-            .hide_guard(image.address_space_mut(), memory)
+        if let Err(error) =
+            self.kernel_stack
+                .hide_guard(allocator, image.address_space_mut(), memory)
         {
             return Err(destroy_failure(image, allocator, SpawnError::Guard(error)));
         }

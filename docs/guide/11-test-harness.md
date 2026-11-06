@@ -243,8 +243,7 @@ shellは行ごとにchildを起動順に`waitpid`し、pipelineでconsoleへ書�
 
 ### 時間切れと失敗時の記録
 
-各QEMUテストの制限時間は10秒です。
-ただし`user-shell`はscriptの1行ごとにprocessをspawnし（約35回）、1回のspawnにkernel mappingの複製で数百msかかるため、30秒です（`TestKind::deadline`）。
+各QEMUテストの制限時間は10秒です（`TestKind::deadline`）。
 `xtask`は標準出力と標準エラーを起動直後から別々のスレッドで読み、パイプのバッファーが埋まってゲストが停止することを防ぎます。
 制限時間を超えるとQEMUを終了し、必ず`wait`で回収するため、子プロセスを残しません。
 エラーには、シェルで安全に再実行できるよう引用したQEMUプログラム、カーネルのパス、全オプション、制限時間、受信済みの標準出力と標準エラーを含めます。
