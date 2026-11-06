@@ -2,7 +2,9 @@
 //!
 //! directoryの作成、duplicate作成の`EEXIST`、非空directoryの`ENOTEMPTY`、
 //! fileの`rmdir`拒否、nested directory、fileを消した後のrmdir成功、
-//! 削除済みdirectory内のfileが`ENOENT`になることを確認し、42で終了する。
+//! 削除済みdirectory内のfileが`ENOENT`になること、8.3へ正規化できない
+//! 名前のdirectoryをLFNで作って中のfileを長い名前で解決できること、FATが
+//! 禁じる文字の`EINVAL`を確認し、42で終了する。
 //! 失敗時はpanicし、70で終了する。E2Eのfile-mkdir検査が使う。
 
 #![no_std]
@@ -22,7 +24,13 @@ const NESTED_PATH: &[u8] = b"DOCS/NEST";
 const FILE_PATH: &[u8] = b"HELLO.TXT";
 const MISSING_PATH: &[u8] = b"MISSING";
 const UNDER_MISSING_PATH: &[u8] = b"MISSING/X";
+/// 8.3へ正規化できないためLFNで作るdirectoryと、その中のLFN file。
 const LFN_PATH: &[u8] = b"long name";
+const LFN_INNER_PATH: &[u8] = b"long name/inner note.txt";
+/// 大小文字だけが違う同じpath。LFNは大小文字を区別せずに解決する。
+const LFN_INNER_UPPER: &[u8] = b"LONG NAME/INNER NOTE.TXT";
+/// FATの名前に使えない`:`を含む。
+const RESERVED_PATH: &[u8] = b"bad:name";
 const PAYLOAD: &[u8] = b"inside dir\n";
 const BUFFER_LEN: usize = 64;
 
@@ -40,12 +48,12 @@ fn main(_args: Args) -> i32 {
     make_dir_with_file();
 
     // errno契約：duplicate mkdir、非空directoryのrmdir、fileのrmdir、
-    // 不在path、非8.3名。
+    // 不在path、FATが禁じる文字。
     assert_eq!(mkdir(DIR_PATH), Err(Errno(EEXIST)));
     assert_eq!(rmdir(DIR_PATH), Err(Errno(ENOTEMPTY)));
     assert_eq!(rmdir(FILE_PATH), Err(Errno(ENOTDIR)));
     assert_eq!(rmdir(MISSING_PATH), Err(Errno(ENOENT)));
-    assert_eq!(mkdir(LFN_PATH), Err(Errno(EINVAL)));
+    assert_eq!(mkdir(RESERVED_PATH), Err(Errno(EINVAL)));
     assert_eq!(mkdir(UNDER_MISSING_PATH), Err(Errno(ENOENT)));
 
     // nested作成：既存subdirectoryの下へ作れる（`..`が非root親を指す）。
@@ -67,6 +75,22 @@ fn main(_args: Args) -> i32 {
     file.close().unwrap();
     unlink(INNER_PATH).unwrap();
     rmdir(DIR_PATH).unwrap();
+
+    // LFN：長い名前のdirectoryと中のfileを作り、大小文字違いのpathで
+    // 読み戻す。同じ名前の再作成は大小文字を問わず`EEXIST`。
+    mkdir(LFN_PATH).unwrap();
+    assert_eq!(mkdir(b"LONG NAME"), Err(Errno(EEXIST)));
+    let mut file = File::create(LFN_INNER_PATH).unwrap();
+    assert_eq!(file.write(PAYLOAD), Ok(PAYLOAD.len()));
+    file.close().unwrap();
+    let mut file = File::open(LFN_INNER_UPPER).unwrap();
+    assert_eq!(file.read(&mut buffer[..PAYLOAD.len()]), Ok(PAYLOAD.len()));
+    assert_eq!(&buffer[..PAYLOAD.len()], PAYLOAD);
+    file.close().unwrap();
+    assert_eq!(rmdir(LFN_PATH), Err(Errno(ENOTEMPTY)));
+    unlink(LFN_INNER_PATH).unwrap();
+    rmdir(LFN_PATH).unwrap();
+    assert_eq!(rmdir(LFN_PATH), Err(Errno(ENOENT)));
 
     println!("mkdir verified");
     42

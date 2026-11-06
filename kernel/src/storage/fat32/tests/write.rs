@@ -42,7 +42,7 @@ fn create_file_writes_entry_and_reuses_existing() {
         Err(FatError::IsDirectory)
     ));
     assert!(matches!(
-        fs.create_file("long file.txt"),
+        fs.create_file("trailing dot."),
         Err(FatError::InvalidName)
     ));
     assert!(matches!(

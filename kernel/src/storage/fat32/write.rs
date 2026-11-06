@@ -1,6 +1,7 @@
 use crate::storage::{SectorReader, SectorWriter};
 
-use super::parse::{is_valid_component, read_u16, read_u32, to_short_name, write_u16, write_u32};
+use super::lfn::NewName;
+use super::parse::{is_valid_component, read_u16, read_u32, write_u16, write_u32};
 use super::{
     DIR_ATTR_DIR, DIR_ATTR_FILE, DOT_DOT_SHORT_NAME, DOT_SHORT_NAME, DirEntry, DirLoc,
     DirRecordPos, FAT_EOC, FSINFO_LEAD_SIG, FSINFO_STRUCT_SIG, FSINFO_TRAIL_SIG, FSINFO_UNKNOWN,
@@ -13,9 +14,9 @@ use super::{
 #[cfg(not(target_arch = "riscv32"))]
 impl<R: SectorReader + SectorWriter> Fat32<R> {
     /// `path`が示すfileを作成またはwritableに開く。fileが既にあれば
-    /// 内容を保ったまま記述子を返す。無ければ親directoryへ8.3 entryを
-    /// 追加し、空のfileとして返す。最終要素は8.3へ正規化できる名前のみ
-    /// 受理し（小文字は大文字化）、LFN名での作成は`InvalidName`とする。
+    /// 内容を保ったまま記述子を返す。無ければ親directoryへentryを追加し、
+    /// 空のfileとして返す。最終要素が8.3へ正規化できれば8.3 entryだけを
+    /// 作り（小文字は大文字化）、できなければLFN record列と8.3 aliasを作る。
     pub fn create_file(&mut self, path: &str) -> Result<FileDesc, FatError<R::Error>> {
         for part in path.split('/') {
             if !is_valid_component(part) {
@@ -26,9 +27,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             Some(index) => (&path[..index], &path[index + 1..]),
             None => ("", path),
         };
-        let Some(short) = to_short_name(name) else {
-            return Err(FatError::InvalidName);
-        };
+        let new = NewName::classify(name)?;
 
         let mut scratch = [0; 512];
         let dir_cluster = if parent.is_empty() {
@@ -41,11 +40,12 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             entry.first_cluster
         };
 
-        // 正規化済みのraw 8.3名で照合する。小文字で作ったfileは既存の
+        // 8.3名は正規化済みのraw 8.3名で照合する。小文字で作ったfileは既存の
         // 大文字entryと一致し、LFNを持つ無関係なfileとは衝突しない。
+        // LFN名は表示名を大小文字無視で照合する。
         let mut found = None;
         self.walk_dir(dir_cluster, &mut scratch, |entry, loc| {
-            if entry.short_name == short {
+            if new.matches(entry) {
                 found = Some((*entry, loc));
                 true
             } else {
@@ -64,9 +64,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             });
         }
 
-        let (cluster, index, terminator) = self.find_free_dir_slot(dir_cluster, &mut scratch)?;
-        self.place_dir_entry(cluster, index, terminator, &mut scratch, |record| {
-            record[..11].copy_from_slice(&short);
+        let (cluster, index) = self.place_new_entry(dir_cluster, new, &mut scratch, |record| {
             record[11] = DIR_ATTR_FILE;
         })?;
         Ok(FileDesc {
@@ -75,6 +73,33 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             dir_cluster: cluster,
             dir_index: index,
         })
+    }
+
+    /// `dir_cluster`へ`new`の名前でentryを1個置き、その位置を返す。
+    /// `init`は名前以外のfield（attributeやfirst cluster）を埋め、名前byteは
+    /// 8.3名かLFNのaliasで上書きされる。8.3名は削除跡を含む空きslotへ、
+    /// LFN名はrecord列ごとdirectory末尾の連続slotへ置く。
+    fn place_new_entry(
+        &mut self,
+        dir_cluster: u32,
+        new: NewName<'_>,
+        scratch: &mut [u8; 512],
+        init: impl FnOnce(&mut [u8]),
+    ) -> Result<(u32, u32), FatError<R::Error>> {
+        match new {
+            NewName::Short(short) => {
+                let (cluster, index, terminator) = self.find_free_dir_slot(dir_cluster, scratch)?;
+                self.place_dir_entry(cluster, index, terminator, scratch, |record| {
+                    init(record);
+                    record[..11].copy_from_slice(&short);
+                })?;
+                Ok((cluster, index))
+            }
+            NewName::Long(name) => {
+                let slot = self.reserve_long_entry(dir_cluster, name, scratch)?;
+                self.write_long_entry(&slot, name, scratch, |record| init(record))
+            }
+        }
     }
 
     /// `cluster`内のslot `index`へ32 byte recordを書き、`init`でnameと
@@ -126,7 +151,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
     /// `path`が示すdirectoryを作成する。新dirへ1 clusterを割り当て、
     /// `.`と`..`を初期化してから親dirへentryを追加する。同名entryが
     /// あればfile/dirを問わず`Exists`で拒否し、最終要素は`create`と
-    /// 同じく8.3へ正規化できる名前のみ受理する。
+    /// 同じく8.3へ正規化できなければLFNで作る。
     ///
     /// 新clusterの確保と初期化を親entryの書き込みより先に行うのは、
     /// 逆順で失敗するとcluster 0を指すentryが残るため。親dir側の
@@ -141,9 +166,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             Some(index) => (&path[..index], &path[index + 1..]),
             None => ("", path),
         };
-        let Some(short) = to_short_name(name) else {
-            return Err(FatError::InvalidName);
-        };
+        let new = NewName::classify(name)?;
 
         let mut scratch = [0; 512];
         let dir_cluster = if parent.is_empty() {
@@ -156,11 +179,11 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             entry.first_cluster
         };
 
-        // 正規化済みのraw 8.3名で照合する。`.`/`..`はwalk_dirがyield
+        // `create_file`と同じ規約で照合する。`.`/`..`はwalk_dirがyield
         // しないため、ここでは実entryとの衝突だけを見る。
         let mut found = false;
         self.walk_dir(dir_cluster, &mut scratch, |entry, _loc| {
-            if entry.short_name == short {
+            if new.matches(entry) {
                 found = true;
             }
             found
@@ -195,13 +218,12 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
                 .write_sector(lba, &scratch)
                 .map_err(FatError::Read)?;
 
-            let (cluster, index, terminator) = fs.find_free_dir_slot(dir_cluster, &mut scratch)?;
-            fs.place_dir_entry(cluster, index, terminator, &mut scratch, |record| {
-                record[..11].copy_from_slice(&short);
+            fs.place_new_entry(dir_cluster, new, &mut scratch, |record| {
                 record[11] = DIR_ATTR_DIR;
                 write_u16(record, 20, (new_cluster >> 16) as u16);
                 write_u16(record, 26, new_cluster as u16);
             })
+            .map(|_| ())
         })(self);
         if result.is_err() {
             self.free_chain(new_cluster, &mut scratch)?;
@@ -494,7 +516,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
 
     /// clusterの全sectorをzero-fillする。新規割当てclusterの未定義byteと
     /// dir拡張時のstale entryを排除する。
-    fn zero_cluster(&mut self, cluster: u32) -> Result<(), FatError<R::Error>> {
+    pub(super) fn zero_cluster(&mut self, cluster: u32) -> Result<(), FatError<R::Error>> {
         let zero = [0u8; 512];
         for sector in 0..self.sectors_per_cluster as u32 {
             let lba = self.data_sector_lba(cluster, sector)?;
@@ -609,8 +631,9 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
     /// `NotEmpty`）。dirを自身または子孫の中へ移す指定は
     /// `MoveIntoItself`で拒否する。移動したdirの`..`は新しい親の
     /// cluster番号（root親なら0）へ更新する。新名が8.3へ正規化
-    /// できなければ`InvalidName`として拒否する。全検証を書き込み前に
-    /// 済ませるのは`unlink_file`と同じ規約である。
+    /// できなければLFNで書き（`rename_long`）、FATが禁じる文字を含む名前は
+    /// `InvalidName`として拒否する。全検証を書き込み前に済ませるのは
+    /// `unlink_file`と同じ規約である。
     pub fn rename(
         &mut self,
         old_path: &str,
@@ -625,9 +648,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             Some(index) => (&new_path[..index], &new_path[index + 1..]),
             None => ("", new_path),
         };
-        let Some(short) = to_short_name(new_name) else {
-            return Err(FatError::InvalidName);
-        };
+        let new = NewName::classify(new_name)?;
 
         let mut scratch = [0; 512];
         let (entry, loc) = self.resolve_path(old_path, &mut scratch)?;
@@ -640,6 +661,12 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             }
             parent.first_cluster
         };
+        let short = match new {
+            NewName::Short(short) => short,
+            NewName::Long(name) => {
+                return self.rename_long(&entry, &loc, new_dir, name, &mut scratch);
+            }
+        };
         if new_dir == loc.dir_head {
             return self.rename_in_place(&loc, &short, entry.directory, &mut scratch);
         }
@@ -651,7 +678,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         let replaced = self.check_rename_target(
             entry.directory,
             new_dir,
-            &short,
+            NewName::Short(short),
             (loc.cluster, loc.index),
             &mut scratch,
         )?;
@@ -662,7 +689,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
 
         // sourceのLFN runを確定し、recordの32 byteを確保する。dirの
         // `..`recordが期待位置にあることも書き込み前に検証する。
-        let (run_start, run_end) = self.lfn_run_bounds(&loc, &mut scratch)?;
+        let (run_start, _) = self.lfn_run_bounds(&loc, &mut scratch)?;
         let mut record = [0u8; 32];
         {
             let lba = self.data_sector_lba(loc.cluster, loc.index / 16)?;
@@ -678,7 +705,13 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
 
         // ここから書き込み。source runを消し、置換対象を削除し、target
         // slotへ複写したrecordを置き、dirなら`..`を新parentへ更新する。
-        self.mark_deleted_range(loc.dir_head, run_start, run_end, &mut scratch)?;
+        // runの末尾はLFN recordの最後なので、entry自身まで含めて消す。
+        self.mark_deleted_range(
+            loc.dir_head,
+            run_start,
+            (loc.cluster, loc.index),
+            &mut scratch,
+        )?;
         if let Some((target, tloc)) = replaced {
             let (tstart, _) = self.lfn_run_bounds(&tloc, &mut scratch)?;
             self.mark_deleted_range(
@@ -719,7 +752,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         let replaced = self.check_rename_target(
             source_is_dir,
             loc.dir_head,
-            short,
+            NewName::Short(*short),
             (loc.cluster, loc.index),
             scratch,
         )?;
@@ -750,6 +783,68 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         })
     }
 
+    /// 新しい名前がLFNのrename。同じdirectory内でも、entryをLFN record列ごと
+    /// directory末尾へ置き直す（直前に連続slotを確保できる保証がないため）。
+    /// 書き込みの前に置換対象の検証とslotの確保を済ませ、確保後はsourceの
+    /// record列を削除跡にしてから新しい位置へ書く。entryの位置は変わるため
+    /// 同じdirectory内でも`moved`を返す。
+    fn rename_long(
+        &mut self,
+        entry: &DirEntry,
+        loc: &DirLoc,
+        new_dir: u32,
+        name: &str,
+        scratch: &mut [u8; 512],
+    ) -> Result<RenameOutcome, FatError<R::Error>> {
+        if entry.directory && new_dir != loc.dir_head {
+            self.check_move_not_into_self(entry.first_cluster, new_dir, scratch)?;
+        }
+        let replaced = self.check_rename_target(
+            entry.directory,
+            new_dir,
+            NewName::Long(name),
+            (loc.cluster, loc.index),
+            scratch,
+        )?;
+        let slot = self.reserve_long_entry(new_dir, name, scratch)?;
+
+        let (run_start, _) = self.lfn_run_bounds(loc, scratch)?;
+        let mut record = [0u8; 32];
+        {
+            let lba = self.data_sector_lba(loc.cluster, loc.index / 16)?;
+            self.reader
+                .read_sector(lba, scratch)
+                .map_err(FatError::Read)?;
+            let offset = (loc.index % 16) as usize * 32;
+            record.copy_from_slice(&scratch[offset..offset + 32]);
+        }
+        if entry.directory {
+            self.read_dotdot(entry.first_cluster, scratch)?;
+        }
+
+        // ここから書き込み。LFN runとentry自身を削除跡にする。
+        self.mark_deleted_range(loc.dir_head, run_start, (loc.cluster, loc.index), scratch)?;
+        if let Some((target, tloc)) = replaced {
+            let (tstart, _) = self.lfn_run_bounds(&tloc, scratch)?;
+            self.mark_deleted_range(tloc.dir_head, tstart, (tloc.cluster, tloc.index), scratch)?;
+            self.free_chain(target.first_cluster, scratch)?;
+        }
+        let new_loc =
+            self.write_long_entry(&slot, name, scratch, |slot| slot.copy_from_slice(&record))?;
+        if entry.directory && new_dir != loc.dir_head {
+            let parent = if new_dir == self.root_cluster {
+                0
+            } else {
+                new_dir
+            };
+            self.update_dotdot(entry.first_cluster, parent, scratch)?;
+        }
+        Ok(RenameOutcome {
+            moved: Some(((loc.cluster, loc.index), new_loc)),
+            replaced: replaced.map(|(_, tloc)| (tloc.cluster, tloc.index)),
+        })
+    }
+
     /// `dir`内で`short`と衝突するentryを探し、dir/file matrixと
     /// 置換chainの検証を行う。衝突がなければ`None`、source自身と同じ
     /// entryならno-opを表す`None`、置換すべき相手は`(entry, loc)`を
@@ -758,14 +853,14 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         &mut self,
         source_is_dir: bool,
         dir: u32,
-        short: &[u8; 11],
+        new: NewName<'_>,
         self_loc: (u32, u32),
         scratch: &mut [u8; 512],
     ) -> Result<Option<(DirEntry, DirLoc)>, FatError<R::Error>> {
-        // 正規化済みのraw 8.3名で照合する（create_fileと同じ規約）。
+        // create_fileと同じ規約で照合する。
         let mut found = None;
         self.walk_dir(dir, scratch, |candidate, cloc| {
-            if candidate.short_name == *short {
+            if new.matches(candidate) {
                 found = Some((*candidate, cloc));
                 true
             } else {

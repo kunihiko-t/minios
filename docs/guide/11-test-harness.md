@@ -172,11 +172,13 @@ writable fdへの`read`とread-only fdへの`write`の`EBADF`、directoryへの`
 `file-seek`ではfile_seek guestが`pread`/`pwrite`がfdのoffsetを動かさないこと、`lseek`のSET/CUR/ENDとEOF越えseek、負になる結果や未知のwhenceの`EINVAL`、方向性fdへの`pread`/`pwrite`の`EBADF`、consoleを指すfdへの`lseek`の`ESPIPE`を確かめます。
 最後に`lseek`で先頭へ戻して上書きしたfileを読み戻して照合し、標準出力へ出して終了コード42を返すことを要求します。
 `file-rename`ではfile_rename guestが`rename`後も開いているfdが有効なまま内容を読めること、旧名の`open`が`ENOENT`、同名へのrenameが成功、既存fileへのrenameが置き換えとなり置き換えられたfileを指すfdが`EBADF`で失効することを確かめます。
-不在のsourceが`ENOENT`、dir→fileが`ENOTDIR`、file→dirが`EISDIR`、8.3へ正規化できない名前が`EINVAL`であることも確かめます。
+不在のsourceが`ENOENT`、dir→fileが`ENOTDIR`、file→dirが`EISDIR`、FATが禁じる`?`を含む名前が`EINVAL`であることも確かめます。
+8.3へ正規化できない名前へのrenameはLFNで成功し、開いていたfdが新しい位置へ追従して8.3名へ戻した後も内容を読めることも確かめます。
 directoryのrenameについては、`mkdir`したdirを改名して中のfileが新dir名で読めること、dir→非空dirが`ENOTEMPTY`、dir→空dirが置き換えになること、片付けに`rmdir`が使えることを確かめます。
 cross-directory moveについては、fileをdirへ移して旧名が`ENOENT`・新名で読める往復、開いているwritable fdを持つfileを移してfd経由の追記が新しいdir entryへwrite-backされること、別dir内の既存fileへの移動が置き換えとなりtargetのfdが`EBADF`で失効すること、fileをdirごと別のdirの中へ移して中身を新pathで読みrootへ戻すこと（`..`の更新）、dirを自身や子孫の中へ移す指定が`EINVAL`、不在の親dirへの移動が`ENOENT`であることを確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 `file-mkdir`ではfile_mkdir guestが`mkdir`でdirectoryを作ってその中へfileを`create`/`write`し、再作成が`EEXIST`、非空directoryへの`rmdir`が`ENOTEMPTY`、fileへの`rmdir`が`ENOTDIR`、既存directory内へのnested作成が成功することを確かめます。
-fileを`unlink`してから`rmdir`が成功し、中のfileもdirectoryも`ENOENT`になること、削除跡へ同名で作り直したdirectory内のfileを読み戻して照合することを確かめてから、標準出力へ出して終了コード42を返すことを要求します。
+fileを`unlink`してから`rmdir`が成功し、中のfileもdirectoryも`ENOENT`になること、削除跡へ同名で作り直したdirectory内のfileを読み戻して照合することを確かめます。
+8.3へ正規化できない`long name`をLFNのdirectoryとして作り、中のLFN fileを大小文字違いのpathで読み戻すこと、FATが禁じる`:`を含む名前が`EINVAL`であることも確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 `file-spawn`ではfile_spawn guestが`getpid`で自分のpid 0を受け取り、`spawn`で`DOCS/CHILD.ELF`を起動してchildのpid 1を受け取ることを確かめます。
 disk image内の`CHILD.ELF`は最小限のELF64で、起動したchild processが`spawn-child`を標準出力へ書き、`getpid`で得たpidに41を足した42で終了します。
 不在pathの`ENOENT`、directoryの`EISDIR`、非ELF fileの`EINVAL`、空pathの`EINVAL`も確かめます。
@@ -220,7 +222,7 @@ childがbasenameの`ECHO.ELF`と渡した3個の文字列をこの順で標準�
 frame列のexact照合と最後のdiagnosticで、argvの中身と順序、frameの回収を検査します。
 `user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`をdisk imageの`BIN`へ置きます。
 Ready frameの後にscriptをStdin frameとして送り、最後に長さ0のStdin frameでEOFを伝えます。
-scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、`echo redirected > OUT.TXT`、`cat OUT.TXT`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、存在しない`nosuch`の順です。
+scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、`echo redirected > OUT.TXT`、`cat OUT.TXT`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、存在しない`nosuch`の順です。
 8段の行は何も起動されず、`too many commands`の標準エラー1行だけになります。
 1 frameに2行を詰めた送り方と、1行を2 frameへ分けた送り方も含めます。
 shellは行ごとにchildを起動順に`waitpid`し、pipelineでconsoleへ書くのは最後のcommandだけです。

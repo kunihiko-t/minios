@@ -200,7 +200,7 @@ RV64の仕組みをそのまま縮小した構成ではなく、UARTとシェル
 ## NEORV32 read-only storage
 
 - `storage/sd.rs`：SDHCとSDXC専用のread-only SPI driverであり、CMD17によるsector読み取りとCRC16検証を行います。
-- `storage/fat32/`（`mod.rs`、`parse.rs`、`read.rs`、`write.rs`）：read-only FAT32 parserであり、partition選択、BPB検証、root directory反復、8.3名lookupを行います。
+- `storage/fat32/`（`mod.rs`、`parse.rs`、`read.rs`、`write.rs`、`lfn.rs`）：read-only FAT32 parserであり、partition選択、BPB検証、root directory反復、8.3名lookupを行います。
 - `drivers/neorv32_sd.rs`：GPIO bit-bangのSPI busであり、`rdcycle`基準のdelayで初期化時375 kHz以下を保ちます。
 - `shell`の`ls`と`cat`：単一sessionを使い回し、型付きerrorを`sd:`接頭辞の安定messageへ写像します。
 
@@ -218,7 +218,8 @@ queueとrequest bufferはframe poolが払い出した1 pageを`VirtioRegion`と�
 `storage::fat32`は`SectorReader`境界で`VirtioBlk`へ差し替わるため、parser本体はRV32経路と共有です。
 書き込み経路（`create_file`、`write_range`、`unlink_file`、`rename`、`create_dir`、`remove_dir`）は`SectorWriter`境界を追加で要求するため、read-only想定のRV32 SD経路では構成されません。
 `unlink_file`はdir entryと先行する長い名前のrecord列を`0xe5`へ書き換えてcluster chainを解放し、削除したentryを指すfdはkernelが`ProcessTable`内の全processから失効させます。
-`rename`はentryを別のpathへ移します。同一directory内では8.3名をin-placeに書き換え、別directoryを指定した場合はrecordを新しい親のslotへ複写してsource側を削除する移動になります。fileでもdirectoryでも使え、cluster chainと内容は変わりません。in-place改名ではentryの物理位置が不変なので開いているfdは有効なままです。移動ではentryの物理位置が変わるため、kernelは全processの該当fdのwrite-back先を新しい位置へ追従させ（`relocate_file_fds`）、POSIXの「open fileはrenameしても有効」をmoveでも維持します。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。directoryのtargetは空に限り置き換えられ、fileへのdir改名は`NotDirectory`、非空dirへの改名は`NotEmpty`です。移したdirectoryの`..`は新しい親のcluster番号（root親なら0）へ更新し、directoryを自身または子孫の中へ移す指定は`MoveIntoItself`として`EINVAL`で拒否します。
+`create_file`と`create_dir`は、8.3へ正規化できない名前をVFATのLFN record列と重複しない8.3 aliasで作ります（`storage/fat32/lfn.rs`）。列とaliasは連続slotが必要なため、directoryの終端から先へ、clusterの追加を含めて先にslotを確保してから書きます。
+`rename`はentryを別のpathへ移します。同一directory内では8.3名をin-placeに書き換え（新しい名前がLFNならentryをdirectory末尾へ置き直し）、別directoryを指定した場合はrecordを新しい親のslotへ複写してsource側を削除する移動になります。fileでもdirectoryでも使え、cluster chainと内容は変わりません。in-place改名ではentryの物理位置が不変なので開いているfdは有効なままです。移動ではentryの物理位置が変わるため、kernelは全processの該当fdのwrite-back先を新しい位置へ追従させ（`relocate_file_fds`）、POSIXの「open fileはrenameしても有効」をmoveでも維持します。既存fileへのrenameはPOSIXと同じく置き換えで、消えたtargetを指すfdは`unlink`と同じく失効します。directoryのtargetは空に限り置き換えられ、fileへのdir改名は`NotDirectory`、非空dirへの改名は`NotEmpty`です。移したdirectoryの`..`は新しい親のcluster番号（root親なら0）へ更新し、directoryを自身または子孫の中へ移す指定は`MoveIntoItself`として`EINVAL`で拒否します。
 `create_dir`は新しいclusterを`.`と`..`のentryで初期化してから親directoryへentryを公開し、途中の失敗では割り当てたclusterを解放してから失敗を返します。
 `remove_dir`は`.`と`..`以外のentryがないことを確かめてから、`unlink_file`と同じくentry削除とchain解放を行います。
 

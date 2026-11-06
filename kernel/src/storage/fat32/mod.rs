@@ -3,6 +3,8 @@
 //! 値はaddress計算の前にすべて検証し、checked演算とdata cluster数上限で
 //! volume外参照と無限loopを防ぐ。
 
+#[cfg(not(target_arch = "riscv32"))]
+mod lfn;
 mod parse;
 mod read;
 #[cfg(test)]

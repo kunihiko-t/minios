@@ -6,6 +6,7 @@ use crate::storage::{SectorReader, SectorWriter};
 use std::{string::String, vec::Vec};
 
 mod dir;
+mod lfn;
 mod read;
 mod rename;
 mod write;

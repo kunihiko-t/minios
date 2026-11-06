@@ -1876,7 +1876,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 10] = [
+const USER_SHELL_SCRIPT: [&[u8]; 12] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -1887,6 +1887,9 @@ const USER_SHELL_SCRIPT: [&[u8]; 10] = [
     // shellを含めprocess tableの上限8個ちょうどを使う7段と、8段の拒否。
     b"echo a b c | cat | cat | cat | cat | cat | wc\n",
     b"echo a | cat | cat | cat | cat | cat | cat | wc\n",
+    // 8.3へ正規化できない名前はLFNで作られ、同じ名前で読み戻せる。
+    b"echo saved > notes.backup\n",
+    b"cat notes.backup\n",
     b"nosuch\n",
 ];
 
@@ -1965,6 +1968,11 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
             FrameKind::Stderr,
             b"sh: too many commands in a pipeline (max 7)\n",
         ),
+        // echo saved > notes.backup
+        exit(),
+        // cat notes.backup
+        stdout(b"saved\n"),
+        exit(),
         // nosuch
         control_frame(FrameKind::Stderr, b"sh: nosuch: not found (errno -2)\n"),
         // EOFでshell自身が0で終了する。

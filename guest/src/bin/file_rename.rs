@@ -3,7 +3,8 @@
 //! fileをrenameして開いているfdが有効なまま動くこと、旧名が`ENOENT`に
 //! なること、置き換えられたfileを指すfdが`EBADF`で失効すること、
 //! directoryのrenameとdir/file組合せのerrno、別directoryへのmove
-//! （fd追従・`..`更新・cycle拒否・cross-dir置換）を確認し、42で終了する。
+//! （fd追従・`..`更新・cycle拒否・cross-dir置換）と、8.3へ正規化できない
+//! 名前へのrename（LFN）を確認し、42で終了する。
 //! 失敗時はpanicし、70で終了する。E2Eのfile-rename検査が使う。
 
 #![no_std]
@@ -37,7 +38,10 @@ const DDA_PATH: &[u8] = b"DDA";
 const DDA_INNER_DIR: &[u8] = b"DDA/INNER";
 const DDA_CYCLE: &[u8] = b"DDA/INNER/X";
 const NOPARENT_PATH: &[u8] = b"MISSINGD/X.TXT";
+/// 8.3へ正規化できないためLFNで持つ名前。
 const LFN_PATH: &[u8] = b"long name.txt";
+/// FATの名前に使えない`?`を含む。
+const RESERVED_PATH: &[u8] = b"what?.txt";
 const MISSING_PATH: &[u8] = b"MISSING.TXT";
 const OLDDIR_PATH: &[u8] = b"OLDDIR";
 const NEWDIR_PATH: &[u8] = b"NEWDIR";
@@ -88,11 +92,24 @@ fn main(_args: Args) -> i32 {
     assert_missing(OLD_PATH);
     rename(NEW_PATH, NEW_PATH).unwrap();
 
-    // errno契約：不在source、dir→file、file→dir、別dir、非8.3名。
+    // errno契約：不在source、dir→file、file→dir、FATが禁じる文字。
     assert_eq!(rename(MISSING_PATH, OLD_PATH), Err(Errno(ENOENT)));
     assert_eq!(rename(DIR_PATH, FILE_PATH), Err(Errno(ENOTDIR)));
     assert_eq!(rename(NEW_PATH, DIR_PATH), Err(Errno(EISDIR)));
-    assert_eq!(rename(NEW_PATH, LFN_PATH), Err(Errno(EINVAL)));
+    assert_eq!(rename(NEW_PATH, RESERVED_PATH), Err(Errno(EINVAL)));
+
+    // LFN名へのrenameはentryをdirectory末尾へ置き直す。開いているfdは
+    // 新しい位置へ追従し、8.3名へ戻した後も同じ内容を読める。
+    let mut file = File::open(NEW_PATH).unwrap();
+    rename(NEW_PATH, LFN_PATH).unwrap();
+    assert_missing(NEW_PATH);
+    read_back(LFN_PATH, &mut buffer, PAYLOAD.len());
+    assert_eq!(&buffer[..PAYLOAD.len()], PAYLOAD);
+    rename(LFN_PATH, NEW_PATH).unwrap();
+    assert_missing(LFN_PATH);
+    assert_eq!(file.read(&mut buffer[..PAYLOAD.len()]), Ok(PAYLOAD.len()));
+    assert_eq!(&buffer[..PAYLOAD.len()], PAYLOAD);
+    file.close().unwrap();
 
     // 既存fileへのrenameは置き換える。target側のfdは失効し、
     // target名で開くとsourceの内容が読める。失効したfdは生のまま扱い、

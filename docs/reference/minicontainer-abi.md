@@ -160,7 +160,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 4 | `read_file` | `a0=path pointer`、`a1=path length`、`a2=buffer pointer`、`a3=buffer length` | `path`はUTF-8のFAT32パスで256 byte以下。戻り値は読んだbyte数。fileがbufferより長い場合は先頭で打ち切る |
 | 5 | `open` | `a0=path pointer`、`a1=path length` | `path`はUTF-8のFAT32パスで256 byte以下。戻り値は3以上のread-only file descriptorか負のerrno。processごとにfd 0、1、2とは別に最大16個まで開ける |
 | 6 | `close` | `a0=fd` | fd 0、1、2を含むfdのslotを空ける。戻り値は0か負のerrno |
-| 7 | `create` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、fileが無ければ作成し、writableなfile descriptorを返す。最終要素は8.3名へ正規化できる名前のみ受理する |
+| 7 | `create` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、fileが無ければ作成し、writableなfile descriptorを返す。最終要素が8.3名へ正規化できなければLFNで作る |
 | 8 | `unlink` | `a0=path pointer`、`a1=path length` | `open`と同じpath規約で、fileを削除する。戻り値は0か負のerrno |
 | 9 | `lseek` | `a0=fd`、`a1=offset（符号付き）`、`a2=whence` | fdのoffsetを`whence`（0=file先頭、1=現在offset、2=file末尾）基準の`offset`へ更新する。戻り値は新しいoffsetか負のerrno |
 | 10 | `pread` | `a0=fd`、`a1=pointer`、`a2=length`、`a3=offset` | fileの`offset` byte目から読む。fdが保持するoffsetは動かさない。戻り値はbyte数、EOFは0 |
@@ -199,7 +199,7 @@ fd 0、1、2は特別扱いではなく普通のslotであり、`read`と`write`
 console入力のentryへの`write`とconsole出力のentryへの`read`は、pipeの方向規約と同じく`EBADF`です。
 `open`は`read_file`と同じpath規約で、成功するとfileをread-onlyの`fd`へ結び付けます。
 `open`、`create`、`pipe`は、fd 0、1、2が空いていても使わず、`FIRST_FILE_FD`（3）以上で最小の空きslotを割り当てます。
-`create`はfileが存在しなければ8.3名のentryを親directoryへ追加し、存在すればそのfileをwritableに開きます。作成名は小文字を大文字化した8.3形だけを受理し、長い名前や8.3へ写像できない要素は`EINVAL`です。
+`create`はfileが存在しなければentryを親directoryへ追加し、存在すればそのfileをwritableに開きます。8.3形へ正規化できる名前は小文字を大文字化した8.3名だけで作ります。それ以外の名前（空白を含む、拡張子が4文字以上など）はVFATのLFN record列と、`LONGFI~1.TXT`のような重複しない8.3 aliasで作ります。既存entryとの照合は、8.3名なら正規化した8.3名で、LFNなら表示名の大小文字を無視して行います。FATが名前に禁じる`" * : < > ? |`を含む名前と、末尾が空白か`.`の長い名前は`EINVAL`です。
 file fdへの`read`と`write`は現在のoffsetから行い、処理した分だけoffsetを進めます。
 fdはread専用（`open`由来）またはwrite専用（`create`由来）のどちらかであり、writable fdへの`read`とread-only fdへの`write`は`EBADF`を返します。
 `write`のoffsetがfile sizeを越える場合は穴あき書き込みになるため`EINVAL`を返します。size以内なら上書きと末尾への追記ができます。
@@ -215,7 +215,7 @@ fdはread専用（`open`由来）またはwrite専用（`create`由来）のど�
 file entryは位置記述子とoffsetごとcopyするため、POSIXと異なり`dup2`後の2個のfdはoffsetを共有しません。片方の`read`/`write`/`lseek`はもう片方のoffsetを動かしません。`unlink`による失効と`rename`による追従は、複製したfdにも同じく働きます。
 `unlink`はdir entryとそれに続く長い名前のrecord列を削除し、fileのcluster chainを解放します。directoryには使えず、`EISDIR`を返します。
 POSIXと異なり、削除したentryを指すfdはどのprocessのものも即座に失効し、以後の`read`/`write`/`close`は`EBADF`を返します。これはclusterを即座に解放するために必要な規約です。
-`rename`はfileまたはdirectoryを別のpathへ移します。同一directory内では名前の変更、別directoryを指定した場合は移動になります。新しい名前は`create`と同じく8.3へ正規化できる名前のみ受理します。
+`rename`はfileまたはdirectoryを別のpathへ移します。同一directory内では名前の変更、別directoryを指定した場合は移動になります。新しい名前は`create`と同じ規約で8.3名かLFNになります。LFNの名前へのrenameは、同じdirectory内でもentryをdirectoryの末尾へ置き直すため、entryの物理位置が変わり、開いているfdは移動と同じく新しい位置へ追従します。
 同一directory内の改名ではentryのcluster chainと内容、dir entryの物理位置は変わらないため、fileを開いているfdは有効なままです。別directoryへの移動ではdir entryが新しい親の中の別の物理位置へ移りますが、kernelが開いているfdのwrite-back先を新しい位置へ追従させるため、fdは有効のままです。同名へのrenameは成功のno-opです。
 新しい名前が既存のfileと一致する場合はPOSIXと同じく置き換えで、消えたfileを指すfdは`unlink`と同じく即座に失効します。既存のtargetがdirectoryの場合は`EISDIR`を返します。
 directoryの移動も可能で、移したdirectoryの`..`は新しい親のcluster番号（root親の場合は0）へ更新されます。sourceがdirectoryでtargetがfileの場合は`ENOTDIR`、targetが空でないdirectoryの場合は`ENOTEMPTY`を返します。空のdirectoryへのrenameは置き換えとなり、targetのentryとcluster chainが解放されます。
@@ -291,7 +291,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-19` | `ENODEV` | block deviceやnetwork deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
-| `-22` | `EINVAL` | `fcntl`の未知のcommandや`FD_CLOEXEC`以外のflag bit、4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、heap先頭より下へ戻す`sbrk`、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |
+| `-22` | `EINVAL` | `fcntl`の未知のcommandや`FD_CLOEXEC`以外のflag bit、4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、FATが禁じる文字を含む作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、heap先頭より下へ戻す`sbrk`、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |
 | `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う。socket table（4個）が満杯 |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdとconsole entryへの`lseek`/`pread`/`pwrite` |

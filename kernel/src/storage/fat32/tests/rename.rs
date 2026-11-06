@@ -130,7 +130,7 @@ fn rename_rejects_self_moves_and_bad_names_before_writing() {
         Err(FatError::IsDirectory)
     ));
     assert!(matches!(
-        fs.rename("HELLO.TXT", "long name.txt"),
+        fs.rename("HELLO.TXT", "what?.txt"),
         Err(FatError::InvalidName)
     ));
     assert!(matches!(
