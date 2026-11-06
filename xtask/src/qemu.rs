@@ -207,6 +207,18 @@ pub enum TestKind {
 }
 
 impl TestKind {
+    /// QEMU実行の期限。起動遅延は許容しつつ、停止したguestを早期に診断する。
+    /// QEMU起動とguest build直後のkernel起動はhost負荷で揺れるため、5秒で
+    /// 踏んだ観測済みflakeを避けて10秒を基本にする。user-shellはscriptの
+    /// 1行ごとにprocessをspawnし（約35回）、1回のspawnがkernel mappingの
+    /// 複製に数百msかかるため、30秒を与える。
+    pub fn deadline(self) -> Duration {
+        match self {
+            Self::UserShell => Duration::from_secs(30),
+            _ => Duration::from_secs(10),
+        }
+    }
+
     fn feature(self) -> &'static str {
         match self {
             Self::Boot => "qemu-test-boot",
@@ -551,9 +563,26 @@ pub fn run_kernel() -> Result<(), QemuError> {
     }
 }
 
+/// user shellの`BIN/`へ`SHELL_TOOLS`の全toolを置いたdisk imageを作る。
+/// `cargo xtask sh`とuser-shell検査が同じimageを使う。
+fn shell_tool_disk() -> Result<crate::disk::DiskImage, QemuError> {
+    let mut tools = Vec::new();
+    for (path, bin) in crate::guest::SHELL_TOOLS {
+        tools.push((path, built_bin_elf_bytes(bin)?));
+    }
+    let files: Vec<(&str, &[u8])> = tools
+        .iter()
+        .map(|(path, elf)| (*path, elf.as_slice()))
+        .collect();
+    crate::disk::DiskImage::create_with_files(&files).map_err(|error| QemuError::Bundle {
+        stage: "disk image",
+        error,
+    })
+}
+
 /// user shell（`SH.ELF`）をboot payloadにしてQEMUを起動し、host端末とつなぐ。
 ///
-/// shellは`-i`でpromptを出し、disk imageの`BIN`には`cat`、`wc`、`echo`を置く。
+/// shellは`-i`でpromptを出し、disk imageの`BIN`には`SHELL_TOOLS`を置く。
 /// 端末から読んだbyte列は`Stdin` frameへ包んでUARTへ送り（端末のEOFは長さ0の
 /// frame）、UARTから届く`Stdout`/`Stderr` frameのpayloadを端末の標準出力と
 /// 標準エラーへ書く。Ready frameより前のfirmwareとkernelのboot logは表示せず、
@@ -569,18 +598,7 @@ pub fn run_user_shell() -> Result<(), QemuError> {
     let elf = built_bin_elf_bytes(crate::guest::GUEST_SH)?;
     let bundle =
         PayloadBundle::create_with(assemble_test_bundle(b"version=1\nname=sh\narg=-i\n", &elf)?)?;
-    let cat = built_bin_elf_bytes(crate::guest::GUEST_CAT)?;
-    let wc = built_bin_elf_bytes(crate::guest::GUEST_WC)?;
-    let echo = built_bin_elf_bytes(crate::guest::GUEST_ECHO)?;
-    let disk = crate::disk::DiskImage::create_with_files(&[
-        ("BIN/CAT.ELF", &cat),
-        ("BIN/WC.ELF", &wc),
-        ("BIN/ECHO.ELF", &echo),
-    ])
-    .map_err(|error| QemuError::Bundle {
-        stage: "disk image",
-        error,
-    })?;
+    let disk = shell_tool_disk()?;
     let (mut command, command_line) =
         qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
     let mut child = command
@@ -772,18 +790,7 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
     if kind == TestKind::UserShell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let bundle = PayloadBundle::create_user_shell()?;
-        let cat = built_bin_elf_bytes(crate::guest::GUEST_CAT)?;
-        let wc = built_bin_elf_bytes(crate::guest::GUEST_WC)?;
-        let echo = built_bin_elf_bytes(crate::guest::GUEST_ECHO)?;
-        let disk = crate::disk::DiskImage::create_with_files(&[
-            ("BIN/CAT.ELF", &cat),
-            ("BIN/WC.ELF", &wc),
-            ("BIN/ECHO.ELF", &echo),
-        ])
-        .map_err(|error| QemuError::Bundle {
-            stage: "disk image",
-            error,
-        })?;
+        let disk = shell_tool_disk()?;
         let (command, command_line) =
             qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
         let completed =
@@ -1992,7 +1999,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 12] = [
+const USER_SHELL_SCRIPT: [&[u8]; 20] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -2006,6 +2013,15 @@ const USER_SHELL_SCRIPT: [&[u8]; 12] = [
     // 8.3へ正規化できない名前はLFNで作られ、同じ名前で読み戻せる。
     b"echo saved > notes.backup\n",
     b"cat notes.backup\n",
+    // file操作のtool。LFN名へのmoveと一覧、片付け後のrootを確かめる。
+    b"mkdir work\n",
+    b"mv notes.backup work/saved.notes\n",
+    b"ls work\n",
+    b"cat work/saved.notes\n",
+    b"rm work/saved.notes\n",
+    b"rmdir work\n",
+    b"ls\n",
+    b"rm nosuch.txt\n",
     b"nosuch\n",
 ];
 
@@ -2089,6 +2105,33 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         // cat notes.backup
         stdout(b"saved\n"),
         exit(),
+        // mkdir work
+        exit(),
+        // mv notes.backup work/saved.notes
+        exit(),
+        // ls work
+        stdout(b"saved.notes\n"),
+        exit(),
+        // cat work/saved.notes
+        stdout(b"saved\n"),
+        exit(),
+        // rm work/saved.notes
+        exit(),
+        // rmdir work
+        exit(),
+        // ls：fixtureのentryと、scriptが作ったOUT.TXTだけが残る。
+        stdout(b"HELLO.TXT\n"),
+        stdout(b"DOCS/\n"),
+        stdout(b"Long File Name.txt\n"),
+        stdout(b"BIN/\n"),
+        stdout(b"OUT.TXT\n"),
+        exit(),
+        // rm nosuch.txt：不在fileはstderrへ1行出して1で終わる。
+        control_frame(
+            FrameKind::Stderr,
+            b"rm: nosuch.txt: cannot remove (errno -2)\n",
+        ),
+        control_frame(FrameKind::Exit, &1u32.to_le_bytes()),
         // nosuch
         control_frame(FrameKind::Stderr, b"sh: nosuch: not found (errno -2)\n"),
         // EOFでshell自身が0で終了する。

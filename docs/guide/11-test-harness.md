@@ -221,9 +221,9 @@ childのExit frameが写した`spawn-child`より先に来る順序のexact照�
 `argc`の上限超過と長すぎる文字列の`EINVAL`、読めないargvの`EFAULT`がchildを作らないことを確かめてから、`argc`が0のspawnと`echoargs`、`alpha`、`beta gamma`を渡したspawnを順に`waitpid`します。
 childがbasenameの`ECHO.ELF`と渡した3個の文字列をこの順で標準出力へ書き、失敗したspawnがpidを消費していないことも確かめてから、`spawn args verified`を出して終了コード42を返すことを要求します。
 frame列のexact照合と最後のdiagnosticで、argvの中身と順序、frameの回収を検査します。
-`user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`をdisk imageの`BIN`へ置きます。
+`user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`、`ls`、`mkdir`、`rmdir`、`rm`、`mv`をdisk imageの`BIN`へ置きます。
 Ready frameの後にscriptをStdin frameとして送り、最後に長さ0のStdin frameでEOFを伝えます。
-scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、`echo redirected > OUT.TXT`、`cat OUT.TXT`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、存在しない`nosuch`の順です。
+scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、`echo redirected > OUT.TXT`、`cat OUT.TXT`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、`mkdir`・LFN名への`mv`・`ls`・`cat`・`rm`・`rmdir`・rootの`ls`によるfile操作、不在fileへの`rm`、存在しない`nosuch`の順です。
 8段の行は何も起動されず、`too many commands`の標準エラー1行だけになります。
 1 frameに2行を詰めた送り方と、1行を2 frameへ分けた送り方も含めます。
 shellは行ごとにchildを起動順に`waitpid`し、pipelineでconsoleへ書くのは最後のcommandだけです。
@@ -244,6 +244,7 @@ shellは行ごとにchildを起動順に`waitpid`し、pipelineでconsoleへ書�
 ### 時間切れと失敗時の記録
 
 各QEMUテストの制限時間は10秒です。
+ただし`user-shell`はscriptの1行ごとにprocessをspawnし（約35回）、1回のspawnにkernel mappingの複製で数百msかかるため、30秒です（`TestKind::deadline`）。
 `xtask`は標準出力と標準エラーを起動直後から別々のスレッドで読み、パイプのバッファーが埋まってゲストが停止することを防ぎます。
 制限時間を超えるとQEMUを終了し、必ず`wait`で回収するため、子プロセスを残しません。
 エラーには、シェルで安全に再実行できるよう引用したQEMUプログラム、カーネルのパス、全オプション、制限時間、受信済みの標準出力と標準エラーを含めます。

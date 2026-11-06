@@ -214,6 +214,41 @@ bench = false
 doctest = false
 
 [[bin]]
+name = "minios-guest-ls"
+path = "src/bin/ls.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-mkdir"
+path = "src/bin/mkdir.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-rmdir"
+path = "src/bin/rmdir.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-rm"
+path = "src/bin/rm.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "minios-guest-mv"
+path = "src/bin/mv.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
 name = "minios-guest-proc-fault"
 path = "src/bin/proc_fault.rs"
 test = false

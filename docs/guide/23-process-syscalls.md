@@ -125,7 +125,9 @@ run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取�
 `|`で区切った最大7個のcommandをpipelineとして起動し、最初のcommandには`< file`、最後のcommandには`> file`を付けられます。
 `/`を含まないcommand名`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を含む語はそのままpathとして解決します。
 built-inは`exit [code]`だけで、cwdを持たないため`cd`はありません。
-起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)です。
+起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)と、file操作の[`ls.rs`](../../guest/src/bin/ls.rs)、[`mkdir.rs`](../../guest/src/bin/mkdir.rs)、[`rmdir.rs`](../../guest/src/bin/rmdir.rs)、[`rm.rs`](../../guest/src/bin/rm.rs)、[`mv.rs`](../../guest/src/bin/mv.rs)です。
+file操作のtoolはそれぞれ`readdir`、`mkdir`、`rmdir`、`unlink`、`rename`を1回ずつ呼ぶだけの薄いprogramで、`ls`はdirectoryの名前に`/`を付けます。
+shellには引用符がないため、空白を含む名前はtoolへ渡せません。
 
 MiniOSには`fork`がないため、childのfd 0と1を差し替える場所はshell自身のfd tableです。
 shellは起動時にconsoleのfd 0と1を`dup2`でtable末尾の2個へ退避し、各commandを次の手順で起動します。
@@ -236,7 +238,7 @@ MiniOS payload: ok code=0
 summary: PASSED all 1 phases (elapsed: ...)
 ```
 
-harnessは`SH.ELF`をboot payloadにし、build済みの`cat`、`wc`、`echo`をdisk imageの`BIN`へ置いてから、次のscriptをStdin frameで送り、最後にEOFを送ります。
+harnessは`SH.ELF`をboot payloadにし、build済みのtool（`xtask/src/guest.rs`の`SHELL_TOOLS`）をdisk imageの`BIN`へ置いてから、次のscriptをStdin frameで送り、最後にEOFを送ります。
 
 ```text
 echo hello world
@@ -250,11 +252,19 @@ echo a b c | cat | cat | cat | cat | cat | wc
 echo a | cat | cat | cat | cat | cat | cat | wc
 echo saved > notes.backup
 cat notes.backup
+mkdir work
+mv notes.backup work/saved.notes
+ls work
+cat work/saved.notes
+rm work/saved.notes
+rmdir work
+ls
+rm nosuch.txt
 nosuch
 ```
 
-標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`が順に届きます。
-標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`と、`sh: nosuch: not found (errno -2)`が届きます。
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`が順に届き、続いて`ls work`の`saved.notes`、`saved`、片付け後の`ls`が出すrootの一覧が届きます。
+標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`sh: nosuch: not found (errno -2)`が届きます。
 pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
 このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。
 EOFを読んだshellは0で終了します。
