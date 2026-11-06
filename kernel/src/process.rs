@@ -189,12 +189,23 @@ impl FdEntry {
 /// snapshotをchildへ渡すため、継承はcopyでありspawn後のoffsetやcloseは
 /// 互いに影響しない。ただしpipe端はcopy先が同じpipe idを指すため
 /// bufferは共有される。`dup2`も同じくslotのcopyである。
+///
+/// close-on-execの印はentryではなくslot（fd番号）側の属性で、`cloexec`の
+/// bit `fd`が立ったslotは`spawn`のsnapshotへ写らず、`exec`の成功時に
+/// 閉じられる。POSIXの`FD_CLOEXEC`と同じくfdごとの属性なので、`dup2`で
+/// 複製した先のslotは印を持たない。
 /// RV32はfdを持たないためZSTでコスト0にする。
 #[cfg(not(target_arch = "riscv32"))]
 #[derive(Debug, Clone, Copy)]
 pub struct FileFdTable {
     slots: [Option<FdEntry>; FD_TABLE_LEN],
+    /// close-on-execのslot集合。bit `fd`がslot `fd`に対応する。
+    cloexec: u32,
 }
+
+// `cloexec`はslotごとに1 bitを使うため、fd tableは32 slotに収まる必要がある。
+#[cfg(not(target_arch = "riscv32"))]
+const _: () = assert!(FD_TABLE_LEN <= u32::BITS as usize);
 
 #[cfg(target_arch = "riscv32")]
 #[derive(Debug, Clone, Copy, Default)]
@@ -216,7 +227,12 @@ impl FileFdTable {
         slots[minios_abi::syscall::STDIN] = Some(FdEntry::Console(ConsoleFd::Stdin));
         slots[minios_abi::syscall::STDOUT] = Some(FdEntry::Console(ConsoleFd::Stdout));
         slots[minios_abi::syscall::STDERR] = Some(FdEntry::Console(ConsoleFd::Stderr));
-        Self { slots }
+        Self { slots, cloexec: 0 }
+    }
+
+    /// slot `fd`のclose-on-exec bit。範囲外のfdは呼び出し前に弾かれている。
+    const fn cloexec_bit(fd: usize) -> u32 {
+        1 << fd
     }
 
     fn fd_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {
@@ -239,6 +255,7 @@ impl FileFdTable {
                 .position(Option::is_none)
                 .ok_or(minios_abi::syscall::EMFILE)?;
         self.slots[fd] = Some(entry);
+        self.cloexec &= !Self::cloexec_bit(fd);
         Ok(fd)
     }
 
@@ -257,9 +274,52 @@ impl FileFdTable {
     }
 
     fn close_fd(&mut self, fd: usize) -> bool {
-        self.slots
+        let closed = self
+            .slots
             .get_mut(fd)
-            .is_some_and(|slot| slot.take().is_some())
+            .is_some_and(|slot| slot.take().is_some());
+        if closed {
+            self.cloexec &= !Self::cloexec_bit(fd);
+        }
+        closed
+    }
+
+    /// `fd`がclose-on-execなら`true`。未割当か範囲外なら`EBADF`。
+    fn cloexec(&self, fd: usize) -> Result<bool, isize> {
+        self.fd(fd).ok_or(minios_abi::syscall::EBADF)?;
+        Ok(self.cloexec & Self::cloexec_bit(fd) != 0)
+    }
+
+    /// `fd`のclose-on-exec印を`on`へ設定する。未割当か範囲外なら`EBADF`。
+    fn set_cloexec(&mut self, fd: usize, on: bool) -> Result<(), isize> {
+        self.fd(fd).ok_or(minios_abi::syscall::EBADF)?;
+        if on {
+            self.cloexec |= Self::cloexec_bit(fd);
+        } else {
+            self.cloexec &= !Self::cloexec_bit(fd);
+        }
+        Ok(())
+    }
+
+    /// `spawn`したchildへ渡すtable。close-on-execのslotを空にし、
+    /// 残したslotの印も持たない（childの視点では普通のfdである）。
+    fn inherited(&self) -> Self {
+        let mut table = *self;
+        table.close_on_exec();
+        table
+    }
+
+    /// close-on-execのslotをすべて閉じ、閉じたentryを返す。`exec`の成功後に
+    /// 呼ばれ、呼び出し側は返ったpipe端のwaiterを`close`と同じく起こす。
+    fn close_on_exec(&mut self) -> [Option<FdEntry>; FD_TABLE_LEN] {
+        let mut closed = [const { None }; FD_TABLE_LEN];
+        for (fd, slot) in self.slots.iter_mut().enumerate() {
+            if self.cloexec & Self::cloexec_bit(fd) != 0 {
+                closed[fd] = slot.take();
+            }
+        }
+        self.cloexec = 0;
+        closed
     }
 
     /// `oldfd`のentryを`newfd`へcopyし、`newfd`に元々あったentryを返す。
@@ -277,7 +337,10 @@ impl FileFdTable {
         if oldfd == newfd {
             return Ok(None);
         }
-        Ok(slot.replace(entry))
+        let replaced = slot.replace(entry);
+        // 複製先は新しいfdなので、POSIXと同じくclose-on-execを持たない。
+        self.cloexec &= !Self::cloexec_bit(newfd);
+        Ok(replaced)
     }
 
     /// `id`のpipeを指すこのtable内の端を`(read側, write側)`で数える。
@@ -304,11 +367,12 @@ impl FileFdTable {
     /// されたslotやclusterを壊し得る。pipe端はdir entryを指さないため
     /// 対象外である。
     fn revoke_fd_at(&mut self, dir_cluster: u32, dir_index: u32) {
-        for slot in self.slots.iter_mut() {
+        for (fd, slot) in self.slots.iter_mut().enumerate() {
             if let Some(FdEntry::File(file)) = slot.as_mut()
                 && file.desc.dir_location() == (dir_cluster, dir_index)
             {
                 *slot = None;
+                self.cloexec &= !Self::cloexec_bit(fd);
             }
         }
     }
@@ -599,8 +663,35 @@ impl Process {
 
     /// fd tableのsnapshot。`spawn`がchildの初期tableとして引き継ぐため
     /// trap窓から呼ばれる。copyなのでcaller側tableへの影響はない。
+    /// close-on-execのslotはsnapshotへ写らない。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn file_fds_snapshot(&self) -> FileFdTable {
+        self.file_fds.inherited()
+    }
+
+    /// RV32はfdを持たないため、空tableのcopyを返す。
+    #[cfg(target_arch = "riscv32")]
     pub const fn file_fds_snapshot(&self) -> FileFdTable {
         self.file_fds
+    }
+
+    /// `fd`がclose-on-execなら`true`。未割当か範囲外なら`EBADF`。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn cloexec(&self, fd: usize) -> Result<bool, isize> {
+        self.file_fds.cloexec(fd)
+    }
+
+    /// `fd`のclose-on-exec印を設定する。未割当か範囲外なら`EBADF`。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn set_cloexec(&mut self, fd: usize, on: bool) -> Result<(), isize> {
+        self.file_fds.set_cloexec(fd, on)
+    }
+
+    /// close-on-execのfdをすべて閉じ、閉じたentryを返す。`exec`の成功後に
+    /// trap窓から呼ばれ、呼び出し側が返ったpipe端のwaiterを起こす。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn close_on_exec(&mut self) -> [Option<FdEntry>; FD_TABLE_LEN] {
+        self.file_fds.close_on_exec()
     }
 
     /// `fd`に対応するslotを借りる。未割り当てや範囲外なら`None`。
@@ -2359,6 +2450,92 @@ mod tests {
         assert_eq!(table.pipe_ends(id), (1, 1));
         assert!(table.get_mut(0).unwrap().close_fd(STDOUT));
         assert_eq!(table.pipe_ends(id), (1, 0));
+    }
+
+    // Catches close-on-exec leaking through spawn or exec: a marked slot
+    // must vanish from the spawn snapshot and be closed by close_on_exec,
+    // while unmarked slots (and the parent's own table) stay untouched.
+    #[test]
+    fn cloexec_slots_skip_spawn_and_close_on_exec() {
+        use minios_abi::syscall::{EBADF, STDOUT};
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        table.insert(fixture.spawn("cloexec")).expect("insert");
+        let id = table.pipe_alloc().expect("slot is free");
+        let process = table.get_mut(0).unwrap();
+        let file_fd = process
+            .alloc_fd(FileDesc::for_test(5, 0), false)
+            .expect("file slot");
+        let read_fd = process.alloc_pipe_fd(id, false).expect("read end");
+        let write_fd = process.alloc_pipe_fd(id, true).expect("write end");
+
+        assert_eq!(process.cloexec(read_fd), Ok(false));
+        process.set_cloexec(read_fd, true).expect("mark read end");
+        process.set_cloexec(file_fd, true).expect("mark file");
+        process.set_cloexec(file_fd, false).expect("unmark file");
+        assert_eq!(process.cloexec(read_fd), Ok(true));
+        assert_eq!(process.cloexec(file_fd), Ok(false));
+        assert_eq!(process.set_cloexec(write_fd + 1, true), Err(EBADF));
+        assert_eq!(process.cloexec(FD_TABLE_LEN), Err(EBADF));
+
+        // spawnのsnapshotは印のないslotだけを写し、印も持ち越さない。
+        let mut child = fixture.spawn_with_fds("child", process.file_fds_snapshot());
+        assert!(child.fd(read_fd).is_none());
+        assert!(child.fd(file_fd).is_some());
+        assert_eq!(child.cloexec(write_fd), Ok(false));
+        assert!(table.get(0).unwrap().fd(read_fd).is_some());
+
+        // execは印のslotだけを閉じて返し、残したslotは使い続けられる。
+        let process = table.get_mut(0).unwrap();
+        let closed = process.close_on_exec();
+        let closed: Vec<_> = closed
+            .iter()
+            .enumerate()
+            .filter_map(|(fd, entry)| entry.as_ref().map(|entry| (fd, entry.pipe_id())))
+            .collect();
+        assert_eq!(closed, [(read_fd, Some(id))]);
+        assert!(process.fd(read_fd).is_none());
+        assert!(process.fd(write_fd).is_some());
+        assert!(process.fd(file_fd).is_some());
+        assert_eq!(table.pipe_ends(id), (0, 1));
+        assert!(child.close_fd(STDOUT));
+    }
+
+    // Catches the cloexec bit sticking to a slot after its entry changes:
+    // dup2 into a marked slot, close, and reallocation must all yield an
+    // unmarked fd, matching POSIX where FD_CLOEXEC belongs to the fd.
+    #[test]
+    fn cloexec_resets_on_dup2_close_and_reuse() {
+        use minios_abi::syscall::STDOUT;
+
+        let mut fixture = SpawnFixture::new();
+        let mut process = fixture.spawn("cloexec-reset");
+        let fd = process
+            .alloc_fd(FileDesc::for_test(5, 0), false)
+            .expect("file slot");
+
+        process.set_cloexec(STDOUT, true).expect("mark stdout");
+        process.dup2(fd, STDOUT).expect("dup2 succeeds");
+        assert_eq!(process.cloexec(STDOUT), Ok(false));
+
+        process.set_cloexec(fd, true).expect("mark fd");
+        assert!(process.dup2(fd, fd).expect("same fd").is_none());
+        assert_eq!(process.cloexec(fd), Ok(true));
+        assert!(process.close_fd(fd));
+        let reused = process
+            .alloc_fd(FileDesc::for_test(6, 0), false)
+            .expect("reuse slot");
+        assert_eq!(reused, fd);
+        assert_eq!(process.cloexec(reused), Ok(false));
+
+        process.set_cloexec(reused, true).expect("mark again");
+        process.revoke_fd_at(6, 0);
+        let again = process
+            .alloc_fd(FileDesc::for_test(7, 0), false)
+            .expect("slot after revoke");
+        assert_eq!(again, reused);
+        assert_eq!(process.cloexec(again), Ok(false));
     }
 
     // Catches EOF and broken-pipe polarity flipping: reads must block only

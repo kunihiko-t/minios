@@ -1,6 +1,6 @@
-//! processの起動、待機、終了と、時刻、pipe、fdの複製。
+//! processの起動、待機、終了と、時刻、pipe、fdの複製とclose-on-exec。
 
-use minios_abi::syscall::{EINVAL, PIPE_OUT_LEN, SPAWN_MAX_ARGC};
+use minios_abi::syscall::{EINVAL, F_GETFD, F_SETFD, FD_CLOEXEC, PIPE_OUT_LEN, SPAWN_MAX_ARGC};
 
 use crate::{Errno, Result, check, fs::File, sys};
 
@@ -83,6 +83,20 @@ pub fn pipe() -> Result<(File, File)> {
 }
 
 /// `newfd`を閉じてから`oldfd`と同じentryを指させ、`newfd`を返す。
+/// 複製先の`newfd`はclose-on-execの印を持たない。
 pub fn dup2(oldfd: usize, newfd: usize) -> Result<usize> {
     check(sys::sys_dup2(oldfd, newfd))
+}
+
+/// `fd`のclose-on-execの印を設定する。印を立てたfdは`spawn`したchildへ
+/// 継承されず、`exec`の成功時に閉じられる。所有しない生のfd（shellが
+/// 退避したconsoleなど）にも使える。
+pub fn set_cloexec(fd: usize, on: bool) -> Result<()> {
+    let flags = if on { FD_CLOEXEC } else { 0 };
+    check(sys::sys_fcntl(fd, F_SETFD, flags)).map(|_| ())
+}
+
+/// `fd`にclose-on-execの印が立っていれば`true`。
+pub fn cloexec(fd: usize) -> Result<bool> {
+    check(sys::sys_fcntl(fd, F_GETFD, 0)).map(|flags| flags & FD_CLOEXEC != 0)
 }

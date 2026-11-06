@@ -114,6 +114,8 @@ read端への`write`とwrite端への`read`は`EBADF`です。
 file entryは`FileFd`ごとcopyするため、POSIXと違って複製後の2個のfdはoffsetを共有しません。
 offsetを共有するには、`FileFd`をprocess横断のopen file tableへ移し、slotはその参照を持つ形へ変える必要があります。
 `unlink`と`rename`の走査は全slotを見るため、複製したfile fdも同じく失効し、追従します。
+close-on-execの印（`fcntl`の`FD_CLOEXEC`）はslotの属性なので、複製先の`newfd`は印を持たずに始まります。
+shellが印を立てたpipe端を`dup2`でfd 1へ付け替えると、fd 1だけがchildへ継承されるのはこのためです。
 
 shellがchildの標準出力をpipeへ向けるときは、次の順で呼びます。
 まず`dup2(1, 退避先)`でconsoleを退避し、`dup2(write端, 1)`でfd 1をpipeへ差し替えてから`spawn`します。

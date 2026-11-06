@@ -68,6 +68,10 @@ argv導入前のguestは`a2`と`a3`へ0を渡していたため、そのまま�
 親が`dup2`でfd 1をpipeへ差し替えてから`spawn`すれば、childの標準出力もそのpipeを指します。
 pipe端だけはcopy先も同じpipe idを指すため、bufferは親子で共有されます。
 
+`fcntl(fd, F_SETFD, FD_CLOEXEC)`で印を立てたslotは、snapshotへ写りません。
+印は`FileFdTable`のslotごとのbit集合`cloexec`として持ち、entryには付けないため、`dup2`の複製先や再利用されたslotは印のない普通のfdとして始まります。
+同じ印は`exec`の成功時にも使い、`exec_current_process`が新imageへ切り替えた後で`close_on_exec`が印のslotを閉じ、閉じたpipe端の待ち手を起こします。
+
 ### waitpidと終了台帳
 
 manifest v2で複数のimageを実行する場合、ユーザー命令のfatal trapは対象タスクだけを終了code `70`（guestのpanicと同じ）で終了させます。
@@ -131,13 +135,15 @@ shellは起動時にconsoleのfd 0と1を`dup2`でtable末尾の2個へ退避し
 
 pipeのEOFは全processのfd tableからwrite端が消えたときに決まるため、手順2と5でshellのwrite端を残さないことが必須です。
 一つでも残っていれば、読み手のchildは書き手が終了してもEOFを得られず、shellの`waitpid`とともに止まります。
-なお、各pipeのread端はその書き手のchildにも複製されますが、読み手のEOFには影響しません。
+shellは退避したconsole、pipeの両端、redirect先のfdへclose-on-execの印を立てるため、childへ渡るのは手順1から3で付け替えたfd 0、1、2だけです。
+印がなければ、書き手のchildは次段へのpipeのread端も3以上のfdで継承し、読み手が先に終了しても自分のread端が残るため`EPIPE`を受け取れません。
 
 全員を起動してから、shellは起動順にpidを`waitpid`し、最後のcommandの終了codeを覚えます。
 前段が後段より先に終わるとは限りませんが、終了したprocessの記録は台帳に残るため、順に待てば全員を回収できます。
 pipelineの段数はshellを含めて`MAX_PROCS`（4）に収まる3個までです。
 `spawn`の失敗は、不在pathの`ENOENT`を`not found`、table満杯やframe不足の`ENOMEM`をprocess枠かmemoryの不足として標準エラーへ1行出し、次の行へ進みます。
-2段目以降で失敗した場合、前段は読み手のいないpipeへ書き続けてbufferが満杯になると止まるため、shellは前段のpipeをEOFまで読み捨ててから待ちます。
+2段目以降で失敗した場合、前段のpipeのread端を持つのはshellだけなので、shellはそのfdを閉じてから待ちます。
+前段の書き手はbufferが満杯になっても止まらず、次の`write`で`EPIPE`を受け取ります。
 
 ## 実行と確認
 
@@ -198,6 +204,7 @@ summary: PASSED all 1 phases (elapsed: ...)
 親は`DOCS/NOTE.TXT`をfd 3で開き、`lseek`でoffset 4へ進めてから`DOCS/FDCHILD.ELF`を`spawn`します。
 childはfd 3から` inside docs\n`の13 byteを読んでstdoutへ写し、harnessはこのframeが親の`fd-inherit verified`より先に出る列を完全一致で照合します。
 親は`waitpid`の後に同じfdから同じ13 byteを読み直し、childのreadが親のoffsetを動かしていないことを確かめます。
+続けて親はfd 3へ`FD_CLOEXEC`を立てて同じchildをもう一度`spawn`し、fd 3を継承しなかったchildが`read`に失敗して70で終わることを`waitpid`で確かめます。
 
 argvの受け渡しは次のコマンドで確かめます。
 

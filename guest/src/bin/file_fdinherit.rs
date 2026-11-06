@@ -8,6 +8,8 @@
 //! 内容をstdoutへ出す。parentが`waitpid`でblockするため、childの
 //! stdoutとexit frameは必ずparentの`fd-inherit verified`より先に出る
 //! ＝確定的なframe列になる。
+//! 続けてfd 3へclose-on-execの印を立てて同じchildをもう一度起動し、
+//! childからfd 3が見えない（readが失敗して70で終わる）ことを確かめる。
 //! 失敗時はpanicし、70で終了する。E2Eのfile-fdinherit検査が使う。
 
 #![no_std]
@@ -25,6 +27,10 @@ use minios_guest::{
 const SUCCESS_EXIT: i32 = 42;
 /// 自分がspawnするchildはtableへ2番目にinsertされるのでpid 1。
 const CHILD_PID: usize = 1;
+/// close-on-execの検査で起動する2番目のchild。pidは再利用されない。
+const CLOEXEC_CHILD_PID: usize = 2;
+/// FDCHILD.ELFがfd 3を読めなかったときの終了code。
+const CHILD_READ_FAILED: i32 = 70;
 /// `DOCS/NOTE.TXT`の内容（17 byte）。offset 4以降が継承fd経由で読める。
 const NOTE_PATH: &[u8] = b"DOCS/NOTE.TXT";
 /// `DOCS/NOTE.TXT`のbyte長（`"note inside docs\n"`）。
@@ -54,6 +60,15 @@ fn main(_args: Args) -> i32 {
     let mut buffer = [0u8; 64];
     assert_eq!(note.read(&mut buffer[..EXPECTED.len()]), Ok(EXPECTED.len()));
     assert_eq!(&buffer[..EXPECTED.len()], EXPECTED);
+
+    // close-on-execのfdはsnapshotへ写らない。印はfdの属性なので読み戻せ、
+    // parent側ではfd 3を引き続き使える。
+    assert_eq!(note.cloexec(), Ok(false));
+    note.set_cloexec(true).unwrap();
+    assert_eq!(note.cloexec(), Ok(true));
+    assert_eq!(spawn(CHILD_PATH, &[]), Ok(CLOEXEC_CHILD_PID));
+    assert_eq!(wait(CLOEXEC_CHILD_PID), Ok(CHILD_READ_FAILED));
+    assert_eq!(note.seek(SeekFrom::Start(offset)), Ok(4));
 
     println!("fd-inherit verified");
     SUCCESS_EXIT

@@ -10,9 +10,9 @@ use minios_abi::{
     control::FrameKind,
     manifest::ARG_MAX_LEN,
     syscall::{
-        DIRENT_LEN, EAGAIN, EBADF, EFAULT, EINVAL, ENOMEM, ENOSYS, ESPIPE, MAX_PATH_LEN,
-        MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, SOCKADDR_LEN, SPAWN_ARG_LEN, SPAWN_MAX_ARGC,
-        STAT_KIND_CONSOLE, STAT_LEN, Stat, SyscallNumber,
+        DIRENT_LEN, EAGAIN, EBADF, EFAULT, EINVAL, ENOMEM, ENOSYS, ESPIPE, F_GETFD, F_SETFD,
+        FD_CLOEXEC, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, SOCKADDR_LEN,
+        SPAWN_ARG_LEN, SPAWN_MAX_ARGC, STAT_KIND_CONSOLE, STAT_LEN, Stat, SyscallNumber,
     },
 };
 
@@ -137,6 +137,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_dup2(context, source)
     } else if number == SyscallNumber::Kill as usize {
         dispatch_kill(context, source)
+    } else if number == SyscallNumber::Fcntl as usize {
+        dispatch_fcntl(context, source)
     } else if number == SyscallNumber::Socket as usize {
         match source.socket() {
             Ok(sock) => {
@@ -796,6 +798,29 @@ fn dispatch_dup2<E, R: ControlSource>(
         Err(EBADF)
     } else {
         source.dup2(oldfd, newfd)
+    };
+    context.set_register(10, result.unwrap_or_else(|errno| errno as usize));
+    SyscallFlow::Resume
+}
+
+/// `fcntl` (`a0=fd, a1=cmd, a2=flags`)。fd範囲、command、flag bitを
+/// sourceへ触れる前に検査する。`F_GETFD`は`FD_CLOEXEC`か0を、`F_SETFD`は
+/// 0を返す。未知のcommandと`FD_CLOEXEC`以外のbitは`EINVAL`である。
+fn dispatch_fcntl<E, R: ControlSource>(
+    context: &mut UserContext,
+    source: &mut R,
+) -> SyscallFlow<E, R::Error> {
+    let fd = context.register(10);
+    let command = context.register(11);
+    let flags = context.register(12);
+    let result = if fd >= FD_TABLE_LEN {
+        Err(EBADF)
+    } else if command == F_GETFD {
+        source.cloexec(fd).map(|on| if on { FD_CLOEXEC } else { 0 })
+    } else if command == F_SETFD && flags & !FD_CLOEXEC == 0 {
+        source.set_cloexec(fd, flags == FD_CLOEXEC).map(|()| 0)
+    } else {
+        Err(EINVAL)
     };
     context.set_register(10, result.unwrap_or_else(|errno| errno as usize));
     SyscallFlow::Resume

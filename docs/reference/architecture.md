@@ -99,7 +99,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 - `user/context.rs`：entry、user stack、`sstatus.SPP=0`を持つ`UserContext`を定義します。
 - `user/memory.rs`：user pointerを参照として解釈せず、pageごとに`U=1`とread権限を確認してcopyします。
-- `user/syscall/`（`mod.rs`と`dispatch.rs`）：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`、`socket`、`sendto`、`recvfrom`をdispatchします。
+- `user/syscall/`（`mod.rs`と`dispatch.rs`）：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`、`pipe`、`sbrk`、`clock`、`sleep`、`yield`、`dup2`、`kill`、`socket`、`sendto`、`recvfrom`、`fcntl`をdispatchします。
 - `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
 - `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 

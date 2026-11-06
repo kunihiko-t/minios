@@ -174,7 +174,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 | 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 | 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ263 byteの`DirEnt`として書き込む。`a1`=0はroot directoryを指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（263）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
-| 21 | `exec` | `a0=path pointer`、`a1=path length` | `path`のfileをELFとして読み込み、呼び出しprocessのimageを置き替える。pidとfd tableは引き継ぐ。成功時は戻らず新imageのentryから始まる。負のerrnoは`ENOENT`/`EISDIR`/`EINVAL`/`EFAULT`/`ENOMEM` |
+| 21 | `exec` | `a0=path pointer`、`a1=path length` | `path`のfileをELFとして読み込み、呼び出しprocessのimageを置き替える。pidとfd tableは引き継ぎ、close-on-execのfdだけを閉じる。成功時は戻らず新imageのentryから始まる。負のerrnoは`ENOENT`/`EISDIR`/`EINVAL`/`EFAULT`/`ENOMEM` |
 | 22 | `pipe` | `a0=out pointer` | kernel管理のbyte channelを1本作成し、read端とwrite端のfdを`a0`のuser bufferへ8 byte（2個の`u32`）で書き込む。戻り値は`PIPE_OUT_LEN`（8）か負のerrno |
 | 23 | `sbrk` | `a0=increment（符号付き）` | 呼び出しprocessのheap breakを`increment` byte進め、旧breakを返す。0は現在のbreakを返す。負のerrnoは`EINVAL`/`ENOMEM` |
 | 24 | `clock` | なし | boot以降の経過時間をmillisecondの非負整数で返す。分解能はtimer tickの10 ms |
@@ -185,6 +185,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 29 | `socket` | なし | UDP socketを開き、socket index（0から採番）を返す。file fdとは別の名前空間で、table満杯は`EMFILE`、network device未接続は`ENODEV` |
 | 30 | `sendto` | `a0=sock`、`a1=buffer pointer`、`a2=length`、`a3=sockaddr pointer` | `a1`の`a2` byteを`a3`の`SockAddr`宛にUDP datagramとして送る。戻り値は送信byte数。負のerrnoは`EBADF`/`EINVAL`/`EFAULT`/`ENODEV`/`EIO` |
 | 31 | `recvfrom` | `a0=sock`、`a1=buffer pointer`、`a2=length`、`a3=sockaddr pointer` | 受信queueから1 datagramを`a1`へ最大`a2` byte取り、`a3`へ送信元`SockAddr`を8 byteで書き戻す。戻り値は受信byte数。queueが空なら`waitpid`と同じ巻き戻し規約でcallerをblockし、datagram到着で同じecallが再実行される。負のerrnoは`EBADF`/`EINVAL`/`EFAULT`/`ENODEV`/`EIO` |
+| 32 | `fcntl` | `a0=fd`、`a1=command`、`a2=flags` | fdのfd flagを読み書きする。`a1`=`F_GETFD`（1）は現在のflag（`FD_CLOEXEC`（1）か0）を返し、`a1`=`F_SETFD`（2）は`a2`のflagを設定して0を返す。負のerrnoは`EBADF`（未割当か範囲外のfd）/`EINVAL`（未知のcommandか`FD_CLOEXEC`以外のflag bit） |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
 `read`は、対象範囲がユーザー空間の書き込み可能ページにすべて含まれることを要求し、範囲の検証を通ってから入力を消費します。
@@ -247,6 +248,8 @@ argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたた�
 
 `exec`は呼び出したprocessのimageを`path`のELFで置き替えます。pidとfd tableは引き継ぎ、address spaceと実行contextだけが新しくなります。新imageの構築がすべて成功してから差し替えるため、失敗した`exec`はerrnoを返して旧imageのまま動き続けます。成功時は`a0`の戻り値ではなく新imageの`_start`へ入り、引数は空です。
 
+`fcntl`の`F_SETFD`で`FD_CLOEXEC`を立てたfdは、`spawn`したchildのfd tableへ写らず、`exec`の成功時に閉じられます。失敗した`exec`はfdにも触れません。印はPOSIXと同じくfdの属性であり、entryには付きません。そのため`dup2`の複製先、`close`後に再利用されたslot、`open`/`create`/`pipe`が新しく割り当てたfdは印を持たずに始まります。`exec`が閉じたpipe端は`close`と同じく同じpipeを待つprocessを起こします。shellは自分だけが使うfd（退避したconsole、pipeの両端、redirect先）へ印を立て、childへは`dup2`で付け替えたfd 0、1、2だけを渡します。
+
 `pipe`はkernelが所有する256 byteのring bufferを1本作り、read端とwrite端のfdを`out`が指す8 byteへlittle-endianの`u32`二つ（先にread端）で書き込みます。fdの割り当てより先に`out`の書き込み可能性を検査するため、失敗時にfdは残りません。pipeの両端はfile fdと同じtableのslotを使うため、`spawn`のsnapshot継承で同じpipeを指す端が子へ渡り、process間のbyteの流れ道になります。
 pipeのread端への`read`は、bufferにdataがあれば読んでbyte数を返し、空でwrite端が残っていれば呼び出しprocessを`BlockedOnPipe`へ移してecallを再実行へ回します（`read`のstdin待ちと同じ巻き戻し規約）。write端がすべて閉じていればEOFとして0を返します。write端への`write`は、read端がすべて閉じていれば`EPIPE`、bufferが満杯なら同じくblockして再実行、空きがあれば書いてbyte数を返します。片端への逆方向操作（read端への`write`、write端への`read`）は`EBADF`、pipe fdへの`lseek`/`pread`/`pwrite`は`ESPIPE`を返します。
 `fstat`はpipe fdへ`kind`=`STAT_KIND_PIPE`（2）・`size`=0を返します。processが終了または`close`で端を手放すと、そのpipeを待つprocessは全員wakeされ、再実行した`read`/`write`が新しい端数（EOFや`EPIPE`）を見ます。両端ともどのprocessのfd tableからも消えたpipeのslotは再利用されます。同時にliveなpipeは4本までで、枯渇は`ENOMEM`を返します。
@@ -279,7 +282,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | ---: | --- | --- |
 | `-2` | `ENOENT` | fileが存在しない |
 | `-5` | `EIO` | storageの読み取りまたはfilesystem構造の失敗 |
-| `-9` | `EBADF` | fd tableの範囲外のfile descriptor、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`/`dup2`、範囲外の`newfd`への`dup2`、console入力への`write`とconsole出力への`read`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作、未割り当てまたは他process所有のsocket indexへの`sendto`/`recvfrom` |
+| `-9` | `EBADF` | fd tableの範囲外のfile descriptor、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`/`dup2`、範囲外の`newfd`への`dup2`、未割り当てか範囲外のfdへの`fcntl`、console入力への`write`とconsole出力への`read`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作、未割り当てまたは他process所有のsocket indexへの`sendto`/`recvfrom` |
 | `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない、`kill`の対象が存在しない |
 | `-11` | `EAGAIN` | pipeの`read`/`write`や`recvfrom`が条件未達でcallerをblockへ移したことを示すkernel内部のsignal。dispatchがecallを巻き戻して再実行するためguestへは返らない |
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足、同時にliveなpipe本数（4本）の枯渇、`sbrk`の上限超過やframe不足 |
@@ -288,7 +291,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-19` | `ENODEV` | block deviceやnetwork deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
-| `-22` | `EINVAL` | 4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |
+| `-22` | `EINVAL` | `fcntl`の未知のcommandや`FD_CLOEXEC`以外のflag bit、4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、8.3へ正規化できない作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、`sbrk`の負のincrement、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |
 | `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う。socket table（4個）が満杯 |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdとconsole entryへの`lseek`/`pread`/`pwrite` |

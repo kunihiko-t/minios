@@ -220,6 +220,11 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
     ecall(SyscallNumber::Dup2, oldfd, newfd, 0, 0)
 }
 
+/// `fcntl`を呼ぶ。`F_GETFD`はfd flag、`F_SETFD`は0か負のerrnoを返す。
+pub fn sys_fcntl(fd: usize, command: usize, flags: usize) -> isize {
+    ecall(SyscallNumber::Fcntl, fd, command, flags, 0)
+}
+
 /// `yield`を呼ぶ。残りのtime sliceを手放し、再び選ばれると0を返す。
 pub fn sys_yield() -> isize {
     ecall(SyscallNumber::Yield, 0, 0, 0, 0)
