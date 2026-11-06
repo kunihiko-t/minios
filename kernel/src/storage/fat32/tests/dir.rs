@@ -72,7 +72,7 @@ fn create_dir_rejects_existing_names_and_rolls_back_on_full_parent() {
         Err(FatError::NotDirectory)
     ));
     assert!(matches!(
-        fs.create_dir("long dir"),
+        fs.create_dir("bad:dir"),
         Err(FatError::InvalidName)
     ));
     assert!(matches!(fs.create_dir("."), Err(FatError::InvalidName)));
