@@ -1,9 +1,11 @@
+use alloc::{vec, vec::Vec};
 use core::{cmp, fmt};
 
 use crate::{
     elf::{
         ElfError, ElfImage, LoadPlan, LoadSegment, MAX_USER_IMAGE_PAGES, USER_GUARD_BOTTOM,
         USER_STACK_BOTTOM, USER_STACK_TOP,
+        header::{ELF_HEADER_LEN, ElfHeader},
     },
     memory::frame::{FrameError, FrameSource, PAGE_SIZE},
     vm::{
@@ -23,6 +25,55 @@ pub enum LoadError<E> {
     Vm(VmError<E>),
     /// Copying validated segment bytes into a mapped frame failed.
     Memory(E),
+    /// The [`ElfSource`] could not supply bytes it reported as present.
+    ///
+    /// The source keeps its own error; the caller asks it for the cause.
+    SourceRead,
+}
+
+/// A random-access view of an ELF file that the loader reads piecewise.
+///
+/// The loader reads the file header, then the program-header table, then
+/// each loadable segment one page at a time, so only bytes that end up in
+/// the image (plus a bounded table) are ever buffered. Section data such as
+/// debug information is never read.
+pub trait ElfSource {
+    /// Returns the whole file length in bytes.
+    fn len(&self) -> usize;
+
+    /// Returns whether the file is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Fills `output` with the bytes starting at `offset`.
+    ///
+    /// The loader only asks for ranges inside `len()`. Returning `Err(())`
+    /// aborts the load with [`LoadError::SourceRead`].
+    #[allow(clippy::result_unit_err)]
+    fn read_exact_at(&mut self, offset: usize, output: &mut [u8]) -> Result<(), ()>;
+}
+
+impl<T: AsRef<[u8]> + ?Sized> ElfSource for &T {
+    fn len(&self) -> usize {
+        (*self).as_ref().len()
+    }
+
+    fn read_exact_at(&mut self, offset: usize, output: &mut [u8]) -> Result<(), ()> {
+        let end = offset.checked_add(output.len()).ok_or(())?;
+        output.copy_from_slice((*self).as_ref().get(offset..end).ok_or(())?);
+        Ok(())
+    }
+}
+
+impl<S: ElfSource + ?Sized> ElfSource for &mut S {
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+
+    fn read_exact_at(&mut self, offset: usize, output: &mut [u8]) -> Result<(), ()> {
+        (**self).read_exact_at(offset, output)
+    }
 }
 
 /// An inactive user image together with its owned address space and metadata.
@@ -191,14 +242,34 @@ pub fn load_image<M: FrameStore>(
 /// U-mode entry, trap stack, and console stay reachable the moment `sret`
 /// switches `satp`. A mapping with `U=1` is rejected before it can become a
 /// borrowed leaf, so only user-image pages can be user-accessible.
-pub fn load_image_with_kernel_mappings<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
-    bytes: &[u8],
+pub fn load_image_with_kernel_mappings<
+    S: ElfSource,
+    M: FrameStore,
+    I: IntoIterator<Item = KernelMapping>,
+>(
+    mut source: S,
     allocator: &mut dyn FrameSource,
     memory: &mut M,
     kernel_mappings: I,
 ) -> Result<LoadedImage, LoadError<M::Error>> {
-    let image = ElfImage::parse(bytes).map_err(LoadError::Elf)?;
+    // headerとprogram header tableだけを先に読み、segmentへ触れる前に
+    // load plan全体を検証する。tableは`MAX_PROGRAM_HEADERS`で上限がある。
+    let file_len = source.len();
+    let mut header_bytes = [0u8; ELF_HEADER_LEN];
+    if file_len < ELF_HEADER_LEN {
+        return Err(LoadError::Elf(ElfError::HeaderSize));
+    }
+    source
+        .read_exact_at(0, &mut header_bytes)
+        .map_err(|()| LoadError::SourceRead)?;
+    let header = ElfHeader::parse(&header_bytes, file_len).map_err(LoadError::Elf)?;
+    let mut table = vec![0u8; header.program_header_table_len()];
+    source
+        .read_exact_at(header.program_header_offset(), &mut table)
+        .map_err(|()| LoadError::SourceRead)?;
+    let image = ElfImage::from_table(header, &table).map_err(LoadError::Elf)?;
     let plan = LoadPlan::new(&image).map_err(LoadError::Elf)?;
+    drop(table);
     let entry = plan.entry();
     let user_stack_top =
         VirtAddr::try_new(USER_STACK_TOP).map_err(|_| LoadError::Elf(ElfError::RangeOverflow))?;
@@ -212,8 +283,10 @@ pub fn load_image_with_kernel_mappings<M: FrameStore, I: IntoIterator<Item = Ker
             .map_borrowed(mapping.page(), mapping.physical(), mapping.flags())
             .map_err(LoadError::Vm)?;
     }
+    // segmentのbyteは1 pageずつこのbufferへ読んでからframeへcopyする。
+    let mut page_buffer: Vec<u8> = vec![0u8; PAGE_SIZE];
     for segment in plan.segments() {
-        materialize_segment(bytes, &mut builder, segment)?;
+        materialize_segment(&mut source, &mut page_buffer, &mut builder, segment)?;
     }
 
     let stack_flags = PageFlags::new(true, true, false, true)
@@ -240,8 +313,9 @@ pub fn load_image_with_kernel_mappings<M: FrameStore, I: IntoIterator<Item = Ker
     })
 }
 
-fn materialize_segment<M: FrameStore>(
-    bytes: &[u8],
+fn materialize_segment<S: ElfSource, M: FrameStore>(
+    source_file: &mut S,
+    page_buffer: &mut [u8],
     builder: &mut AddressSpaceBuilder<'_, '_, M>,
     segment: &LoadSegment,
 ) -> Result<(), LoadError<M::Error>> {
@@ -288,12 +362,13 @@ fn materialize_segment<M: FrameStore>(
             .ok_or(LoadError::Elf(ElfError::RangeOverflow))?;
         let copy_len = usize::try_from(copy_end - copy_start)
             .map_err(|_| LoadError::Elf(ElfError::RangeOverflow))?;
-        let source_end = source_start
-            .checked_add(copy_len)
+        // `LoadPlan`がsegmentのfile範囲を`len()`内と検証済みである。
+        let source = page_buffer
+            .get_mut(..copy_len)
             .ok_or(LoadError::Elf(ElfError::RangeOverflow))?;
-        let source = bytes
-            .get(source_start..source_end)
-            .ok_or(LoadError::Elf(ElfError::RangeOverflow))?;
+        source_file
+            .read_exact_at(source_start, source)
+            .map_err(|()| LoadError::SourceRead)?;
         let destination_offset = usize::try_from(copy_start - page_start)
             .map_err(|_| LoadError::Elf(ElfError::RangeOverflow))?;
         builder
@@ -983,6 +1058,132 @@ mod tests {
             PageFlags::new(true, true, false, true).unwrap()
         );
         image.destroy(&mut allocator).unwrap();
+        assert_eq!(allocator.stats(), before);
+    }
+
+    /// Serves an in-memory file and records every read, optionally failing
+    /// the read numbered `fail_at` (0-based).
+    struct RecordingSource {
+        bytes: Vec<u8>,
+        reads: Vec<(usize, usize)>,
+        fail_at: Option<usize>,
+    }
+
+    impl RecordingSource {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                reads: Vec::new(),
+                fail_at: None,
+            }
+        }
+    }
+
+    impl super::ElfSource for RecordingSource {
+        fn len(&self) -> usize {
+            self.bytes.len()
+        }
+
+        fn read_exact_at(&mut self, offset: usize, output: &mut [u8]) -> Result<(), ()> {
+            if self.fail_at == Some(self.reads.len()) {
+                return Err(());
+            }
+            self.reads.push((offset, output.len()));
+            output.copy_from_slice(&self.bytes[offset..offset + output.len()]);
+            Ok(())
+        }
+    }
+
+    // Catches the streaming loader buffering or reading more than it maps:
+    // trailing non-loadable bytes (as debug sections are) must never be
+    // read, no single read may exceed one page, and the image must match the
+    // one loaded from the same bytes in memory.
+    #[test]
+    fn streaming_source_reads_only_header_table_and_load_segments() {
+        let fixture_bytes = fixture::valid_riscv64_elf();
+        let mut bytes = fixture_bytes.to_vec();
+        bytes.extend(core::iter::repeat_n(0xaa, 64 * 1024));
+        let mut source = RecordingSource::new(bytes);
+        let mut allocator = fixture_allocator();
+        let mut memory = TestFrameStore::default();
+
+        let image = load_image_with_kernel_mappings(
+            &mut source,
+            &mut allocator,
+            &mut memory,
+            core::iter::empty(),
+        )
+        .unwrap();
+
+        assert_eq!(source.reads[0], (0, 64));
+        assert!(
+            source
+                .reads
+                .iter()
+                .all(|&(offset, len)| len <= PAGE_SIZE && offset + len <= fixture_bytes.len())
+        );
+        assert_eq!(
+            read_virtual(&image, &memory, 0x0010_0000, 4),
+            [0x13, 0, 0, 0]
+        );
+        assert_eq!(read_virtual(&image, &memory, 0x0020_0000, 4), b"MCB1");
+        image.destroy(&mut allocator).unwrap();
+    }
+
+    // Catches a failed source read leaking frames or being reported as an
+    // ELF or memory error: a segment read failing after the header and table
+    // were read must surface as SourceRead and roll back every frame.
+    #[test]
+    fn source_read_failure_is_reported_and_rolls_back_every_frame() {
+        let bytes = fixture::valid_riscv64_elf().to_vec();
+        let mut allocator = fixture_allocator();
+        let before = allocator.stats();
+        let mut memory = TestFrameStore::default();
+
+        for fail_at in 0..3 {
+            let mut source = RecordingSource::new(bytes.clone());
+            source.fail_at = Some(fail_at);
+            assert_eq!(
+                load_image_with_kernel_mappings(
+                    &mut source,
+                    &mut allocator,
+                    &mut memory,
+                    core::iter::empty(),
+                )
+                .err()
+                .unwrap(),
+                LoadError::SourceRead
+            );
+            assert_eq!(allocator.stats(), before);
+        }
+    }
+
+    // Catches an unbounded program-header table reaching the loader's
+    // buffer: more than MAX_PROGRAM_HEADERS entries is rejected from the
+    // file header alone, before the table is read or anything allocated.
+    #[test]
+    fn oversized_program_header_table_is_rejected_from_the_header() {
+        use crate::elf::{ElfError, MAX_PROGRAM_HEADERS};
+
+        let mut bytes = fixture::valid_riscv64_elf().to_vec();
+        bytes[56..58].copy_from_slice(&(MAX_PROGRAM_HEADERS as u16 + 1).to_le_bytes());
+        let mut source = RecordingSource::new(bytes);
+        let mut allocator = fixture_allocator();
+        let before = allocator.stats();
+        let mut memory = TestFrameStore::default();
+
+        assert_eq!(
+            load_image_with_kernel_mappings(
+                &mut source,
+                &mut allocator,
+                &mut memory,
+                core::iter::empty(),
+            )
+            .err()
+            .unwrap(),
+            LoadError::Elf(ElfError::TooManyProgramHeaders)
+        );
+        assert_eq!(source.reads, [(0, 64)]);
         assert_eq!(allocator.stats(), before);
     }
 }

@@ -222,10 +222,7 @@ impl ControlSource for UartControlSource<'_> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
         // 外へ持ち出さない。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let mut elf = alloc::vec::Vec::new();
-        session
-            .read_file(path, |chunk| elf.extend_from_slice(chunk))
-            .map_err(fat_errno)?;
+        let mut elf = FatElfSource::open(session, path)?;
 
         // `Process`が名前を所有するため、ここでは借用のまま渡す。
         let (name, arguments) = match argv.split_first() {
@@ -234,19 +231,9 @@ impl ControlSource for UartControlSource<'_> {
         };
 
         // Safety: 同上。返り値のprocess所有権はinsertか回収まで持つ。
-        let process = match unsafe { crate::spawn_process(name, &elf, arguments) } {
+        let process = match unsafe { crate::spawn_process(name, &mut elf, arguments) } {
             Ok(process) => process,
-            Err(failure) => {
-                // 回収しきれなかったimageが残っていればdestroyを一度試す。
-                if let Some(image) = failure.image {
-                    let mut frames = crate::GlobalFrames;
-                    let _ = image.destroy(&mut frames);
-                }
-                return Err(match failure.error {
-                    minios_kernel::process::SpawnError::Load(_) => minios_abi::syscall::EINVAL,
-                    _ => minios_abi::syscall::ENOMEM,
-                });
-            }
+            Err(failure) => return Err(elf.failure_errno(failure)),
         };
         // Safety: 同上。table満杯はprocessを返すため所有frameを回収する。
         match unsafe { crate::insert_spawned(process) } {
@@ -300,29 +287,14 @@ impl ControlSource for UartControlSource<'_> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
         // 外へ持ち出さない。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
-        let mut elf = alloc::vec::Vec::new();
-        session
-            .read_file(path, |chunk| elf.extend_from_slice(chunk))
-            .map_err(fat_errno)?;
+        let mut elf = FatElfSource::open(session, path)?;
 
         // `Process`が名前を所有するため、ここでは借用のまま渡す。
         let name = path.rsplit('/').next().unwrap_or(path);
 
         // Safety: 同上。失敗してもprocessは旧imageのまま残る。
-        match unsafe { crate::exec_current_process(name, &elf) } {
-            Ok(context) => Ok(context),
-            Err(failure) => {
-                // 回収しきれなかったimageが残っていればdestroyを一度試す。
-                if let Some(image) = failure.image {
-                    let mut frames = crate::GlobalFrames;
-                    let _ = image.destroy(&mut frames);
-                }
-                Err(match failure.error {
-                    minios_kernel::process::SpawnError::Load(_) => minios_abi::syscall::EINVAL,
-                    _ => minios_abi::syscall::ENOMEM,
-                })
-            }
-        }
+        unsafe { crate::exec_current_process(name, &mut elf) }
+            .map_err(|failure| elf.failure_errno(failure))
     }
 
     /// guestの`stat`をstorage sessionへ委譲する。fileとdirectoryの両方を
@@ -622,6 +594,84 @@ fn net_errno(error: minios_kernel::net::stack::StackError) -> isize {
         StackError::PacketTooLarge => EINVAL,
         StackError::NoSocket => EMFILE,
         StackError::Timeout | StackError::Link(_) => EIO,
+    }
+}
+
+/// `spawn`と`exec`がELFを読むFAT32上のfile。loaderはheaderと
+/// program header table、PT_LOADのbyteだけを1 pageずつ`read_range`で読む
+/// ため、fileの全体（debug情報を含めguest ELFは約100 KBある）をkernel heapへ
+/// copyしない。read失敗の原因は`error`に残し、`failure_errno`がerrnoへ写す。
+#[cfg(target_arch = "riscv64")]
+struct FatElfSource<'a> {
+    session: &'a mut crate::shell::Rv64Storage,
+    desc: minios_kernel::storage::fat32::FileDesc,
+    error: Option<minios_kernel::storage::fat32::FatError<crate::storage::virtio_blk::VirtioError>>,
+}
+
+#[cfg(target_arch = "riscv64")]
+impl<'a> FatElfSource<'a> {
+    /// `path`のfileを開く。不在は`ENOENT`、directoryは`EISDIR`。
+    fn open(session: &'a mut crate::shell::Rv64Storage, path: &str) -> Result<Self, isize> {
+        let desc = session.open_file(path).map_err(fat_errno)?;
+        Ok(Self {
+            session,
+            desc,
+            error: None,
+        })
+    }
+
+    /// spawn/execの失敗をerrnoへ写す。readの失敗は保存したFAT errorから
+    /// 決めるため、in-flightなdisk I/Oの`WouldBlock`はcallerを`BlockedOnIo`へ
+    /// 移す`EAGAIN`になり、syscallのやり直しでimageを最初から組み直す。
+    /// 回収しきれなかったimageが残っていればdestroyを一度試す。
+    fn failure_errno(
+        &mut self,
+        failure: minios_kernel::process::SpawnFailure<
+            minios_kernel::vm::storage::IdentityFrameStoreError,
+        >,
+    ) -> isize {
+        use minios_kernel::{elf::LoadError, process::SpawnError, storage::fat32::FatError};
+
+        if let Some(image) = failure.image {
+            let mut frames = crate::GlobalFrames;
+            let _ = image.destroy(&mut frames);
+        }
+        match failure.error {
+            SpawnError::Load(LoadError::SourceRead) => {
+                fat_errno(self.error.take().unwrap_or(FatError::CorruptChain))
+            }
+            SpawnError::Load(_) => minios_abi::syscall::EINVAL,
+            _ => minios_abi::syscall::ENOMEM,
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+impl minios_kernel::elf::ElfSource for FatElfSource<'_> {
+    fn len(&self) -> usize {
+        self.desc.size() as usize
+    }
+
+    fn read_exact_at(&mut self, offset: usize, output: &mut [u8]) -> Result<(), ()> {
+        let mut done = 0;
+        while done < output.len() {
+            match self
+                .session
+                .read_range(&self.desc, (offset + done) as u64, &mut output[done..])
+            {
+                Ok(0) => {
+                    // sizeの内側でEOFになるのはchainが短い壊れたfileである。
+                    self.error = Some(minios_kernel::storage::fat32::FatError::CorruptChain);
+                    return Err(());
+                }
+                Ok(count) => done += count,
+                Err(error) => {
+                    self.error = Some(error);
+                    return Err(());
+                }
+            }
+        }
+        Ok(())
     }
 }
 

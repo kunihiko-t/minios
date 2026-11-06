@@ -515,7 +515,7 @@ pub(crate) unsafe fn block_current_on_io() {
 #[allow(clippy::deref_addrof)]
 pub(crate) unsafe fn spawn_process(
     name: &str,
-    elf: &[u8],
+    elf: impl minios_kernel::elf::ElfSource,
     arguments: &[&str],
 ) -> Result<
     Process,
@@ -630,7 +630,7 @@ pub(crate) unsafe fn kill_pid(target: usize) -> Result<(), isize> {
 #[allow(clippy::deref_addrof)]
 pub(crate) unsafe fn exec_current_process(
     name: &str,
-    elf: &[u8],
+    elf: impl minios_kernel::elf::ElfSource,
 ) -> Result<
     UserContext,
     minios_kernel::process::SpawnFailure<minios_kernel::vm::storage::IdentityFrameStoreError>,

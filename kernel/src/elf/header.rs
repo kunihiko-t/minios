@@ -2,8 +2,14 @@
 
 use crate::vm::VirtAddr;
 
-const ELF_HEADER_LEN: usize = 64;
+/// Byte length of the ELF64 file header.
+pub const ELF_HEADER_LEN: usize = 64;
 const PROGRAM_HEADER_LEN: usize = 56;
+/// Maximum number of program headers (of any type) accepted from one image.
+///
+/// The cap bounds the program-header table a streaming loader must buffer to
+/// 64 * 56 = 3,584 bytes. Static executables carry only a handful of headers.
+pub const MAX_PROGRAM_HEADERS: usize = 64;
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const ELF_VERSION: u32 = 1;
@@ -42,6 +48,8 @@ pub enum ElfError {
     ProgramHeaderSize,
     /// The program-header table cannot be represented or is outside the input.
     ProgramHeaderTableOutOfBounds,
+    /// The image declares more than [`MAX_PROGRAM_HEADERS`] program headers.
+    TooManyProgramHeaders,
     /// The image has more loadable segments than fixed storage permits.
     TooManyLoadSegments,
     /// A loadable segment has more file bytes than memory bytes.
@@ -68,19 +76,25 @@ pub enum ElfError {
     ImagePageLimitExceeded,
 }
 
-/// A borrowed, validated ELF64 executable image.
+/// The validated ELF64 file header: the fields needed to locate the
+/// program-header table and start the image.
+///
+/// It is parsed from the first [`ELF_HEADER_LEN`] bytes alone, with the
+/// table bounds checked against the whole file length, so a loader that
+/// reads the file piecewise knows exactly which bytes to read next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ElfImage<'a> {
-    bytes: &'a [u8],
+pub struct ElfHeader {
     entry: VirtAddr,
+    file_len: usize,
     program_header_offset: usize,
     program_header_count: usize,
 }
 
-impl<'a> ElfImage<'a> {
-    /// Parses and validates the ELF header and program-header table envelope.
-    pub fn parse(bytes: &'a [u8]) -> Result<Self, ElfError> {
-        if bytes.len() < ELF_HEADER_LEN {
+impl ElfHeader {
+    /// Parses the file header from `bytes` (at least [`ELF_HEADER_LEN`]
+    /// bytes from the start of the file) for a file of `file_len` bytes.
+    pub fn parse(bytes: &[u8], file_len: usize) -> Result<Self, ElfError> {
+        if bytes.len() < ELF_HEADER_LEN || file_len < ELF_HEADER_LEN {
             return Err(ElfError::HeaderSize);
         }
         if bytes.get(0..4) != Some(b"\x7fELF") {
@@ -111,23 +125,67 @@ impl<'a> ElfImage<'a> {
         let program_header_offset = usize::try_from(read_u64(bytes, 32)?)
             .map_err(|_| ElfError::ProgramHeaderTableOutOfBounds)?;
         let program_header_count = usize::from(read_u16(bytes, 56)?);
-        let table_len = program_header_count
-            .checked_mul(PROGRAM_HEADER_LEN)
-            .ok_or(ElfError::ProgramHeaderTableOutOfBounds)?;
+        if program_header_count > MAX_PROGRAM_HEADERS {
+            return Err(ElfError::TooManyProgramHeaders);
+        }
         let table_end = program_header_offset
-            .checked_add(table_len)
+            .checked_add(program_header_count * PROGRAM_HEADER_LEN)
             .ok_or(ElfError::ProgramHeaderTableOutOfBounds)?;
-        if table_end > bytes.len() {
+        if table_end > file_len {
             return Err(ElfError::ProgramHeaderTableOutOfBounds);
         }
 
         let entry = VirtAddr::try_new(read_u64(bytes, 24)?).map_err(|_| ElfError::RangeOverflow)?;
-        let image = Self {
-            bytes,
+        Ok(Self {
             entry,
+            file_len,
             program_header_offset,
             program_header_count,
-        };
+        })
+    }
+
+    /// Returns the file offset of the program-header table.
+    pub const fn program_header_offset(&self) -> usize {
+        self.program_header_offset
+    }
+
+    /// Returns the byte length of the program-header table.
+    pub const fn program_header_table_len(&self) -> usize {
+        self.program_header_count * PROGRAM_HEADER_LEN
+    }
+}
+
+/// A validated ELF64 executable image: its file header and a borrowed copy
+/// of the program-header table.
+///
+/// Segment contents are not part of the image; the loader reads them from
+/// the file separately, and the planner checks their ranges against the
+/// file length recorded in the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElfImage<'a> {
+    header: ElfHeader,
+    table: &'a [u8],
+}
+
+impl<'a> ElfImage<'a> {
+    /// Parses and validates the ELF header and program-header table envelope
+    /// from a complete in-memory file.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, ElfError> {
+        let header = ElfHeader::parse(bytes, bytes.len())?;
+        let start = header.program_header_offset();
+        let table = bytes
+            .get(start..start + header.program_header_table_len())
+            .ok_or(ElfError::ProgramHeaderTableOutOfBounds)?;
+        Self::from_table(header, table)
+    }
+
+    /// Validates the program-header table `table` that was read from the
+    /// file offset and length named by `header`.
+    pub fn from_table(header: ElfHeader, table: &'a [u8]) -> Result<Self, ElfError> {
+        if table.len() != header.program_header_table_len() {
+            return Err(ElfError::ProgramHeaderTableOutOfBounds);
+        }
+        let image = Self { header, table };
         let mut load_count = 0usize;
         for header in image.program_headers() {
             let header = header?;
@@ -135,9 +193,7 @@ impl<'a> ElfImage<'a> {
                 return Err(ElfError::DynamicLinkingUnsupported);
             }
             if header.is_load() {
-                load_count = load_count
-                    .checked_add(1)
-                    .ok_or(ElfError::TooManyLoadSegments)?;
+                load_count += 1;
                 if load_count > MAX_LOAD_SEGMENTS {
                     return Err(ElfError::TooManyLoadSegments);
                 }
@@ -148,25 +204,22 @@ impl<'a> ElfImage<'a> {
 
     /// Returns the executable entry address from the ELF header.
     pub const fn entry(&self) -> VirtAddr {
-        self.entry
+        self.header.entry
     }
 
     /// Returns the number of entries in the program-header table.
     pub const fn program_header_count(&self) -> usize {
-        self.program_header_count
+        self.header.program_header_count
     }
 
     /// Iterates over program headers with checked offset and slice arithmetic.
     pub fn program_headers(&self) -> impl Iterator<Item = Result<ProgramHeader, ElfError>> + '_ {
-        ProgramHeaders::new(
-            self.bytes,
-            self.program_header_offset,
-            self.program_header_count,
-        )
+        ProgramHeaders::new(self.table, 0, self.header.program_header_count)
     }
 
-    pub(crate) const fn bytes(&self) -> &'a [u8] {
-        self.bytes
+    /// Returns the length of the whole ELF file, which bounds segment ranges.
+    pub(crate) const fn file_len(&self) -> usize {
+        self.header.file_len
     }
 }
 

@@ -15,7 +15,7 @@ use crate::storage::fat32::FileDesc;
 #[cfg(not(target_arch = "riscv32"))]
 use crate::user::syscall::{ConsoleFd, FD_TABLE_LEN};
 use crate::{
-    elf::{LoadError, LoadedImage, load_image_with_kernel_mappings},
+    elf::{ElfSource, LoadError, LoadedImage, load_image_with_kernel_mappings},
     memory::frame::{FrameError, FrameSource},
     user::{
         context::UserContext,
@@ -454,7 +454,7 @@ impl Process {
     /// 各user spaceへ複写される。
     pub fn spawn<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
         name: &str,
-        elf: &[u8],
+        elf: impl ElfSource,
         arguments: &[&str],
         file_fds: FileFdTable,
         allocator: &mut dyn FrameSource,
@@ -531,7 +531,7 @@ impl Process {
     pub fn exec<M: FrameStore, I: IntoIterator<Item = KernelMapping>>(
         &mut self,
         name: &str,
-        elf: &[u8],
+        elf: impl ElfSource,
         arguments: &[&str],
         allocator: &mut dyn FrameSource,
         memory: &mut M,
