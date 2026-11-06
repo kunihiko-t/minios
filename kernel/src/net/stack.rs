@@ -417,11 +417,14 @@ mod tests {
 
     /// 送信frameへscriptした応答を次のdrainで返すfake link。
     /// `respond`がframeを返せばそれをrx queueへ積む。
+    /// 送信frameへの応答を組む関数。`None`は応答しないこと。
+    type Responder = fn(&[u8]) -> Option<Vec<u8>>;
+
     struct FakeLink {
         mac: [u8; 6],
         rx: Vec<Vec<u8>>,
         tx: Vec<Vec<u8>>,
-        respond: Option<fn(&[u8]) -> Option<Vec<u8>>>,
+        respond: Option<Responder>,
     }
 
     impl FakeLink {

@@ -264,7 +264,7 @@ Cargoの子プロセスが失敗した場合も、実行コマンド、終了ス
 5. cargo clippy -p xtask --all-targets --locked -- -D warnings
 6. cargo clippy -p minios-abi --all-targets --locked -- -D warnings
 7. cargo clippy -p minios-guest --target riscv64gc-unknown-none-elf --release --locked -- -D warnings
-8. cargo clippy -p minios-kernel --lib --locked -- -D warnings
+8. cargo clippy -p minios-kernel --lib --tests --locked -- -D warnings
 9. cargo clippy -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked -- -D warnings
 10. cargo clippy -p minios-kernel --bin minios-kernel --target riscv32im-unknown-none-elf --release --locked -- -D warnings
 11. cargo build -p minios-kernel --bin minios-kernel --target riscv64gc-unknown-none-elf --locked

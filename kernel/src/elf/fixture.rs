@@ -402,12 +402,12 @@ mod probe_tests {
 
         assert_eq!(image.entry().as_u64(), 0x0010_0000);
         assert_eq!(plan.segments().count(), 1);
-        let segment = plan.segments().into_iter().next().unwrap();
+        let segment = plan.segments().next().unwrap();
         assert_eq!(segment.first_page().start().as_u64(), 0x0010_0000);
-        assert_eq!(segment.flags().user(), true);
-        assert_eq!(segment.flags().read(), true);
-        assert_eq!(segment.flags().execute(), true);
-        assert_eq!(segment.flags().write(), false);
+        assert!(segment.flags().user());
+        assert!(segment.flags().read());
+        assert!(segment.flags().execute());
+        assert!(!segment.flags().write());
     }
 
     // Catches layout drift that would silently desynchronize the fail branch
@@ -461,7 +461,7 @@ mod probe_tests {
 
         assert_eq!(image.entry().as_u64(), 0x0010_0000);
         assert_eq!(plan.segments().count(), 1);
-        let segment = plan.segments().into_iter().next().unwrap();
+        let segment = plan.segments().next().unwrap();
         assert!(segment.flags().user());
         assert!(segment.flags().read());
         assert!(segment.flags().execute());

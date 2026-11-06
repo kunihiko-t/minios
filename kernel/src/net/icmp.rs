@@ -73,7 +73,6 @@ pub fn build_echo_reply(request: &[u8], out: &mut [u8]) -> Option<usize> {
 mod tests {
     extern crate std;
     use super::*;
-    use std::vec;
 
     #[test]
     fn echo_request_round_trips_through_parse() {

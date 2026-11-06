@@ -251,6 +251,7 @@ fn dispatch_fixture<R: ControlSource<Error = SinkError>>(
 
 /// `dispatch_fixture`と同じ空間を組み、既存のcontextを引き継いでdispatchする。
 /// `Blocked`からの再開 (同じecallの再実行) を再現するテストが使う。
+#[allow(clippy::too_many_arguments)]
 fn dispatch_fixture_at<R: ControlSource<Error = SinkError>>(
     mut context: UserContext,
     number: usize,

@@ -8,7 +8,7 @@ fn pipe_writes_the_fd_pair_to_the_out_pointer() {
     let mut sink = FakeSink::default();
     let mut source = FileSource::serving(b"");
     let mut scratch_buf = scratch();
-    let (context, flow) = dispatch_fixture(
+    let (_, flow) = dispatch_fixture(
         PIPE_NUMBER,
         MESSAGE_PAGE,
         0,

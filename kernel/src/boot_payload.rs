@@ -343,8 +343,7 @@ mod tests {
         );
 
         // image bのrangeを領域内へ修正すれば受理される。
-        let fixed = format!("version=2\nimage=a\nelf=0,16\nimage=b\nelf=16,16\n");
-        let fixed_bytes = fixed.into_bytes();
+        let fixed_bytes = b"version=2\nimage=a\nelf=0,16\nimage=b\nelf=16,16\n".to_vec();
         let manifest_end = BOOT_HEADER_LEN + fixed_bytes.len();
         let elf_offset = manifest_end + (8 - manifest_end % 8) % 8;
         let total_len = elf_offset + elf.len();

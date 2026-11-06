@@ -475,7 +475,7 @@ mod tests {
         let (mut heap, _region) = fresh_heap();
 
         let ptr = heap.alloc(layout(24)).unwrap();
-        assert!(ptr.as_ptr() as usize % 16 == 0);
+        assert!((ptr.as_ptr() as usize).is_multiple_of(16));
         // Safety: allocが返した24バイトは有効である。
         unsafe {
             ptr.as_ptr().write_bytes(0xab, 24);

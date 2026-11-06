@@ -2559,6 +2559,8 @@ mod tests {
             .unwrap()
             .alloc_pipe_fd(id, true)
             .expect("write end");
+        assert_eq!(write_fd, read_fd + 1);
+        assert_eq!(table.pipe_ends(id), (1, 1));
 
         let mut out = [0u8; 4];
         assert_eq!(

@@ -94,7 +94,6 @@ pub fn parse_packet(packet: &[u8]) -> Option<Ipv4Packet<'_>> {
 mod tests {
     extern crate std;
     use super::*;
-    use std::vec;
 
     const SRC: [u8; 4] = [10, 0, 2, 15];
     const DST: [u8; 4] = [10, 0, 2, 2];
