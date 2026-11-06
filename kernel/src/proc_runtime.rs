@@ -300,6 +300,52 @@ pub(crate) unsafe fn dup2_fd(oldfd: usize, newfd: usize) -> Result<usize, isize>
     Ok(newfd)
 }
 
+/// `path`を現在processの作業directory基準でFAT32 layerのpathへ解決する。
+/// process未設定（単一実行のprobe）ではrootを基準にする。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn resolve_path(path: &str) -> Result<alloc::string::String, isize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    let cwd = unsafe { process.as_ref() }.map_or("", |process| process.cwd());
+    minios_kernel::path::resolve(cwd, path)
+}
+
+/// 現在processの作業directory（FAT32 layerのpath）を返す。process未設定なら
+/// root（空文字列）。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn current_cwd() -> alloc::string::String {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    unsafe { process.as_ref() }
+        .map_or_else(alloc::string::String::new, |process| process.cwd().into())
+}
+
+/// 現在processの作業directoryを置き換える。process未設定なら`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn set_current_cwd(cwd: alloc::string::String) -> Result<(), isize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    match unsafe { process.as_mut() } {
+        Some(process) => {
+            process.set_cwd(cwd);
+            Ok(())
+        }
+        None => Err(minios_abi::syscall::ENOSYS),
+    }
+}
+
 /// 現在processの`fd`のclose-on-exec印を返す (`fcntl(F_GETFD)`)。
 /// process未設定なら`ENOSYS`。
 ///
@@ -539,7 +585,9 @@ pub(crate) unsafe fn spawn_process(
         .map_or_else(minios_kernel::process::FileFdTable::new, |process| {
             process.file_fds_snapshot()
         });
-    Process::spawn(
+    let cwd = unsafe { caller.as_ref() }
+        .map_or_else(alloc::string::String::new, |process| process.cwd().into());
+    let mut process = Process::spawn(
         name,
         elf,
         arguments,
@@ -547,7 +595,10 @@ pub(crate) unsafe fn spawn_process(
         &mut frames,
         memory,
         plan.blocks(),
-    )
+    )?;
+    // childは呼び出し側の作業directoryを引き継ぐ。
+    process.set_cwd(cwd);
+    Ok(process)
 }
 
 /// `spawn`で作ったprocessをtableへ登録し、採番したpidを返す。

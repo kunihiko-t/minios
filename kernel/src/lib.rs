@@ -43,6 +43,9 @@ pub mod net;
 // RV32から外す。
 #[cfg(not(target_arch = "riscv32"))]
 pub mod pipe;
+// cwdとpathの連結はprocess単位の機能なのでprocessと同じくRV32から外す。
+#[cfg(not(target_arch = "riscv32"))]
+pub mod path;
 // ELF/vm/userに依存するprocess tableはu64アドレス前提のためRV32から外す。
 // RV32シェルにはprocess実行経路がない。ホストテストでは検証を続ける。
 #[cfg(not(target_arch = "riscv32"))]

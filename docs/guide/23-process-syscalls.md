@@ -123,8 +123,13 @@ run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取�
 ここまでのsystem callを組み合わせると、kernelを変えずにuser modeのshellを書けます。
 [`guest/src/bin/sh.rs`](../../guest/src/bin/sh.rs)は、FAT32 diskへ置く`SH.ELF`としてstdinを1行ずつ読みます。
 `|`で区切った最大7個のcommandをpipelineとして起動し、最初のcommandには`< file`、最後のcommandには`> file`を付けられます。
-`/`を含まないcommand名`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を含む語はそのままpathとして解決します。
-built-inは`exit [code]`だけで、cwdを持たないため`cd`はありません。
+`/`を含まないcommand名`NAME`は`/BIN/NAME.ELF`（大文字）へ、`/`を含む語はそのままpathとして解決します。
+built-inは`exit [code]`、`cd [dir]`、`pwd`の3つです。
+作業directoryはkernelがprocessごとに持ち（`Process::cwd`）、`chdir`と`getcwd`で読み書きします。
+pathを受けるsyscallは[`kernel/src/path.rs`](../../kernel/src/path.rs)の`resolve`で相対pathを作業directoryと連結し、`.`と`..`を解決してからFAT32 layerへ渡します。
+`spawn`したchildは呼び出し側の作業directoryを引き継ぐため、`cd work`の後の`ls`や`cat a.txt`は`work`の中で動きます。
+shellはcommandを`/BIN/NAME.ELF`という絶対pathへ解決するので、作業directoryを変えてもtoolは見つかります。
+`cd`と`pwd`は1段のcommandでredirectがない場合だけbuilt-inとして扱います。
 起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)と、file操作の[`ls.rs`](../../guest/src/bin/ls.rs)、[`mkdir.rs`](../../guest/src/bin/mkdir.rs)、[`rmdir.rs`](../../guest/src/bin/rmdir.rs)、[`rm.rs`](../../guest/src/bin/rm.rs)、[`mv.rs`](../../guest/src/bin/mv.rs)です。
 file操作のtoolはそれぞれ`readdir`、`mkdir`、`rmdir`、`unlink`、`rename`を1回ずつ呼ぶだけの薄いprogramで、`ls`はdirectoryの名前に`/`を付けます。
 `"…"`か`'…'`で囲んだ語は、中の空白や`|`、`<`、`>`を文字として含む1語になるため、LFNの`"my notes.txt"`のような名前もtoolへ渡せます。
@@ -260,17 +265,22 @@ echo "a | b"
 echo "oops
 mkdir work
 mv notes.backup work/saved.notes
-ls work
-cat work/saved.notes
-rm work/saved.notes
+cd work
+pwd
+ls
+cat saved.notes
+rm saved.notes
+cd ..
+pwd
 rmdir work
 ls
+cd nosuchdir
 rm nosuch.txt
 nosuch
 ```
 
-標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、続いて`ls work`の`saved.notes`、`saved`、片付け後の`ls`が出すrootの一覧が届きます。
-標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、閉じていない引用符への`sh: unterminated quote`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`sh: nosuch: not found (errno -2)`が届きます。
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧が届きます。
+標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、閉じていない引用符への`sh: unterminated quote`、存在しないdirectoryへの`sh: cd: nosuchdir: cannot change directory (errno -2)`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`sh: nosuch: not found (errno -2)`が届きます。
 pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
 このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。
 EOFを読んだshellは0で終了します。

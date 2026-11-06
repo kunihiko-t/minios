@@ -164,6 +164,21 @@ pub trait ControlSource {
         Err(ENOSYS)
     }
 
+    /// `path`のdirectoryを作業directoryにする。不在は`ENOENT`、fileは
+    /// `ENOTDIR`である。`Err`はそのまま`a0`へ返すerrnoである。default実装は
+    /// `ENOSYS`。
+    fn chdir(&mut self, path: &str) -> Result<(), isize> {
+        let _ = path;
+        Err(ENOSYS)
+    }
+
+    /// 作業directoryを`/`始まりの絶対pathで`output`へ書き、書いたbyte数を
+    /// 返す。`output`が短ければ`EINVAL`。default実装は`ENOSYS`。
+    fn getcwd(&mut self, output: &mut [u8]) -> Result<usize, isize> {
+        let _ = output;
+        Err(ENOSYS)
+    }
+
     /// 呼び出しprocessのpidを返す。負の値はそのまま`a0`へ返すerrno
     /// である。default実装は`ENOSYS`。
     fn getpid(&mut self) -> isize {

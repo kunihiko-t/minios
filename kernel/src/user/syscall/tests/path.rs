@@ -569,3 +569,82 @@ fn mkdir_and_rmdir_without_storage_return_enosys() {
         assert_eq!(context.register(10), ENOSYS as usize);
     }
 }
+
+// Catches chdir skipping the shared path contract: the path must reach the
+// source unchanged, and copy and errno failures must surface in a0.
+#[test]
+fn chdir_forwards_the_path_and_the_source_errno() {
+    let mut sink = FakeSink::default();
+    let mut source = FileSource::serving(b"");
+    let (context, flow) = dispatch_numbered_file_fixture(
+        CHDIR_NUMBER,
+        MESSAGE_PAGE,
+        6,
+        0,
+        0,
+        b"../dir",
+        &mut sink,
+        &mut source,
+        &mut scratch(),
+    );
+    assert_eq!(flow, SyscallFlow::Resume);
+    assert_eq!(context.register(10), 0);
+    assert_eq!(source.seen_path.as_deref(), Some(b"../dir".as_slice()));
+
+    let mut source = FileSource::failing(ENOENT);
+    let (context, _) = dispatch_numbered_file_fixture(
+        CHDIR_NUMBER,
+        MESSAGE_PAGE,
+        6,
+        0,
+        0,
+        b"nosuch",
+        &mut sink,
+        &mut source,
+        &mut scratch(),
+    );
+    assert_eq!(context.register(10), ENOENT as usize);
+}
+
+// Catches getcwd writing past the caller's buffer or skipping the user
+// range check: the path is copied out through ReadComplete, a short buffer
+// is EINVAL, and an unmapped buffer is EFAULT before the source runs.
+#[test]
+fn getcwd_copies_the_absolute_path_and_checks_the_buffer() {
+    let mut sink = FakeSink::default();
+    let mut source = FileSource::serving(b"");
+    let mut scratch_buf = scratch();
+    let (_, flow) = dispatch_numbered_file_fixture(
+        GETCWD_NUMBER,
+        MESSAGE_PAGE,
+        64,
+        0,
+        0,
+        b"",
+        &mut sink,
+        &mut source,
+        &mut scratch_buf,
+    );
+    assert_eq!(read_completion(flow), (MESSAGE_PAGE as u64, 9));
+    assert_eq!(&scratch_buf[..9], b"/work/sub");
+
+    for (a0, a1, errno) in [
+        (MESSAGE_PAGE, 4, EINVAL),
+        (MESSAGE_PAGE, 0, EINVAL),
+        (0x40_000, 64, EFAULT),
+    ] {
+        let (context, flow) = dispatch_numbered_file_fixture(
+            GETCWD_NUMBER,
+            a0,
+            a1,
+            0,
+            0,
+            b"",
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), errno as usize);
+    }
+}

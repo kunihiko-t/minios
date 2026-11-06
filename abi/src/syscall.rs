@@ -33,7 +33,7 @@ pub enum SyscallNumber {
     /// 8 byteの`Stat`として書き込む。
     Fstat = 19,
     /// `a0`/`a1`が指すdirectoryの`a2`番目のentryを`a3`のuser bufferへ
-    /// `DirEnt`として書き込む。`a1`=0はroot directoryを指し、
+    /// `DirEnt`として書き込む。`a1`=0は作業directory（既定はroot）を指し、
     /// indexが末尾を越えれば0を返す。
     Readdir = 20,
     /// `a0`/`a1`が指すFAT32 pathのELFで呼び出しprocessのimageを
@@ -86,6 +86,13 @@ pub enum SyscallNumber {
     /// `exec`の成功時に閉じられる。fdが未割当か範囲外なら`EBADF`、
     /// 未知のcommandや`FD_CLOEXEC`以外のflag bitは`EINVAL`。
     Fcntl = 32,
+    /// `a0`/`a1`が指すpathのdirectoryを呼び出しprocessの作業directoryに
+    /// して0を返す。相対pathは今の作業directory基準で、`/`始まりはroot
+    /// からの絶対pathである。不在は`ENOENT`、fileは`ENOTDIR`。
+    Chdir = 33,
+    /// 作業directoryを`/`始まりの絶対pathとして`a0`の`a1` byteへ書き、
+    /// 書いたbyte数を返す（NUL終端しない）。bufferが短ければ`EINVAL`。
+    Getcwd = 34,
 }
 
 pub const STDIN: usize = 0;
@@ -281,6 +288,8 @@ mod tests {
         assert_eq!(SyscallNumber::SendTo as usize, 30);
         assert_eq!(SyscallNumber::RecvFrom as usize, 31);
         assert_eq!(SyscallNumber::Fcntl as usize, 32);
+        assert_eq!(SyscallNumber::Chdir as usize, 33);
+        assert_eq!(SyscallNumber::Getcwd as usize, 34);
         assert_eq!((F_GETFD, F_SETFD, FD_CLOEXEC), (1, 2, 1));
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);

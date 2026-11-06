@@ -85,6 +85,9 @@ impl ControlSource for UartControlSource<'_> {
     /// `output`より長いfileは先頭`output.len()` byteで打ち切る。
     #[cfg(target_arch = "riscv64")]
     fn read_file(&mut self, path: &str, output: &mut [u8]) -> Result<usize, isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
         // 外へ持ち出さない。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -102,6 +105,9 @@ impl ControlSource for UartControlSource<'_> {
     /// guestの`open`を遅延mount済みのstorage sessionとpid別fd tableへ委譲する。
     #[cfg(target_arch = "riscv64")]
     fn open_file(&mut self, path: &str) -> Result<usize, isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         let desc = session.open_file(path).map_err(fat_errno)?;
@@ -113,6 +119,9 @@ impl ControlSource for UartControlSource<'_> {
     /// writableなfdを割り当てる。
     #[cfg(target_arch = "riscv64")]
     fn create_file(&mut self, path: &str) -> Result<usize, isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         without_io_block(|| {
             // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
             let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -170,6 +179,9 @@ impl ControlSource for UartControlSource<'_> {
     /// fdを残すと他fileのentryや内容を壊し得る。
     #[cfg(target_arch = "riscv64")]
     fn unlink(&mut self, path: &str) -> Result<(), isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         without_io_block(|| {
             // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
             let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -186,6 +198,9 @@ impl ControlSource for UartControlSource<'_> {
     /// 置き換えられたtargetのclusterは解放されるため、そのfdは失効。
     #[cfg(target_arch = "riscv64")]
     fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let old_path = &unsafe { crate::resolve_path(old_path) }?;
+        let new_path = &unsafe { crate::resolve_path(new_path) }?;
         without_io_block(|| {
             // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
             let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -219,6 +234,9 @@ impl ControlSource for UartControlSource<'_> {
     /// 空でなければ`argv[0]`をprocess名、`argv`全体をchildのargvにする。
     #[cfg(target_arch = "riscv64")]
     fn spawn(&mut self, path: &str, argv: &[&str]) -> Result<usize, isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
         // 外へ持ち出さない。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -284,6 +302,9 @@ impl ControlSource for UartControlSource<'_> {
     /// 旧imageは`retired_image`へ退避されてrun loopが解放する。
     #[cfg(target_arch = "riscv64")]
     fn exec(&mut self, path: &str) -> Result<minios_kernel::user::UserContext, isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれ、借用を
         // 外へ持ち出さない。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -301,9 +322,19 @@ impl ControlSource for UartControlSource<'_> {
     /// 受理し、sizeとkindをABIの`Stat`へ写像する。
     #[cfg(target_arch = "riscv64")]
     fn stat(&mut self, path: &str) -> Result<minios_abi::syscall::Stat, isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         use minios_abi::syscall::{STAT_KIND_DIR, STAT_KIND_FILE, Stat};
 
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        // root directoryはdir entryを持たないため、ここで答える。
+        if path.is_empty() {
+            return Ok(Stat {
+                size: 0,
+                kind: STAT_KIND_DIR,
+            });
+        }
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         let info = session.stat(path).map_err(fat_errno)?;
         Ok(Stat {
@@ -344,7 +375,7 @@ impl ControlSource for UartControlSource<'_> {
         })
     }
 
-    /// guestの`readdir`をstorage sessionへ委譲する。`""`はrootを指し、
+    /// guestの`readdir`をstorage sessionへ委譲する。`""`は作業directoryを指し、
     /// index番目のentryを`DirEnt`へ写像する。末尾超過は`Ok(None)`。
     #[cfg(target_arch = "riscv64")]
     fn readdir(
@@ -354,6 +385,9 @@ impl ControlSource for UartControlSource<'_> {
     ) -> Result<Option<minios_abi::syscall::DirEnt>, isize> {
         use minios_abi::syscall::{DIRENT_NAME_LEN, DirEnt, STAT_KIND_DIR, STAT_KIND_FILE};
 
+        // 空のpathは作業directory自身を指す。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
         let Some(entry) = session.entry_at(path, index).map_err(fat_errno)? else {
@@ -377,6 +411,9 @@ impl ControlSource for UartControlSource<'_> {
     /// 失効させるfdもない。
     #[cfg(target_arch = "riscv64")]
     fn make_dir(&mut self, path: &str) -> Result<(), isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         without_io_block(|| {
             // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
             let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -384,10 +421,43 @@ impl ControlSource for UartControlSource<'_> {
         })
     }
 
+    /// guestの`chdir`。解決したpathがdirectoryであることを`stat`で確かめて
+    /// から現在processの作業directoryにする。rootはdir entryを持たないため
+    /// 検査せずに受理する。
+    #[cfg(target_arch = "riscv64")]
+    fn chdir(&mut self, path: &str) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = unsafe { crate::resolve_path(path) }?;
+        if !path.is_empty() {
+            let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+            if !session.stat(&path).map_err(fat_errno)?.directory {
+                return Err(minios_abi::syscall::ENOTDIR);
+            }
+        }
+        // Safety: 同上。
+        unsafe { crate::set_current_cwd(path) }
+    }
+
+    /// guestの`getcwd`。作業directoryを`/`始まりの絶対pathで`output`へ書く。
+    #[cfg(target_arch = "riscv64")]
+    fn getcwd(&mut self, output: &mut [u8]) -> Result<usize, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let shown = minios_kernel::path::display(&unsafe { crate::current_cwd() });
+        let bytes = shown.as_bytes();
+        let target = output
+            .get_mut(..bytes.len())
+            .ok_or(minios_abi::syscall::EINVAL)?;
+        target.copy_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
     /// guestの`rmdir`をstorage sessionへ委譲する。dirはfdを持てないため
     /// 戻り値の削除位置に失効させる対象はない。
     #[cfg(target_arch = "riscv64")]
     fn remove_dir(&mut self, path: &str) -> Result<(), isize> {
+        // 相対pathは現在processの作業directory基準で解決する。
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        let path = &unsafe { crate::resolve_path(path) }?;
         without_io_block(|| {
             // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
             let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;

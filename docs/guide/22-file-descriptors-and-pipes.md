@@ -62,7 +62,7 @@ file末尾を越えるoffsetは受理され、その位置からの`read`は0を
 `stat`は`a0/a1`のpath、`fstat`は`a0`のfdを受け、8 byteの`Stat`（`size: u32`、`kind: u32`のLE）を書きます。
 `kind`は`STAT_KIND_FILE`、`STAT_KIND_DIR`、`STAT_KIND_PIPE`、`STAT_KIND_CONSOLE`のいずれかで、directory、pipe、consoleの`size`は0です。
 `readdir`は`a0/a1`のdirectory、`a2`のindex、`a3`のbufferを受け、`DIRENT_LEN`（263）byteの`DirEnt`を書きます。
-`a1`=0はroot directoryを指す`readdir`固有の規約で、indexが末尾を越えると0を返します。
+`a1`=0は作業directory（既定はroot）を指す`readdir`固有の規約で、indexが末尾を越えると0を返します。
 どの経路もout bufferの`EFAULT`をsourceの呼び出しより先に確定し、成功時は`ReadComplete`経由でscratchからuser memoryへcopyします。
 
 ### unlinkとrenameによるfdの失効と追従

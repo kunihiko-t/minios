@@ -1995,7 +1995,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 25] = [
+const USER_SHELL_SCRIPT: [&[u8]; 30] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -2016,13 +2016,19 @@ const USER_SHELL_SCRIPT: [&[u8]; 25] = [
     b"echo \"a | b\"\n",
     b"echo \"oops\n",
     // file操作のtool。LFN名へのmoveと一覧、片付け後のrootを確かめる。
+    // `cd`の後は相対pathも、spawnしたtoolのpathも作業directory基準になる。
     b"mkdir work\n",
     b"mv notes.backup work/saved.notes\n",
-    b"ls work\n",
-    b"cat work/saved.notes\n",
-    b"rm work/saved.notes\n",
+    b"cd work\n",
+    b"pwd\n",
+    b"ls\n",
+    b"cat saved.notes\n",
+    b"rm saved.notes\n",
+    b"cd ..\n",
+    b"pwd\n",
     b"rmdir work\n",
     b"ls\n",
+    b"cd nosuchdir\n",
     b"rm nosuch.txt\n",
     b"nosuch\n",
 ];
@@ -2123,14 +2129,19 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         exit(),
         // mv notes.backup work/saved.notes
         exit(),
-        // ls work
+        // cd workはbuilt-inなのでframeを出さない。
+        // pwd
+        stdout(b"/work\n"),
+        // ls：引数なしは作業directoryを一覧する。
         stdout(b"saved.notes\n"),
         exit(),
-        // cat work/saved.notes
+        // cat saved.notes
         stdout(b"saved\n"),
         exit(),
-        // rm work/saved.notes
+        // rm saved.notes
         exit(),
+        // cd .. / pwd
+        stdout(b"/\n"),
         // rmdir work
         exit(),
         // ls：fixtureのentryと、scriptが作ったOUT.TXTだけが残る。
@@ -2140,6 +2151,11 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         stdout(b"BIN/\n"),
         stdout(b"OUT.TXT\n"),
         exit(),
+        // cd nosuchdir
+        control_frame(
+            FrameKind::Stderr,
+            b"sh: cd: nosuchdir: cannot change directory (errno -2)\n",
+        ),
         // rm nosuch.txt：不在fileはstderrへ1行出して1で終わる。
         control_frame(
             FrameKind::Stderr,
