@@ -3,9 +3,10 @@
 //! stdinを1行ずつ読み、`|`で区切った最大7個のcommandをpipelineとして
 //! 起動する。最初のcommandには`< file`、最後のcommandには`> file`を付け
 //! られる。`"…"`か`'…'`で囲んだ語は空白や演算子を含められる。
-//! `/`を含まない名前`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を
-//! 含む語はそのままpathとして解決する。built-inは`exit [code]`だけで、
-//! cwdは持たない。stdinのEOFで0で終了する。`-i`を渡すと`$ `を出す。
+//! `/`を含まない名前`NAME`は`/BIN/NAME.ELF`（大文字）へ、`/`を
+//! 含む語はそのままpathとして解決する。built-inは`exit [code]`、`cd [dir]`、
+//! `pwd`で、作業directoryはkernelがprocessごとに持ち、spawnしたchildへ
+//! 引き継がれる。stdinのEOFで0で終了する。`-i`を渡すと`$ `を出す。
 //!
 //! 各commandは「dup2してからspawn」で起動する。kernelは`spawn`時に
 //! fd tableを複製するため、shell自身のfd 0/1をpipe端やredirect先へ
@@ -29,8 +30,8 @@ use minios_abi::syscall::{
 };
 use minios_guest::{
     Args, Errno, eprintln,
-    fs::File,
-    io, print,
+    fs::{self, File},
+    io, print, println,
     process::{self, Pid, dup2, pipe, set_cloexec, spawn, wait},
 };
 
@@ -201,7 +202,8 @@ fn resolve<'a>(name: &'a [u8], buffer: &'a mut [u8; MAX_PATH_LEN]) -> &'a [u8] {
         return name;
     }
     let mut len = 0;
-    for &byte in b"BIN/".iter().chain(name).chain(b".ELF") {
+    // `cd`の後でも見つかるよう、root基準の絶対pathにする。
+    for &byte in b"/BIN/".iter().chain(name).chain(b".ELF") {
         if len == MAX_PATH_LEN {
             // kernelが`EINVAL`で拒否する長さのままspawnへ渡す。
             break;
@@ -356,6 +358,40 @@ fn execute(line: &[u8], status: i32) -> i32 {
             _ => eprintln!("sh: exit: too many arguments"),
         }
         return SYNTAX_STATUS;
+    }
+    let simple = pipeline.count == 1 && pipeline.input.is_none() && pipeline.output.is_none();
+    if simple && first.argv[0] == b"cd" {
+        let target: &[u8] = match first.argv[1..first.argc] {
+            [] => b"/",
+            [dir] => dir,
+            _ => {
+                eprintln!("sh: cd: too many arguments");
+                return SYNTAX_STATUS;
+            }
+        };
+        return match fs::chdir(target) {
+            Ok(()) => 0,
+            Err(Errno(errno)) => {
+                eprintln!(
+                    "sh: cd: {}: cannot change directory (errno {errno})",
+                    text(target)
+                );
+                1
+            }
+        };
+    }
+    if simple && first.argv[0] == b"pwd" && first.argc == 1 {
+        let mut buffer = [0u8; MAX_PATH_LEN + 1];
+        return match fs::getcwd(&mut buffer) {
+            Ok(cwd) => {
+                println!("{}", text(cwd));
+                0
+            }
+            Err(Errno(errno)) => {
+                eprintln!("sh: pwd: errno {errno}");
+                1
+            }
+        };
     }
     run(&pipeline)
 }

@@ -105,6 +105,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 ### 複数processとスケジューリング
 
+- `path.rs`：processの作業directoryとpathの連結です。`resolve`は`/`始まりの絶対pathと作業directory基準の相対pathを、`.`と`..`を解決したFAT32 layerのroot相対pathへ直し、pathを受ける全syscallが`ControlSource`の手前でこれを通ります。
 - `process.rs`：再入可能な実行単位`Process`と、heap-backed `Vec`上のround-robin`ProcessTable`を定義します。
   各`Process`は`LoadedImage`（user address spaceとその所有frame）、guard page付きの専用kernel trap stack、前回中断時の`UserContext`、file descriptor table、採番されたpidを所有します。
   allocatorやframe memoryへの参照は保持しないため、生存中のprocess同士がborrowを共有しません。

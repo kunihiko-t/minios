@@ -173,7 +173,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 17 | `waitpid` | `a0=pid` | `pid`のprocessの終了codeを返す。childに限らず、自分以外のliveなprocessを待てる。対象がliveなら呼び出しprocessをblockし、対象の終了後に同じecallが再実行されてcodeを返す。負のerrnoは`ECHILD`/`EINVAL` |
 | 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
 | 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
-| 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ263 byteの`DirEnt`として書き込む。`a1`=0はroot directoryを指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（263）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
+| 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ263 byteの`DirEnt`として書き込む。`a1`=0は作業directory（既定はroot）を指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（263）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
 | 21 | `exec` | `a0=path pointer`、`a1=path length` | `path`のfileをELFとして読み込み、呼び出しprocessのimageを置き替える。pidとfd tableは引き継ぎ、close-on-execのfdだけを閉じる。成功時は戻らず新imageのentryから始まる。負のerrnoは`ENOENT`/`EISDIR`/`EINVAL`/`EFAULT`/`ENOMEM` |
 | 22 | `pipe` | `a0=out pointer` | kernel管理のbyte channelを1本作成し、read端とwrite端のfdを`a0`のuser bufferへ8 byte（2個の`u32`）で書き込む。戻り値は`PIPE_OUT_LEN`（8）か負のerrno |
 | 23 | `sbrk` | `a0=increment（符号付き）` | 呼び出しprocessのheap breakを`increment` byte動かし、旧breakを返す。0は現在のbreakを返す。負のincrementはbreakを戻し、新しいbreakより上で丸ごと空いたpageをunmapしてframeをkernelへ返す。戻したpageを再び伸ばすとzero済みの新しいpageになる。負のerrnoは`EINVAL`（heap先頭より下へ戻す要求）/`ENOMEM` |
@@ -185,6 +185,8 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 29 | `socket` | なし | UDP socketを開き、socket index（0から採番）を返す。file fdとは別の名前空間で、table満杯は`EMFILE`、network device未接続は`ENODEV` |
 | 30 | `sendto` | `a0=sock`、`a1=buffer pointer`、`a2=length`、`a3=sockaddr pointer` | `a1`の`a2` byteを`a3`の`SockAddr`宛にUDP datagramとして送る。戻り値は送信byte数。負のerrnoは`EBADF`/`EINVAL`/`EFAULT`/`ENODEV`/`EIO` |
 | 31 | `recvfrom` | `a0=sock`、`a1=buffer pointer`、`a2=length`、`a3=sockaddr pointer` | 受信queueから1 datagramを`a1`へ最大`a2` byte取り、`a3`へ送信元`SockAddr`を8 byteで書き戻す。戻り値は受信byte数。queueが空なら`waitpid`と同じ巻き戻し規約でcallerをblockし、datagram到着で同じecallが再実行される。負のerrnoは`EBADF`/`EINVAL`/`EFAULT`/`ENODEV`/`EIO` |
+| 33 | `chdir` | `a0=path pointer`、`a1=path length` | `path`のdirectoryを呼び出しprocessの作業directoryにして0を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
+| 34 | `getcwd` | `a0=buffer pointer`、`a1=buffer length` | 作業directoryを`/`始まりの絶対pathとして`a0`へ書き、書いたbyte数を返す（NUL終端しない）。bufferが短いか長さ0なら`EINVAL`、書けなければ`EFAULT` |
 | 32 | `fcntl` | `a0=fd`、`a1=command`、`a2=flags` | fdのfd flagを読み書きする。`a1`=`F_GETFD`（1）は現在のflag（`FD_CLOEXEC`（1）か0）を返し、`a1`=`F_SETFD`（2）は`a2`のflagを設定して0を返す。負のerrnoは`EBADF`（未割当か範囲外のfd）/`EINVAL`（未知のcommandか`FD_CLOEXEC`以外のflag bit） |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
@@ -197,6 +199,8 @@ processごとのfd tableはfd 0から18までの19個のslotを持ちます（`F
 fd 0、1、2は特別扱いではなく普通のslotであり、`read`と`write`はfd番号ではなくslotが指すentryの種類で経路を選びます。
 そのため`dup2`でfd 1をpipeのwrite端へ差し替えれば、以後のfd 1への`write`はpipeへ流れます。
 console入力のentryへの`write`とconsole出力のentryへの`read`は、pipeの方向規約と同じく`EBADF`です。
+pathを受けるsyscallはどれも、`/`で始まるpathをroot directoryからの絶対path、それ以外を呼び出しprocessの作業directoryからの相対pathとして解決します。`.`は今のdirectory、`..`は親directoryで、rootの親はroot自身です。作業directoryの既定はrootなので、`BIN/CAT.ELF`のような相対pathはrootからのpathと同じ意味になります。解決後のpathが256 byteを超えれば`EINVAL`です。
+作業directoryは`chdir`で変え、`getcwd`で読みます。`spawn`したchildは呼び出し側の作業directoryを引き継ぎ、`exec`は作業directoryを変えません。
 `open`は`read_file`と同じpath規約で、成功するとfileをread-onlyの`fd`へ結び付けます。
 `open`、`create`、`pipe`は、fd 0、1、2が空いていても使わず、`FIRST_FILE_FD`（3）以上で最小の空きslotを割り当てます。
 `create`はfileが存在しなければentryを親directoryへ追加し、存在すればそのfileをwritableに開きます。8.3形へ正規化できる名前は小文字を大文字化した8.3名だけで作ります。それ以外の名前（空白を含む、拡張子が4文字以上など）はVFATのLFN record列と、`LONGFI~1.TXT`のような重複しない8.3 aliasで作ります。既存entryとの照合は、8.3名なら正規化した8.3名で、LFNなら表示名の大小文字を無視して行います。FATが名前に禁じる`" * : < > ? |`を含む名前と、末尾が空白か`.`の長い名前は`EINVAL`です。
@@ -244,7 +248,7 @@ argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたた�
 `stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの8 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、残り4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1、`STAT_KIND_PIPE` = 2、`STAT_KIND_CONSOLE` = 3）です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile、pipe、consoleのentryを受理して未割り当てfdに`EBADF`を返します。pipeとconsoleのentryの`size`は常に0です。
 どちらも`read`と同じく、out pointerが指す8 byteがユーザー空間の書き込み可能ページにすべて含まれることを要求し、検証を通ってからstorageやfd tableへ触れます。成功時の戻り値は`read`系のbyte数規約に従う`STAT_LEN`（8）です。
 
-`readdir`はdirectoryの中身をindex順に1件ずつ返します。`DirEnt`は263 byteで、先頭4 byteが`name_len`、次の4 byteが`kind`（`STAT_KIND_*`と同じ値）、残り255 byteがゼロ詰めの`name`です。`readdir`は呼び出しごとにdirectoryを先頭から走査して`index`番目のentryを返すため、一覧はindex 0からの連続呼び出しで得ます。`.`と`..`は列挙に含まれず、末尾を越えたindexは0を返します。空path（`a1`=0）はroot directoryを指し、fileへの指定は`ENOTDIR`を返します。out pointerの検証は`stat`と同じく、走査より先に`EFAULT`を確定します。
+`readdir`はdirectoryの中身をindex順に1件ずつ返します。`DirEnt`は263 byteで、先頭4 byteが`name_len`、次の4 byteが`kind`（`STAT_KIND_*`と同じ値）、残り255 byteがゼロ詰めの`name`です。`readdir`は呼び出しごとにdirectoryを先頭から走査して`index`番目のentryを返すため、一覧はindex 0からの連続呼び出しで得ます。`.`と`..`は列挙に含まれず、末尾を越えたindexは0を返します。空path（`a1`=0）は作業directory（既定はroot）を指し、fileへの指定は`ENOTDIR`を返します。out pointerの検証は`stat`と同じく、走査より先に`EFAULT`を確定します。
 
 `exec`は呼び出したprocessのimageを`path`のELFで置き替えます。pidとfd tableは引き継ぎ、address spaceと実行contextだけが新しくなります。新imageの構築がすべて成功してから差し替えるため、失敗した`exec`はerrnoを返して旧imageのまま動き続けます。成功時は`a0`の戻り値ではなく新imageの`_start`へ入り、引数は空です。
 

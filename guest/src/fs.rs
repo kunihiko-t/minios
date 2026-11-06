@@ -137,6 +137,18 @@ pub fn mkdir(path: impl AsRef<[u8]>) -> Result<()> {
     check(sys::sys_mkdir(path.as_ptr(), path.len())).map(|_| ())
 }
 
+/// 作業directoryを`path`へ移す。相対pathは今の作業directory基準である。
+pub fn chdir(path: impl AsRef<[u8]>) -> Result<()> {
+    let path = path.as_ref();
+    check(sys::sys_chdir(path.as_ptr(), path.len())).map(|_| ())
+}
+
+/// 作業directoryの`/`始まりの絶対pathを`buf`へ書き、書いた部分を返す。
+pub fn getcwd(buf: &mut [u8]) -> Result<&[u8]> {
+    let len = check(sys::sys_getcwd(buf.as_mut_ptr(), buf.len()))?;
+    Ok(&buf[..len])
+}
+
 /// 空のdirectoryを消す。
 pub fn rmdir(path: impl AsRef<[u8]>) -> Result<()> {
     let path = path.as_ref();

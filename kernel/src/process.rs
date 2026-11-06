@@ -435,6 +435,10 @@ pub struct Process {
     context: UserContext,
     state: ProcessState,
     file_fds: FileFdTable,
+    /// 作業directory。FAT32 layerのpath（rootは空文字列）で持ち、
+    /// `path::resolve`が相対pathの基準にする。`spawn`したchildは呼び出し側の
+    /// cwdを引き継ぎ、`exec`は変えない。
+    cwd: String,
 }
 
 impl fmt::Debug for Process {
@@ -511,6 +515,7 @@ impl Process {
 
         Ok(Self {
             name: String::from(name),
+            cwd: String::new(),
             pid: usize::MAX,
             image: Some(image),
             retired_image: None,
@@ -595,6 +600,17 @@ impl Process {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// 作業directory（FAT32 layerのpath、rootは空文字列）。
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    /// 作業directoryを置き換える。`chdir`と`spawn`のcwd継承が呼ぶ。
+    /// 存在とdirectoryであることの検査は呼び出し側が済ませる。
+    pub fn set_cwd(&mut self, cwd: String) {
+        self.cwd = cwd;
     }
 
     /// `ProcessTable::insert`が採番したpid。未insertなら`usize::MAX`。

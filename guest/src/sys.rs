@@ -130,6 +130,16 @@ pub fn sys_rmdir(path: *const u8, path_len: usize) -> isize {
     ecall(SyscallNumber::Rmdir, path as usize, path_len, 0, 0)
 }
 
+/// `chdir`を呼ぶ。戻り値は0か負のerrno。
+pub fn sys_chdir(path: *const u8, path_len: usize) -> isize {
+    ecall(SyscallNumber::Chdir, path as usize, path_len, 0, 0)
+}
+
+/// `getcwd`を呼ぶ。作業directoryの絶対pathを`buf`へ書き、byte数を返す。
+pub fn sys_getcwd(buf: *mut u8, buf_len: usize) -> isize {
+    ecall(SyscallNumber::Getcwd, buf as usize, buf_len, 0, 0)
+}
+
 /// `getpid`を呼ぶ。戻り値は呼び出しprocessのpid。
 pub fn sys_getpid() -> isize {
     ecall(SyscallNumber::Getpid, 0, 0, 0, 0)

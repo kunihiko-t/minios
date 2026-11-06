@@ -38,6 +38,8 @@ const UNLINK_NUMBER: usize = SyscallNumber::Unlink as usize;
 const RENAME_NUMBER: usize = SyscallNumber::Rename as usize;
 const MKDIR_NUMBER: usize = SyscallNumber::Mkdir as usize;
 const RMDIR_NUMBER: usize = SyscallNumber::Rmdir as usize;
+const CHDIR_NUMBER: usize = SyscallNumber::Chdir as usize;
+const GETCWD_NUMBER: usize = SyscallNumber::Getcwd as usize;
 const LSEEK_NUMBER: usize = SyscallNumber::Lseek as usize;
 const PREAD_NUMBER: usize = SyscallNumber::Pread as usize;
 const PIPE_NUMBER: usize = SyscallNumber::Pipe as usize;
@@ -490,6 +492,21 @@ impl ControlSource for FileSource {
         self.rmdirs += 1;
         self.seen_path = Some(Vec::from(path.as_bytes()));
         self.result
+    }
+
+    fn chdir(&mut self, path: &str) -> Result<(), isize> {
+        self.seen_path = Some(Vec::from(path.as_bytes()));
+        self.result
+    }
+
+    fn getcwd(&mut self, output: &mut [u8]) -> Result<usize, isize> {
+        self.result?;
+        let cwd = b"/work/sub";
+        output
+            .get_mut(..cwd.len())
+            .ok_or(EINVAL)?
+            .copy_from_slice(cwd);
+        Ok(cwd.len())
     }
 
     fn seek_fd(&mut self, _fd: usize, offset: isize, whence: usize) -> Result<u64, isize> {

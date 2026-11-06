@@ -139,6 +139,12 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
         dispatch_kill(context, source)
     } else if number == SyscallNumber::Fcntl as usize {
         dispatch_fcntl(context, source)
+    } else if number == SyscallNumber::Chdir as usize {
+        dispatch_path_op(context, space, memory, source, |source, path| {
+            source.chdir(path)
+        })
+    } else if number == SyscallNumber::Getcwd as usize {
+        dispatch_getcwd(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Socket as usize {
         match source.socket() {
             Ok(sock) => {
@@ -801,6 +807,36 @@ fn dispatch_dup2<E, R: ControlSource>(
     };
     context.set_register(10, result.unwrap_or_else(|errno| errno as usize));
     SyscallFlow::Resume
+}
+
+/// `getcwd` (`a0=out_ptr, a1=len`)。`out`の書き込み可能性を先に確かめ、
+/// sourceが`MAX_PATH_LEN + 1`以内でscratchへ書いた絶対pathを`stat`と同じ
+/// ReadComplete経路でcopyする。`len`が`MAX_PATH_LEN + 1`を超える指定は
+/// その長さに切り詰めて扱う（絶対pathはそれより長くならない）。
+fn dispatch_getcwd<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let start = context.register(10) as u64;
+    let len = context.register(11).min(MAX_PATH_LEN + 1);
+    if len == 0 {
+        context.set_register(10, EINVAL as usize);
+        return SyscallFlow::Resume;
+    }
+    if check_user_writable_range(space, memory, start, len).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.getcwd(&mut read_scratch[..len]) {
+        Ok(written) => SyscallFlow::ReadComplete {
+            start,
+            len: written,
+        },
+        Err(errno) => errno_flow(context, errno),
+    }
 }
 
 /// `fcntl` (`a0=fd, a1=cmd, a2=flags`)。fd範囲、command、flag bitを
