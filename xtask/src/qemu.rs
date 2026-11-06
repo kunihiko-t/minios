@@ -1995,7 +1995,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 20] = [
+const USER_SHELL_SCRIPT: [&[u8]; 25] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -2009,6 +2009,12 @@ const USER_SHELL_SCRIPT: [&[u8]; 20] = [
     // 8.3へ正規化できない名前はLFNで作られ、同じ名前で読み戻せる。
     b"echo saved > notes.backup\n",
     b"cat notes.backup\n",
+    // 引用符で囲んだ語は空白や演算子を含む1語になる。
+    b"echo \"quoted words\" > \"my notes.txt\"\n",
+    b"cat 'my notes.txt'\n",
+    b"rm \"my notes.txt\"\n",
+    b"echo \"a | b\"\n",
+    b"echo \"oops\n",
     // file操作のtool。LFN名へのmoveと一覧、片付け後のrootを確かめる。
     b"mkdir work\n",
     b"mv notes.backup work/saved.notes\n",
@@ -2101,6 +2107,18 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         // cat notes.backup
         stdout(b"saved\n"),
         exit(),
+        // echo "quoted words" > "my notes.txt"
+        exit(),
+        // cat 'my notes.txt'
+        stdout(b"quoted words\n"),
+        exit(),
+        // rm "my notes.txt"
+        exit(),
+        // echo "a | b"：引用符の中の`|`はpipeではない。
+        stdout(b"a | b\n"),
+        exit(),
+        // echo "oops：閉じていない引用符は何も起動しない。
+        control_frame(FrameKind::Stderr, b"sh: unterminated quote\n"),
         // mkdir work
         exit(),
         // mv notes.backup work/saved.notes
