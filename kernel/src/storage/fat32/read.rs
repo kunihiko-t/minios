@@ -84,6 +84,8 @@ impl<R: SectorReader> Fat32<R> {
             sectors_per_cluster: geometry.sectors_per_cluster,
             root_cluster: geometry.root_cluster,
             data_cluster_count: geometry.data_cluster_count,
+            #[cfg(not(target_arch = "riscv32"))]
+            fat_cache: None,
         }
     }
 
@@ -490,6 +492,30 @@ impl<R: SectorReader> Fat32<R> {
         Ok(lba)
     }
 
+    /// 第1 FATの`lba`を`scratch`へ読む。直前に読んだsectorならcacheから
+    /// copyし、diskへは触れない。読めた場合だけcacheを置き換える。
+    fn read_fat_sector(
+        &mut self,
+        lba: u32,
+        scratch: &mut [u8; 512],
+    ) -> Result<(), FatError<R::Error>> {
+        #[cfg(not(target_arch = "riscv32"))]
+        if let Some((cached, sector)) = &self.fat_cache
+            && *cached == lba
+        {
+            scratch.copy_from_slice(sector);
+            return Ok(());
+        }
+        self.reader
+            .read_sector(lba, scratch)
+            .map_err(FatError::Read)?;
+        #[cfg(not(target_arch = "riscv32"))]
+        {
+            self.fat_cache = Some((lba, *scratch));
+        }
+        Ok(())
+    }
+
     pub(super) fn next_cluster(
         &mut self,
         cluster: u32,
@@ -513,9 +539,7 @@ impl<R: SectorReader> Fat32<R> {
         if lba >= fat_end || lba >= volume_end {
             return Err(FatError::InvalidFilesystem);
         }
-        self.reader
-            .read_sector(lba, scratch)
-            .map_err(FatError::Read)?;
+        self.read_fat_sector(lba, scratch)?;
         let value = read_u32(scratch, byte_offset) & 0x0fff_ffff;
         if value >= 0x0fff_fff8 {
             return Ok(None);
