@@ -1,6 +1,7 @@
 pub mod bundle;
 pub mod cargo;
 pub mod cli;
+pub mod console;
 pub mod disk;
 pub mod docs;
 pub mod fuzz;
@@ -576,9 +577,12 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Test(TestFilter::SmpTimer) => Some(vec![Phase::Qemu(qemu::TestKind::SmpTimer)]),
         Command::Test(TestFilter::SmpIpi) => Some(vec![Phase::Qemu(qemu::TestKind::SmpIpi)]),
         Command::Check => Some(check_phases()),
-        Command::Setup | Command::Build | Command::Run | Command::Bundle(_) | Command::Fuzz(_) => {
-            None
-        }
+        Command::Setup
+        | Command::Build
+        | Command::Run
+        | Command::Sh
+        | Command::Bundle(_)
+        | Command::Fuzz(_) => None,
     }
 }
 
@@ -592,6 +596,7 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
             cargo::build_kernel(false)?;
         }
         Command::Run => qemu::run_kernel()?,
+        Command::Sh => qemu::run_user_shell()?,
         Command::Bundle(options) => {
             let request = bundle::BundleRequest {
                 name: options.name,
