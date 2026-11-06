@@ -103,7 +103,7 @@ pub(crate) fn run_boot_payload(
             Ok(process) => {
                 let pid = table
                     .insert(process)
-                    .expect("manifest caps image count at MAX_PROCS");
+                    .expect("manifest caps image count below MAX_PROCS");
                 if pid != index {
                     fatal_payload_error(format_args!(
                         "MiniOS payload: unexpected pid {pid} for image {index}\r\n"

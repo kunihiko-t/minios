@@ -106,7 +106,7 @@ user heap、時刻と待機、fdの複製、spawnへの引数渡し、user libra
   `argc`が0なら従来どおりpathのbasenameだけを`argv[0]`にするため、既存の呼び出し側は変わりません。
 - **user library crate**（完了）：`minios_guest` libraryへ`entry!`、`println!`、`File`、`spawn`のような薄い型を加え、全sample guestを書き直しました。
   `_start`と`panic_handler`は各programから消え、不正なpointer、失効したfd、型で表せない引数を渡す検査だけが生のsyscall wrapperを使います。
-- **user mode shell**（完了）：`SH.ELF`はstdinを1行ずつ読み、`BIN/NAME.ELF`へ解決したcommandを最大3個の`|`によるpipelineと`<`、`>`によるredirectで起動します（`cargo xtask test user-shell`で検証）。
+- **user mode shell**（完了）：`SH.ELF`はstdinを1行ずつ読み、`BIN/NAME.ELF`へ解決したcommandを最大7個の`|`によるpipelineと`<`、`>`によるredirectで起動します（`cargo xtask test user-shell`で検証）。
   shellは`dup2`でfd 0と1を付け替えてから`spawn`し、consoleへ戻してから起動順に`waitpid`します。
   kernel shellは起動と診断に残し、`cargo xtask run`は引き続きkernel shellを起動します。
 

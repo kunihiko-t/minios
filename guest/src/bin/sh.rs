@@ -1,6 +1,6 @@
 //! MiniOS user shell（`SH.ELF`）。
 //!
-//! stdinを1行ずつ読み、`|`で区切った最大3個のcommandをpipelineとして
+//! stdinを1行ずつ読み、`|`で区切った最大7個のcommandをpipelineとして
 //! 起動する。最初のcommandには`< file`、最後のcommandには`> file`を付け
 //! られる。`/`を含まない名前`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を
 //! 含む語はそのままpathとして解決する。built-inは`exit [code]`だけで、
@@ -15,7 +15,7 @@
 //! read端は読み手のchildだけが持つため読み手の終了で書き手が`EPIPE`を得る。
 //! childは起動順に`waitpid`し、最後のcommandの終了codeを覚える。
 //!
-//! process tableは`MAX_PROCS`=4（shellを含む）なので、3段のpipelineで
+//! process tableは`MAX_PROCESSES`=8（shellを含む）なので、7段のpipelineで
 //! 満杯になる。spawnの失敗（`ENOENT`、満杯やframe不足の`ENOMEM`など）は
 //! stderrへ1行出して次の行へ進む。
 
@@ -23,7 +23,8 @@
 #![no_main]
 
 use minios_abi::syscall::{
-    EINVAL, ENOENT, ENOMEM, FD_TABLE_LEN, MAX_PATH_LEN, SPAWN_MAX_ARGC, STDIN, STDOUT,
+    EINVAL, ENOENT, ENOMEM, FD_TABLE_LEN, MAX_PATH_LEN, MAX_PROCESSES, SPAWN_MAX_ARGC, STDIN,
+    STDOUT,
 };
 use minios_guest::{
     Args, Errno, eprintln,
@@ -34,8 +35,10 @@ use minios_guest::{
 
 /// 1行の上限。超えた行はerrorを出して捨てる。
 const LINE_MAX: usize = 256;
-/// pipelineの段数上限。shellと合わせてkernelの`MAX_PROCS`=4に収まる。
-const MAX_STAGES: usize = 3;
+/// pipelineの段数上限。shellと合わせてkernelの`MAX_PROCESSES`に収まる。
+const MAX_STAGES: usize = MAX_PROCESSES - 1;
+// errorの文言は段数とprocess数を数字で書くため、上限が変わったら直す。
+const _: () = assert!(MAX_STAGES == 7);
 /// consoleのstdin/stdoutを退避しておくfd。tableの末尾2個を使う。
 const SAVED_STDIN: usize = FD_TABLE_LEN - 2;
 const SAVED_STDOUT: usize = FD_TABLE_LEN - 1;
@@ -107,7 +110,7 @@ fn parse(line: &[u8]) -> Result<Option<Pipeline<'_>>, &'static str> {
                     return Err("'>' is only allowed on the last command");
                 }
                 if pipeline.count == MAX_STAGES {
-                    return Err("too many commands in a pipeline (max 3)");
+                    return Err("too many commands in a pipeline (max 7)");
                 }
                 pipeline.count += 1;
             }
@@ -175,7 +178,7 @@ fn report_spawn(name: &[u8], Errno(errno): Errno) {
     let reason = match errno {
         ENOENT => "not found",
         EINVAL => "not an executable or bad arguments",
-        ENOMEM => "no free process slot (max 4 including sh) or out of memory",
+        ENOMEM => "no free process slot (max 8 including sh) or out of memory",
         _ => "cannot spawn",
     };
     eprintln!("sh: {}: {reason} (errno {errno})", text(name));

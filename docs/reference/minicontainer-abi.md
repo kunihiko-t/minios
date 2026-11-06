@@ -252,7 +252,7 @@ argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたた�
 
 `pipe`はkernelが所有する256 byteのring bufferを1本作り、read端とwrite端のfdを`out`が指す8 byteへlittle-endianの`u32`二つ（先にread端）で書き込みます。fdの割り当てより先に`out`の書き込み可能性を検査するため、失敗時にfdは残りません。pipeの両端はfile fdと同じtableのslotを使うため、`spawn`のsnapshot継承で同じpipeを指す端が子へ渡り、process間のbyteの流れ道になります。
 pipeのread端への`read`は、bufferにdataがあれば読んでbyte数を返し、空でwrite端が残っていれば呼び出しprocessを`BlockedOnPipe`へ移してecallを再実行へ回します（`read`のstdin待ちと同じ巻き戻し規約）。write端がすべて閉じていればEOFとして0を返します。write端への`write`は、read端がすべて閉じていれば`EPIPE`、bufferが満杯なら同じくblockして再実行、空きがあれば書いてbyte数を返します。片端への逆方向操作（read端への`write`、write端への`read`）は`EBADF`、pipe fdへの`lseek`/`pread`/`pwrite`は`ESPIPE`を返します。
-`fstat`はpipe fdへ`kind`=`STAT_KIND_PIPE`（2）・`size`=0を返します。processが終了または`close`で端を手放すと、そのpipeを待つprocessは全員wakeされ、再実行した`read`/`write`が新しい端数（EOFや`EPIPE`）を見ます。両端ともどのprocessのfd tableからも消えたpipeのslotは再利用されます。同時にliveなpipeは4本までで、枯渇は`ENOMEM`を返します。
+`fstat`はpipe fdへ`kind`=`STAT_KIND_PIPE`（2）・`size`=0を返します。processが終了または`close`で端を手放すと、そのpipeを待つprocessは全員wakeされ、再実行した`read`/`write`が新しい端数（EOFや`EPIPE`）を見ます。両端ともどのprocessのfd tableからも消えたpipeのslotは再利用されます。同時にliveなpipeは`MAX_PIPES`（8）本までで、枯渇は`ENOMEM`を返します。
 
 `socket`はkernelが保持するnetwork stackへUDP socketを開き、file fdとは別の名前空間で採番したsocket indexを返します。local portはephemeral範囲からsocket indexごとに固定で割り当てられ、同時にliveなsocketは4個までで、枯渇は`EMFILE`を返します。
 socket indexは呼び出したprocessに所有され、他のprocessのindexへの`sendto`/`recvfrom`は`EBADF`を返します。fdと同じくprocess終了時に所有socketは自動的に閉じられ、indexは再利用されます。
@@ -285,7 +285,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-9` | `EBADF` | fd tableの範囲外のfile descriptor、未割り当てfdへの`read`/`write`/`pread`/`pwrite`/`lseek`/`close`/`fstat`/`dup2`、範囲外の`newfd`への`dup2`、未割り当てか範囲外のfdへの`fcntl`、console入力への`write`とconsole出力への`read`、writable fdへの`read`/`pread`、read-only fdへの`write`/`pwrite`、pipeのread端への`write`とwrite端への`read`、`unlink`や`rename`の置き換えで失効したfdへの操作、未割り当てまたは他process所有のsocket indexへの`sendto`/`recvfrom` |
 | `-10` | `ECHILD` | `waitpid`の対象が自分自身・存在しない・reap済み・異常終了でstatusを持たない、`kill`の対象が存在しない |
 | `-11` | `EAGAIN` | pipeの`read`/`write`や`recvfrom`が条件未達でcallerをblockへ移したことを示すkernel内部のsignal。dispatchがecallを巻き戻して再実行するためguestへは返らない |
-| `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯や資源不足、同時にliveなpipe本数（4本）の枯渇、`sbrk`の上限超過やframe不足 |
+| `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯（`MAX_PROCESSES`=8個）や資源不足、同時にliveなpipe本数（8本）の枯渇、`sbrk`の上限超過やframe不足 |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
 | `-17` | `EEXIST` | `mkdir`の対象と同名のentryが既にある |
 | `-19` | `ENODEV` | block deviceやnetwork deviceが見つからない |

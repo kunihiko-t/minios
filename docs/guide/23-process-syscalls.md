@@ -43,7 +43,7 @@ ELFとして受理できないfileは`SpawnError::Load`として`EINVAL`、frame
 
 組み立てたprocessは[`ProcessTable::insert`](../../kernel/src/process.rs)で登録され、ここで初めてpidが決まります。
 `insert`は`next_pid`を返してから1増やすだけで、終了したpidを再利用しません。
-live processが`MAX_PROCS`（4）に達していると`insert`はprocessをそのまま返し、呼び出し側が`reclaim`でframeを回収してから`ENOMEM`を返します。
+live processが`MAX_PROCS`（8）に達していると`insert`はprocessをそのまま返し、呼び出し側が`reclaim`でframeを回収してから`ENOMEM`を返します。
 
 `getpid`は[`kernel/src/main.rs`](../../kernel/src/main.rs)の`current_pid`で、trap中のprocessのpidを返します。
 単一imageのmanifestでは最初のprocessがpid 0、そこから`spawn`したchildがpid 1になります。
@@ -122,7 +122,7 @@ run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取�
 
 ここまでのsystem callを組み合わせると、kernelを変えずにuser modeのshellを書けます。
 [`guest/src/bin/sh.rs`](../../guest/src/bin/sh.rs)は、FAT32 diskへ置く`SH.ELF`としてstdinを1行ずつ読みます。
-`|`で区切った最大3個のcommandをpipelineとして起動し、最初のcommandには`< file`、最後のcommandには`> file`を付けられます。
+`|`で区切った最大7個のcommandをpipelineとして起動し、最初のcommandには`< file`、最後のcommandには`> file`を付けられます。
 `/`を含まないcommand名`NAME`は`BIN/NAME.ELF`（大文字）へ、`/`を含む語はそのままpathとして解決します。
 built-inは`exit [code]`だけで、cwdを持たないため`cd`はありません。
 起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)です。
@@ -143,7 +143,7 @@ shellは退避したconsole、pipeの両端、redirect先のfdへclose-on-exec�
 
 全員を起動してから、shellは起動順にpidを`waitpid`し、最後のcommandの終了codeを覚えます。
 前段が後段より先に終わるとは限りませんが、終了したprocessの記録は台帳に残るため、順に待てば全員を回収できます。
-pipelineの段数はshellを含めて`MAX_PROCS`（4）に収まる3個までです。
+pipelineの段数はshellを含めて`MAX_PROCS`（8）に収まる7個までで、8個以上の行は何も起動せずに構文errorとして拒否します。
 `spawn`の失敗は、不在pathの`ENOENT`を`not found`、table満杯やframe不足の`ENOMEM`をprocess枠かmemoryの不足として標準エラーへ1行出し、次の行へ進みます。
 2段目以降で失敗した場合、前段のpipeのread端を持つのはshellだけなので、shellはそのfdを閉じてから待ちます。
 前段の書き手はbufferが満杯になっても止まらず、次の`write`で`EPIPE`を受け取ります。
