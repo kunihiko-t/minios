@@ -204,7 +204,7 @@ parentが`waitpid`でblockするため、childのstdoutとExit frameはparentの
 同じphaseは、read端を保持したまま満杯のpipeへもう1 byte書く`deadlock` guestを通常kernelで起動し、run loopが`MiniOS payload: deadlock:`を出して異常終了することも確認します。
 `user-heap`ではuser_heap guestが`SbrkAllocator`をglobal allocatorとして登録し、`sbrk(0)`の初期breakがpage境界かつ`USER_START`以上であることを確かめます。
 4,096個の`u32`を`Vec`へ積んで複数pageへまたがるheapの中身を検証し、`alloc::format!`で組んだ`heap vec len=4096 sum=25163776`を標準出力へ出します。
-`sbrk(-1)`の`EINVAL`と巨大な要求の`ENOMEM`がbreakを動かさないことも確かめてから、`heap verified`を出して終了コード42を返すことを要求します。
+heap先頭より下へ戻す`EINVAL`と巨大な要求の`ENOMEM`がbreakを動かさないこと、2 page伸ばして書いたheapを負のincrementで戻してから再び伸ばすとzeroに戻っていることも確かめてから、`heap verified`を出して終了コード42を返すことを要求します。
 diskを使わない単一processの経路なので、exact照合で検査します。
 `user-sleep`ではuser_sleep guestが`clock`を読み、`sleep(50)`の後にもう一度読んで差が50以上であることを確かめます。
 `yield`と`sleep(0)`がどちらも0を返すことも確かめてから、`sleep verified`を出して終了コード42を返すことを要求します。

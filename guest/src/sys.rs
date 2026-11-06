@@ -198,8 +198,9 @@ pub fn sys_pipe(out: *mut [u32; 2]) -> isize {
     ecall(SyscallNumber::Pipe, out as usize, 0, 0, 0)
 }
 
-/// `sbrk`を呼ぶ。heap breakを`increment` byte進め、旧breakを返す。
-/// 0は現在のbreakを返す。負のincrementは`EINVAL`、上限超過は`ENOMEM`。
+/// `sbrk`を呼ぶ。heap breakを`increment` byte動かし、旧breakを返す。
+/// 0は現在のbreakを返す。負のincrementはbreakを戻してpageを返す。heap先頭
+/// より下へ戻す要求は`EINVAL`、上限超過は`ENOMEM`。
 pub fn sys_sbrk(increment: isize) -> isize {
     ecall(SyscallNumber::Sbrk, increment as usize, 0, 0, 0)
 }

@@ -64,6 +64,21 @@ impl AddressSpaceStorage {
     fn restore_last(&mut self, owned: OwnedFrame) {
         self.frames.push(owned);
     }
+
+    /// `start`から始まる`kind`のframeを台帳から取り出す。台帳は`destroy`が
+    /// 全件を返すだけなので、途中の要素を抜いても順序の約束は崩れない。
+    fn take(&mut self, start: usize, kind: FrameKind) -> Option<OwnedFrame> {
+        let index = self
+            .frames
+            .iter()
+            .position(|owned| owned.frame.start() == start && owned.kind == kind)?;
+        Some(self.frames.swap_remove(index))
+    }
+
+    /// `take`の取り消し。`take`がcapacityを残すため失敗しない。
+    fn restore(&mut self, owned: OwnedFrame) {
+        self.frames.push(owned);
+    }
 }
 
 impl Default for AddressSpaceStorage {
@@ -416,6 +431,59 @@ impl AddressSpace {
         memory
             .write_u64(table.as_u64() as usize, vpn[0], 0)
             .map_err(VmError::Store)?;
+        Ok(true)
+    }
+
+    /// `finish`後のspaceから、台帳が所有するuser frame（`FrameKind::User`）の
+    /// leafを1page外してframeをallocatorへ返す（`sbrk`のheap縮小）。
+    /// 未写像のpageと、借用leafやstackなど台帳のuser frameでないleafには
+    /// 触れず`false`を返す。中間page tableは残し、`destroy`が回収する。
+    /// allocatorが返却を拒んだ場合はPTEと台帳を元に戻してerrorを返す。
+    /// activeなspaceでは呼び出し側が`sfence.vma`で古い翻訳を捨てる。
+    pub fn unmap_owned_user<M: FrameStore>(
+        &mut self,
+        allocator: &mut dyn FrameSource,
+        memory: &mut M,
+        page: VirtPage,
+    ) -> Result<bool, VmError<M::Error>> {
+        if allocator.allocator_id() != self.allocator_id {
+            return Err(VmError::OutOfFrames);
+        }
+        let address = page.start();
+        let physical = match self.translate(memory, address) {
+            Ok((physical, _)) => physical.as_u64() as usize,
+            Err(VmError::NotMapped) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let Some(owned) = self.storage.take(physical, FrameKind::User) else {
+            return Ok(false);
+        };
+        // `translate`が成功したので、途中のbranchはすべて有効である。
+        let vpn = address.vpn();
+        let mut table = self.root;
+        for level in [2, 1] {
+            table = read_entry(memory, table, vpn[level])?
+                .ppn()
+                .map_err(VmError::Pte)?
+                .start();
+        }
+        let leaf = match memory.read_u64(table.as_u64() as usize, vpn[0]) {
+            Ok(leaf) => leaf,
+            Err(error) => {
+                self.storage.restore(owned);
+                return Err(VmError::Store(error));
+            }
+        };
+        if let Err(error) = memory.write_u64(table.as_u64() as usize, vpn[0], 0) {
+            self.storage.restore(owned);
+            return Err(VmError::Store(error));
+        }
+        let OwnedFrame { frame, kind } = owned;
+        if let Err((_, frame)) = allocator.deallocate_recoverable(frame) {
+            let _ = memory.write_u64(table.as_u64() as usize, vpn[0], leaf);
+            self.storage.restore(OwnedFrame { frame, kind });
+            return Err(VmError::OutOfFrames);
+        }
         Ok(true)
     }
 

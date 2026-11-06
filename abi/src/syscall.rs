@@ -44,9 +44,10 @@ pub enum SyscallNumber {
     /// をLEで書き込み、8を返す。両端は`spawn`したchildへ継承され、
     /// kernel所有のbounded bufferを介してbyteをやり取りする。
     Pipe = 22,
-    /// `a0`の符号付きincrementだけ呼び出しprocessのheap breakを進め、
-    /// 旧breakを返す。0は現在のbreakを返す。負のincrementは`EINVAL`、
-    /// 上限超過やframe不足は`ENOMEM`で、どちらもbreakを動かさない。
+    /// `a0`の符号付きincrementだけ呼び出しprocessのheap breakを動かし、
+    /// 旧breakを返す。0は現在のbreakを返す。負のincrementはbreakを戻し、
+    /// 丸ごと空いたpageをunmapしてframeを返す。heap先頭より下へ戻す要求は
+    /// `EINVAL`、上限超過やframe不足は`ENOMEM`で、どちらもbreakを動かさない。
     Sbrk = 23,
     /// boot以降の経過時間をmillisecondで返す。分解能はtimer tickの10 ms。
     Clock = 24,
