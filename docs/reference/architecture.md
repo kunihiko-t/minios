@@ -111,7 +111,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
   fd tableはprocess内に閉じるため他processのfdを構造的に参照できず、`take`されたprocessとともに死ぬので、終了時の明示的なclose処理は要りません。
   `spawn` syscallはcallerのfd tableのsnapshotをchildの初期tableとして渡すため、childはparentが開いたfileを同じfd番号とその時点のoffsetで読めます（継承はcopyで、後のseekやcloseは互いに影響しません）。
   fdのentryは`FdEntry` enumで、file fdは`FileDesc`とoffsetをcopyされ、pipe端は`ProcessTable`所有の`PipeTable`内pipe idと方向だけを持つため、snapshot継承でcopy先が同じpipeを指します。pipe本体のbufferは共有される一方、fd entry自体は各processのtableへ閉じます。
-  pidは`insert`のたびに`next_pid`から単調採番され再利用されないため、終了frameが参照するpidと後続processのpidは衝突しません。tableは`Vec`なのでメモリーはlive process数に比例し、admission capはmanifest上限の`MAX_PROCS`です。
+  pidは`insert`のたびに`next_pid`から単調採番され再利用されないため、終了frameが参照するpidと後続processのpidは衝突しません。tableは`Vec`なのでメモリーはlive process数に比例し、admission capは`MAX_PROCS`（8）です。manifestのimage上限（4）より大きいため、manifestの全imageを起動した後も`spawn`の枠が残ります。
 - manifest v2のbundleは`image=`sectionごとに`elf=<offset>,<len>`で共有ELF領域内のrangeを宣言し、初回spawn列はmanifest順にpid 0から採番されます。
 - U-mode実行中のsupervisor timer割り込みは`user/trap.rs`が`TrapAction::Timer`へ分類し、trap handlerはtickを再アームしてから`Preempted`のoutcomeでkernelへ戻ります。
   切り替えはtrap内ではなく`run_boot_payload`のdispatch loopが行うため、kernel trap stackは常に「実行中process専用」の不変条件を保ちます。

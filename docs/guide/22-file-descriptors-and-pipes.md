@@ -79,7 +79,7 @@ pipe端はdir entryを指さないため、どちらの走査でも対象外で�
 pipe本体は[`kernel/src/pipe.rs`](../../kernel/src/pipe.rs)の`Pipe`で、`PIPE_CAPACITY`（256）byteのring bufferです。
 `head`が次に読む位置、`len`が有効byte数で、書き込み位置は`(head + len) % PIPE_CAPACITY`から求めます。
 `Pipe::write`は`free()`を上限に、`Pipe::read`は`len`と出力長の小さい方を上限に処理するため、どちらもpartialになり得ます。
-`PipeTable`は`MAX_PIPES`（4）個のslotを持つだけで、参照計数を持ちません。
+`PipeTable`は`MAX_PIPES`（8）個のslotを持つだけで、参照計数を持ちません。
 
 pipeの生死は、`ProcessTable::pipe_ends`が全processのfd tableを走査して数えたread端とwrite端の数から決まります。
 closeやexitでfdが消えれば走査結果も減るため、incrementとdecrementの取りこぼしが構造的に起きず、`pipe_alloc`はlive端が0になったslotを再利用できます。

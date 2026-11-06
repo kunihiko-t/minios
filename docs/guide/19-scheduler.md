@@ -34,7 +34,7 @@ host側では[`xtask/src/bundle.rs`](../../xtask/src/bundle.rs)の`render_manife
 allocatorやframe memoryへの参照は保持せず呼び出し側が都度渡すため、生存中のprocess同士がborrowを共有せず、一つのtableが複数のprocessを同時に抱えられます。
 
 `ProcessTable`は`Vec`でlive processだけを保持し、`insert`のたびに`next_pid`から単調にpidを採番します。
-同時に生存できる数`MAX_PROCS`は`IMAGE_MAX_COUNT`と同じ4であり、`new`はその分のcapacityを先に確保して以後のreallocを防ぎます。
+同時に生存できる数`MAX_PROCS`は8で、manifestが宣言できるimage数`IMAGE_MAX_COUNT`（4）より大きく、残りの枠は`spawn`が使います。`new`はその分のcapacityを先に確保して以後のreallocを防ぎます。
 `take`は`swap_remove`ではなく`remove`を使うため、終了したprocessを抜いても残りの並びは変わりません。
 
 `pick_next`は直前に選んだpid（`last_picked`）の次の位置から時計回りに走査し、最初の`Runnable`なprocessを返します。

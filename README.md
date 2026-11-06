@@ -153,10 +153,10 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 
 実装済みの機能にも、教材として小さく保つための上限があります。
 
-- 同時に動かせるprocessは4個までで、各processが開けるfileはfd 0、1、2とは別に16個までです。
-- pipeのbufferは256 byteで、満杯のときは書き込み側が待ちます。
+- 同時に動かせるprocessは8個まで（boot payloadのmanifestで起動できるのはそのうち4個まで）で、各processが開けるfileはfd 0、1、2とは別に16個までです。
+- pipeは同時に8本まで、bufferは256 byteで、満杯のときは書き込み側が待ちます。
 - UDP socketは同時に4個までで、TCPは扱いません。
-- user shellのpipelineはshellと合わせてprocess上限に収まる3個のcommandまでで、1行は256 byteまでです。
+- user shellのpipelineはshellと合わせてprocess上限に収まる7個のcommandまでで、1行は256 byteまでです。
 - guestのheapは`sbrk`で伸ばし縮みできますが、`SbrkAllocator`はbump allocatorなので、解放した領域を再利用せず、heapも縮めません。
 - FAT32へ新しく作れるfile名とdirectory名は、8.3形式へ正規化できる名前だけです。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。

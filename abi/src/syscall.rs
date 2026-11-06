@@ -95,6 +95,12 @@ pub const MAX_WRITE_LEN: usize = 4096;
 pub const MAX_READ_LEN: usize = 4096;
 pub const MAX_PATH_LEN: usize = 256;
 pub const FIRST_FILE_FD: usize = 3;
+/// 同時に生存できるprocess数の上限。manifestが宣言できるimage数
+/// （`manifest::IMAGE_MAX_COUNT`）とは別で、残りの枠を`spawn`が使う。
+/// 満杯のtableへの`spawn`は`ENOMEM`。
+pub const MAX_PROCESSES: usize = 8;
+/// 同時にliveなpipeの本数の上限。枯渇時の`pipe`は`ENOMEM`。
+pub const MAX_PIPES: usize = 8;
 pub const MAX_OPEN_FILES: usize = 16;
 /// processごとのfd tableの長さ。fd 0〜2のconsole entryと、
 /// `FIRST_FILE_FD`から始まる`MAX_OPEN_FILES`個のslotを合わせた数。

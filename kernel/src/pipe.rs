@@ -11,7 +11,8 @@
 /// 1本のpipeがkernel内に保持するbyte数の上限。
 pub const PIPE_CAPACITY: usize = 256;
 /// 同時にopenできるpipeの本数。使い回しが効くためslotは再利用される。
-pub const MAX_PIPES: usize = 4;
+/// `MAX_PROCESSES`個のprocessで組むpipeline（shellと7段）に足りる本数である。
+pub const MAX_PIPES: usize = minios_abi::syscall::MAX_PIPES;
 
 /// pipe 1本分のbounded ring buffer。`head`は次に読む位置、`len`は
 /// 有効byte数。書き込み位置は`head + len`から都度求め、wrapは
@@ -86,7 +87,7 @@ pub struct PipeTable {
 impl PipeTable {
     pub const fn new() -> Self {
         Self {
-            slots: [None, None, None, None],
+            slots: [const { None }; MAX_PIPES],
         }
     }
 

@@ -25,8 +25,11 @@ use crate::{
     vm::{AddressSpace, FrameStore, KernelMapping, PhysPageNum, VirtAddr, VmError},
 };
 
-/// 同時に生存できるprocess数。manifestが宣言できるimage数の上限と一致させる。
-pub const MAX_PROCS: usize = minios_abi::manifest::IMAGE_MAX_COUNT;
+/// 同時に生存できるprocess数。manifestの全imageを起動してもなお`spawn`の
+/// 枠が残るよう、manifestが宣言できるimage数以上でなければならない。
+pub const MAX_PROCS: usize = minios_abi::syscall::MAX_PROCESSES;
+
+const _: () = assert!(MAX_PROCS >= minios_abi::manifest::IMAGE_MAX_COUNT);
 
 /// `user.S`のtrap frame配置に合わせた、kernel stack topからcontext slotまでの
 /// byte offset。context (34語=272 byte) とheader (144 byte) の合計416 byteであり、
@@ -947,7 +950,7 @@ impl ProcessTable {
     }
 
     /// processへpidを採番してtableへ登録し、そのpidを返す。
-    /// live数が`MAX_PROCS` (manifest上限) に達しているかpid採番が
+    /// live数が`MAX_PROCS`に達しているかpid採番が
     /// overflowした場合はprocessをそのまま返す。
     ///
     /// Errがprocess全体を返すのは、callerが拒否されたprocessの所有frameを
