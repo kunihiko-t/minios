@@ -69,6 +69,7 @@ impl ControlSource for NetSource {
 
 /// `a3`も設定できるfixture。`dispatch_fixture_at`が`a0`〜`a2`と番号を
 /// 再設定するため、先に作ったcontextで`a3`を残せる。
+#[allow(clippy::too_many_arguments)]
 fn net_fixture<R: ControlSource<Error = SinkError>>(
     number: usize,
     a0: usize,

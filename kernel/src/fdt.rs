@@ -515,7 +515,7 @@ mod tests {
             structure.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
             structure.extend_from_slice(node.name.as_bytes());
             structure.push(0);
-            while structure.len() % 4 != 0 {
+            while !structure.len().is_multiple_of(4) {
                 structure.push(0);
             }
             for entry in &node.props {
@@ -524,7 +524,7 @@ mod tests {
                 let offset = string_offset(entry.name, strings, offsets);
                 structure.extend_from_slice(&offset.to_be_bytes());
                 structure.extend_from_slice(&entry.value);
-                while structure.len() % 4 != 0 {
+                while !structure.len().is_multiple_of(4) {
                     structure.push(0);
                 }
             }

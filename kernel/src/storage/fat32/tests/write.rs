@@ -29,7 +29,8 @@ fn create_file_writes_entry_and_reuses_existing() {
     assert_eq!(root[96], 0x00);
 
     let mut names = Vec::new();
-    fs.for_each_root_entry(|entry| names.push(String::from(entry.name())));
+    fs.for_each_root_entry(|entry| names.push(String::from(entry.name())))
+        .unwrap();
     assert!(names.contains(&String::from("NEW.TXT")));
 
     // 大文字で作り直してもLFNではなく同じentryを返し、subdirの

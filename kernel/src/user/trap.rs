@@ -87,7 +87,8 @@ mod tests {
         }
 
         // supervisor timerとexternal以外の割り込み (software等) はFatalのまま。
-        for cause in [1_usize] {
+        {
+            let cause = 1_usize;
             let scause = (1_usize << (usize::BITS - 1)) | cause;
             let mut context = UserContext::patterned_for_test(0x0010_0300);
             assert_eq!(

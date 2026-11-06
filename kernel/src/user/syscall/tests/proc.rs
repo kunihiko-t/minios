@@ -309,7 +309,9 @@ fn spawn_rejects_invalid_argv_before_the_source() {
     let page = spawn_page(&[(base + 1024, ARG_MAX_LEN as u64)], &[(1024, &long)]);
     assert_eq!(dispatch_spawn_page(&page, 1).0, 11);
 
-    let cases: [(&[(u64, u64)], &[(usize, &[u8])], isize); 5] = [
+    // (argv entry列, user pageへ置く文字列, 期待するerrno)。
+    type Case<'a> = (&'a [(u64, u64)], &'a [(usize, &'a [u8])], isize);
+    let cases: [Case<'_>; 5] = [
         // 長すぎる文字列。
         (
             &[(base + 1024, ARG_MAX_LEN as u64 + 1)],

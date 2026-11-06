@@ -734,7 +734,7 @@ mod tests {
     // passing the virtio_net_hdr to the sink.
     #[test]
     fn drain_rx_delivers_frames_and_reposts_buffers() {
-        let (mut device, region, rx_pages) = device_and_region();
+        let (device, region, rx_pages) = device_and_region();
         let mut net = VirtioNet::init(device, region, rx_pages).unwrap();
         let frame0 = [0x11u8; 64];
         let frame1 = [0x22u8; 128];
@@ -758,7 +758,7 @@ mod tests {
     // Catches accepting a corrupt used id instead of rejecting it.
     #[test]
     fn drain_rx_rejects_an_out_of_range_used_id() {
-        let (mut device, region, rx_pages) = device_and_region();
+        let (device, region, rx_pages) = device_and_region();
         let mut net = VirtioNet::init(device, region, rx_pages).unwrap();
         unsafe {
             let used = &mut *(net.mmio.device_addr[0] as *mut UsedRing);
