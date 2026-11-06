@@ -46,6 +46,7 @@ const GETPID_NUMBER: usize = SyscallNumber::Getpid as usize;
 const SPAWN_NUMBER: usize = SyscallNumber::Spawn as usize;
 const WAITPID_NUMBER: usize = SyscallNumber::Waitpid as usize;
 const KILL_NUMBER: usize = SyscallNumber::Kill as usize;
+const FCNTL_NUMBER: usize = SyscallNumber::Fcntl as usize;
 const STAT_NUMBER: usize = SyscallNumber::Stat as usize;
 const FSTAT_NUMBER: usize = SyscallNumber::Fstat as usize;
 const READDIR_NUMBER: usize = SyscallNumber::Readdir as usize;
@@ -328,6 +329,10 @@ struct FileSource {
     kills: usize,
     seen_kill_pid: Option<usize>,
     kill_result: Result<(), isize>,
+    /// `fcntl`が触れたfdと、`F_SETFD`で設定された印。
+    seen_fcntl_fd: Option<usize>,
+    cloexec: bool,
+    cloexec_result: Result<(), isize>,
     stats: usize,
     stat_result: Result<Stat, isize>,
     fstats: usize,
@@ -377,6 +382,9 @@ impl FileSource {
             kills: 0,
             seen_kill_pid: None,
             kill_result: Ok(()),
+            seen_fcntl_fd: None,
+            cloexec: false,
+            cloexec_result: Ok(()),
             stats: 0,
             stat_result: Ok(Stat {
                 size: 18,
@@ -527,6 +535,18 @@ impl ControlSource for FileSource {
         self.kills += 1;
         self.seen_kill_pid = Some(pid);
         self.kill_result
+    }
+
+    fn cloexec(&mut self, fd: usize) -> Result<bool, isize> {
+        self.seen_fcntl_fd = Some(fd);
+        self.cloexec_result.map(|()| self.cloexec)
+    }
+
+    fn set_cloexec(&mut self, fd: usize, on: bool) -> Result<(), isize> {
+        self.seen_fcntl_fd = Some(fd);
+        self.cloexec_result?;
+        self.cloexec = on;
+        Ok(())
     }
 
     fn stat(&mut self, path: &str) -> Result<Stat, isize> {

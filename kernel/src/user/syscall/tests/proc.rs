@@ -491,3 +491,107 @@ fn kill_without_process_context_returns_enosys() {
     assert_eq!(flow, SyscallFlow::Resume);
     assert_eq!(context.register(10), ENOSYS as usize);
 }
+
+// Catches fcntl mis-encoding the fd flag: F_SETFD(FD_CLOEXEC) must reach the
+// source as `true`, F_GETFD must report it back as FD_CLOEXEC, and clearing
+// must report 0.
+#[test]
+fn fcntl_sets_and_reads_back_the_cloexec_flag() {
+    use minios_abi::syscall::{F_GETFD, F_SETFD, FD_CLOEXEC};
+
+    let mut sink = FakeSink::default();
+    let mut source = FileSource::serving(b"");
+    let (context, flow) = dispatch_fixture(
+        FCNTL_NUMBER,
+        4,
+        F_SETFD,
+        FD_CLOEXEC,
+        &mut sink,
+        &mut source,
+        &mut scratch(),
+    );
+    assert_eq!(flow, SyscallFlow::Resume);
+    assert_eq!(context.register(10), 0);
+    assert!(source.cloexec);
+    assert_eq!(source.seen_fcntl_fd, Some(4));
+
+    let (context, _) = dispatch_fixture(
+        FCNTL_NUMBER,
+        4,
+        F_GETFD,
+        0,
+        &mut sink,
+        &mut source,
+        &mut scratch(),
+    );
+    assert_eq!(context.register(10), FD_CLOEXEC);
+
+    dispatch_fixture(
+        FCNTL_NUMBER,
+        4,
+        F_SETFD,
+        0,
+        &mut sink,
+        &mut source,
+        &mut scratch(),
+    );
+    let (context, _) = dispatch_fixture(
+        FCNTL_NUMBER,
+        4,
+        F_GETFD,
+        0,
+        &mut sink,
+        &mut source,
+        &mut scratch(),
+    );
+    assert_eq!(context.register(10), 0);
+}
+
+// Catches fcntl reaching the source with arguments it cannot honor: an
+// out-of-range fd is EBADF, and an unknown command or flag bit is EINVAL,
+// all without touching the source.
+#[test]
+fn fcntl_rejects_bad_fds_commands_and_flags_before_the_source() {
+    use minios_abi::syscall::{EBADF, EINVAL, F_SETFD};
+
+    let mut sink = FakeSink::default();
+    let mut source = FileSource::serving(b"");
+    for (fd, command, flags, errno) in [
+        (FD_TABLE_LEN, F_SETFD, 1, EBADF),
+        (3, 99, 0, EINVAL),
+        (3, F_SETFD, 2, EINVAL),
+    ] {
+        let (context, flow) = dispatch_fixture(
+            FCNTL_NUMBER,
+            fd,
+            command,
+            flags,
+            &mut sink,
+            &mut source,
+            &mut scratch(),
+        );
+        assert_eq!(flow, SyscallFlow::Resume);
+        assert_eq!(context.register(10), errno as usize);
+    }
+    assert_eq!(source.seen_fcntl_fd, None);
+}
+
+// Catches the default ControlSource leaking a success: without a process
+// context, fcntl must return ENOSYS.
+#[test]
+fn fcntl_without_process_context_returns_enosys() {
+    use minios_abi::syscall::F_GETFD;
+
+    let mut sink = FakeSink::default();
+    let mut source = FakeSource::scripted(b"stdin only");
+    let (context, _) = dispatch_fixture(
+        FCNTL_NUMBER,
+        3,
+        F_GETFD,
+        0,
+        &mut sink,
+        &mut source,
+        &mut scratch(),
+    );
+    assert_eq!(context.register(10), ENOSYS as usize);
+}

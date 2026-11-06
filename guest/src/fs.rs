@@ -49,6 +49,17 @@ impl File {
         self.fd
     }
 
+    /// close-on-execの印を設定する。印を立てたfdは`spawn`したchildへ
+    /// 継承されず、`exec`の成功時に閉じられる。
+    pub fn set_cloexec(&self, on: bool) -> Result<()> {
+        crate::process::set_cloexec(self.fd, on)
+    }
+
+    /// close-on-execの印が立っていれば`true`。
+    pub fn cloexec(&self) -> Result<bool> {
+        crate::process::cloexec(self.fd)
+    }
+
     /// 最大`buf.len()` byteを読む。0はEOF。
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         check(sys::sys_read(self.fd, buf.as_mut_ptr(), buf.len()))

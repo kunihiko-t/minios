@@ -116,6 +116,8 @@ const FILE_EXEC_DIAGNOSTIC_FRAME: &[u8] =
     b"MCF1\x06\0\0\0\x1d\0\0\0\r\nMiniOS payload: ok code=41\n";
 /// fd継承したchildが`DOCS/NOTE.TXT`のoffset 4以降13 byteを写すstdout frame。
 const FILE_FDINHERIT_CHILD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0d\0\0\0 inside docs\n";
+/// close-on-execでfd 3を継承しなかったchildの`exit(70)`。
+const FILE_FDINHERIT_CLOEXEC_CHILD_EXIT_FRAME: &[u8] = b"MCF1\x04\0\0\0\x04\0\0\0\x46\0\0\0";
 const FILE_FDINHERIT_PARENT_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x14\0\0\0fd-inherit verified\n";
 /// pipeを継承したchildがfd 3から読んだ11 byteを写すstdout frame。
 const FILE_PIPE_CHILD_STDOUT_FRAME: &[u8] = b"MCF1\x02\0\0\0\x0b\0\0\0pipe-bytes\n";
@@ -1990,12 +1992,14 @@ const FILE_EXEC_EXPECTED_FRAMES: [&[u8]; 5] = [
 /// file-fdinherit検査で期待されるcontrol frame列。parentがwaitpidで
 /// blockするため、継承fdを読んだchildのstdoutとExitはparentの
 /// `fd-inherit verified`とExitより必ず先に出る＝exact順序照合が
-/// blockingと継承の両方の直接証拠になる。
-const FILE_FDINHERIT_EXPECTED_FRAMES: [&[u8]; 7] = [
+/// blockingと継承の両方の直接証拠になる。2番目のchildはfd 3に
+/// close-on-execの印が立った状態でspawnされ、fd 3を読めずに70で終わる。
+const FILE_FDINHERIT_EXPECTED_FRAMES: [&[u8]; 8] = [
     PAYLOAD_READY_FRAME,
     FILE_FDINHERIT_SPAWNED_FRAME,
     FILE_FDINHERIT_CHILD_STDOUT_FRAME,
     PAYLOAD_EXIT_FRAME,
+    FILE_FDINHERIT_CLOEXEC_CHILD_EXIT_FRAME,
     FILE_FDINHERIT_PARENT_STDOUT_FRAME,
     PAYLOAD_EXIT_FRAME,
     PAYLOAD_DIAGNOSTIC_FRAME,

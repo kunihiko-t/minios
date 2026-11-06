@@ -195,6 +195,7 @@ pid 0を保持したまま差し替わったことの証明として終了コー
 `file-fdinherit`ではfile_fdinherit guestが`DOCS/NOTE.TXT`を`open`して`lseek`でoffset 4へ進めてから`DOCS/FDCHILD.ELF`を`spawn`します。
 disk image内のFDCHILD.ELFは継承したfd 3からoffset 4以降の13 byte（`" inside docs\n"`）を読んで標準出力へ写し、42で終了します。
 parentは`waitpid`でblockしてchildのexitを回収し、自分のfd 3のoffsetがchildのreadに影響されず4のままであること（継承はcopyのsnapshot semantics）を同じ13 byteの再読で確かめます。
+続けてparentはfd 3へclose-on-execの印を立てて同じFDCHILD.ELFをもう一度`spawn`し、fd 3を継承しなかったchildが`exit(70)`することを`waitpid`で確かめます。
 親がblockするためchildのframe列は親の`fd-inherit verified`より必ず先に出る、確定的なexact照合を要求します。
 `file-pipe`ではfile_pipe guestが`pipe`でread/write両端のfdを得て、`spawn`した`DOCS/PIPECH.ELF`へ両端を継承させ、parent→childへ11 byteを流します。
 disk image内のPIPECH.ELFは継承したfd 3から読んだbyteを標準出力へ写して42で終了します。

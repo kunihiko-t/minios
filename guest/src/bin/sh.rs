@@ -8,8 +8,11 @@
 //!
 //! 各commandは「dup2してからspawn」で起動する。kernelは`spawn`時に
 //! fd tableを複製するため、shell自身のfd 0/1をpipe端やredirect先へ
-//! 付け替えてからspawnし、退避しておいたconsoleで戻す。pipeのwrite端は
-//! 書き手のchildだけが持つため、書き手の終了で読み手がEOFを得る。
+//! 付け替えてからspawnし、退避しておいたconsoleで戻す。shellが開くfd
+//! （退避したconsole、pipeの両端、redirect先）にはclose-on-execを立てる
+//! ため、childが継承するのは`dup2`で複製したfd 0/1/2だけである。
+//! pipeのwrite端は書き手のchildだけが持つため書き手の終了で読み手がEOFを、
+//! read端は読み手のchildだけが持つため読み手の終了で書き手が`EPIPE`を得る。
 //! childは起動順に`waitpid`し、最後のcommandの終了codeを覚える。
 //!
 //! process tableは`MAX_PROCS`=4（shellを含む）なので、3段のpipelineで
@@ -26,7 +29,7 @@ use minios_guest::{
     Args, Errno, eprintln,
     fs::File,
     io, print,
-    process::{self, Pid, dup2, pipe, spawn, wait},
+    process::{self, Pid, dup2, pipe, set_cloexec, spawn, wait},
 };
 
 /// 1行の上限。超えた行はerrorを出して捨てる。
@@ -178,18 +181,17 @@ fn report_spawn(name: &[u8], Errno(errno): Errno) {
     eprintln!("sh: {}: {reason} (errno {errno})", text(name));
 }
 
-/// 読み手のいないpipeへ書くchildがbufferを埋めて止まらないよう、`fd`を
-/// EOFまで読み捨てる。後段のspawnに失敗したときに使う。
-fn drain(file: &mut File) {
-    let mut chunk = [0u8; 256];
-    while let Ok(1..) = file.read(&mut chunk) {}
+/// shell自身だけが使うfdとして、childへ継承させない。
+fn private(file: File) -> File {
+    file.set_cloexec(true).unwrap();
+    file
 }
 
 /// pipelineを起動して全childを待ち、最後のcommandの終了codeを返す。
 fn run(pipeline: &Pipeline<'_>) -> i32 {
     // redirect先はspawn前に開き、失敗したら何も起動しない。
     let mut upstream = match pipeline.input.map(File::open).transpose() {
-        Ok(file) => file,
+        Ok(file) => file.map(private),
         Err(Errno(errno)) => {
             let name = text(pipeline.input.unwrap_or_default());
             eprintln!("sh: {name}: cannot open (errno {errno})");
@@ -197,7 +199,7 @@ fn run(pipeline: &Pipeline<'_>) -> i32 {
         }
     };
     let output = match pipeline.output.map(File::create).transpose() {
-        Ok(file) => file,
+        Ok(file) => file.map(private),
         Err(Errno(errno)) => {
             let name = text(pipeline.output.unwrap_or_default());
             eprintln!("sh: {name}: cannot create (errno {errno})");
@@ -219,8 +221,8 @@ fn run(pipeline: &Pipeline<'_>) -> i32 {
         if index + 1 < pipeline.count {
             match pipe() {
                 Ok((reader, writer)) => {
-                    dup2(writer.as_raw_fd(), STDOUT).unwrap();
-                    downstream = Some(reader);
+                    dup2(private(writer).as_raw_fd(), STDOUT).unwrap();
+                    downstream = Some(private(reader));
                 }
                 Err(Errno(errno)) => {
                     dup2(SAVED_STDIN, STDIN).unwrap();
@@ -250,9 +252,9 @@ fn run(pipeline: &Pipeline<'_>) -> i32 {
             Err(errno) => {
                 report_spawn(argv[0], errno);
                 status = SPAWN_STATUS;
-                if let (Some(mut file), true) = (source, index > 0) {
-                    drain(&mut file);
-                }
+                // 前段のpipeのread端はshellだけが持つので、ここで閉じれば
+                // 前段の書き手は満杯で止まらずに`EPIPE`を受け取る。
+                drop(source);
                 break;
             }
         }
@@ -323,6 +325,8 @@ fn main(args: Args) -> i32 {
     let prompt = args.skip(1).any(|arg| arg == b"-i");
     dup2(STDIN, SAVED_STDIN).unwrap();
     dup2(STDOUT, SAVED_STDOUT).unwrap();
+    set_cloexec(SAVED_STDIN, true).unwrap();
+    set_cloexec(SAVED_STDOUT, true).unwrap();
 
     let mut line = [0u8; LINE_MAX];
     let mut len = 0;

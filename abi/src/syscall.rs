@@ -79,6 +79,12 @@ pub enum SyscallNumber {
     /// 戻り値は受信byte数。queueが空ならcallerを`BlockedOnIo`へ回し、
     /// datagram到着で同じecallがやり直される。
     RecvFrom = 31,
+    /// `a0`のfdのfd flagを読み書きする。`a1`=`F_GETFD`は現在のflag
+    /// （`FD_CLOEXEC`か0）を返し、`a1`=`F_SETFD`は`a2`のflagを設定して
+    /// 0を返す。`FD_CLOEXEC`の立ったfdは`spawn`したchildへ継承されず、
+    /// `exec`の成功時に閉じられる。fdが未割当か範囲外なら`EBADF`、
+    /// 未知のcommandや`FD_CLOEXEC`以外のflag bitは`EINVAL`。
+    Fcntl = 32,
 }
 
 pub const STDIN: usize = 0;
@@ -155,6 +161,13 @@ pub const DIRENT_LEN: usize = 4 + 4 + DIRENT_NAME_LEN;
 /// のLE列（8 byte）。`ip`はIPv4 addressをdotted-quad順の整数として持つ
 /// （`10.0.2.15`なら`0x0A00020F`）。
 pub const SOCKADDR_LEN: usize = 8;
+
+/// `fcntl`の`a1`。fd flagを読む。
+pub const F_GETFD: usize = 1;
+/// `fcntl`の`a1`。fd flagを`a2`で置き換える。
+pub const F_SETFD: usize = 2;
+/// fd flag。`spawn`で継承せず、`exec`で閉じる。
+pub const FD_CLOEXEC: usize = 1;
 
 /// `pipe`が`a0`のuser bufferへ書き込むfd pairのbyte長。
 /// `[read_fd: u32, write_fd: u32]`のLE列。
@@ -257,6 +270,11 @@ mod tests {
         assert_eq!(SyscallNumber::Yield as usize, 26);
         assert_eq!(SyscallNumber::Dup2 as usize, 27);
         assert_eq!(SyscallNumber::Kill as usize, 28);
+        assert_eq!(SyscallNumber::Socket as usize, 29);
+        assert_eq!(SyscallNumber::SendTo as usize, 30);
+        assert_eq!(SyscallNumber::RecvFrom as usize, 31);
+        assert_eq!(SyscallNumber::Fcntl as usize, 32);
+        assert_eq!((F_GETFD, F_SETFD, FD_CLOEXEC), (1, 2, 1));
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);

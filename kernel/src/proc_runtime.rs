@@ -300,6 +300,38 @@ pub(crate) unsafe fn dup2_fd(oldfd: usize, newfd: usize) -> Result<usize, isize>
     Ok(newfd)
 }
 
+/// 現在processの`fd`のclose-on-exec印を返す (`fcntl(F_GETFD)`)。
+/// process未設定なら`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn fd_cloexec(fd: usize) -> Result<bool, isize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    match unsafe { process.as_ref() } {
+        Some(process) => process.cloexec(fd),
+        None => Err(minios_abi::syscall::ENOSYS),
+    }
+}
+
+/// 現在processの`fd`のclose-on-exec印を設定する (`fcntl(F_SETFD)`)。
+/// process未設定なら`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼び、借用をtrapの外へ持ち出さないこと。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn set_fd_cloexec(fd: usize, on: bool) -> Result<(), isize> {
+    let process = unsafe { *&raw const CURRENT_PROC };
+    match unsafe { process.as_mut() } {
+        Some(process) => process.set_cloexec(fd, on),
+        None => Err(minios_abi::syscall::ENOSYS),
+    }
+}
+
 /// `pipe` syscallのfd割り当て。pipeをtableからallocし、現在processへ
 /// read/write両端を割り当てる。write端の割り当てに失敗した場合は
 /// read端をrollbackして`EMFILE`を返す。tableやprocessが未設定なら
@@ -585,7 +617,8 @@ pub(crate) unsafe fn kill_pid(target: usize) -> Result<(), isize> {
 }
 
 /// 現在processのimageを`elf`で置き替える (`exec`)。kernel stackとfd
-/// tableは引き継ぎ、成功時は旧imageをprocessの`retired_image`へ退避して
+/// tableは引き継ぎ（close-on-execのfdだけは閉じる）、成功時は旧imageを
+/// processの`retired_image`へ退避して
 /// 新imageの初期contextを返す。旧imageの解放はkernel satpへ戻った後の
 /// run loopが行う。失敗時はprocessに触れずcallerは旧imageで動き続ける。
 ///
@@ -620,7 +653,22 @@ pub(crate) unsafe fn exec_current_process(
     };
     let memory = unsafe { &mut *(USER_SYSCALL_PROBE_MEMORY as *mut IdentityFrameStore) };
     let mut frames = GlobalFrames;
-    process.exec(name, elf, &[], &mut frames, memory, plan.mappings())
+    let context = process.exec(name, elf, &[], &mut frames, memory, plan.mappings())?;
+    // 新imageへ切り替わった後でだけclose-on-execのfdを閉じる。失敗した
+    // `exec`はcallerが旧imageで動き続けるため、fdにも触れない。閉じた
+    // pipe端は`close`と同じくpeerのEOF/EPIPEを再判定させる。
+    let closed = process.close_on_exec();
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    if let Some(table) = unsafe { table.as_mut() } {
+        for id in closed
+            .iter()
+            .flatten()
+            .filter_map(minios_kernel::process::FdEntry::pipe_id)
+        {
+            table.wake_pipe_waiters(id);
+        }
+    }
+    Ok(context)
 }
 
 /// 現在processのbreakを動かす (`sbrk` syscall)。frameは`GlobalFrames`、

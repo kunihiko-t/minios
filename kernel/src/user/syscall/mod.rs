@@ -197,6 +197,20 @@ pub trait ControlSource {
         Err(ENOSYS)
     }
 
+    /// `fd`のclose-on-exec印を返す。範囲検査はdispatch済みで、未割当は
+    /// `EBADF`である。`Err`はそのまま`a0`へ返すerrnoである。default実装は
+    /// `ENOSYS`。
+    fn cloexec(&mut self, fd: usize) -> Result<bool, isize> {
+        let _ = fd;
+        Err(ENOSYS)
+    }
+
+    /// `fd`のclose-on-exec印を`on`へ設定する。規約は`cloexec`と同じである。
+    fn set_cloexec(&mut self, fd: usize, on: bool) -> Result<(), isize> {
+        let _ = (fd, on);
+        Err(ENOSYS)
+    }
+
     /// `path`のfileまたはdirectoryのmetadataを返す。`Err`はそのまま
     /// `a0`へ返すerrnoである。default実装は`ENOSYS`。
     fn stat(&mut self, path: &str) -> Result<Stat, isize> {

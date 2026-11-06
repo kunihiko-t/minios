@@ -277,6 +277,20 @@ impl ControlSource for UartControlSource<'_> {
         unsafe { crate::kill_pid(pid) }
     }
 
+    /// guestの`fcntl(F_GETFD)`を現在processのfd tableへ委譲する。
+    #[cfg(target_arch = "riscv64")]
+    fn cloexec(&mut self, fd: usize) -> Result<bool, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::fd_cloexec(fd) }
+    }
+
+    /// guestの`fcntl(F_SETFD)`を現在processのfd tableへ委譲する。
+    #[cfg(target_arch = "riscv64")]
+    fn set_cloexec(&mut self, fd: usize, on: bool) -> Result<(), isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::set_fd_cloexec(fd, on) }
+    }
+
     /// guestの`exec`をstorage sessionと現在processへ委譲する。`path`の
     /// fileをELFとして読み込み、basenameをprocess名として呼び出し
     /// processのimageを置き替える。成功時は新imageの初期contextを返し、
