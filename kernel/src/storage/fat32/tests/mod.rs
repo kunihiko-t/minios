@@ -17,11 +17,16 @@ enum ReadError {
 
 struct MemoryReader<const N: usize> {
     sectors: [(u32, [u8; 512]); N],
+    /// `read_sector`が読んだLBAの履歴。FAT cacheの検査がdisk readを数える。
+    reads: Vec<u32>,
 }
 
 impl<const N: usize> MemoryReader<N> {
     fn with_sectors(sectors: [(u32, [u8; 512]); N]) -> Self {
-        Self { sectors }
+        Self {
+            sectors,
+            reads: Vec::new(),
+        }
     }
 }
 
@@ -44,6 +49,7 @@ impl<const N: usize> SectorReader for MemoryReader<N> {
     type Error = ReadError;
 
     fn read_sector(&mut self, lba: u32, destination: &mut [u8; 512]) -> Result<(), Self::Error> {
+        self.reads.push(lba);
         for &(sector_lba, ref sector) in &self.sectors {
             if sector_lba == lba {
                 destination.copy_from_slice(sector);

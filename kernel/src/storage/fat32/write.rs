@@ -470,6 +470,15 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             byte_offset,
             (old & 0xf000_0000) | (value & 0x0fff_ffff),
         );
+        // 書き込みが途中で失敗するとdiskの内容が定まらないため、cacheは
+        // 先に捨て、全面へ書けた後でだけ新しい内容を入れる。
+        if self
+            .fat_cache
+            .as_ref()
+            .is_some_and(|(cached, _)| *cached == lba)
+        {
+            self.fat_cache = None;
+        }
         for copy in 0..self.fat_count {
             let copy_lba = copy
                 .checked_mul(self.fat_sectors)
@@ -479,6 +488,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
                 .write_sector(copy_lba, scratch)
                 .map_err(FatError::Read)?;
         }
+        self.fat_cache = Some((lba, *scratch));
         Ok(())
     }
 

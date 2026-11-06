@@ -80,6 +80,13 @@ pub struct Fat32<R> {
     sectors_per_cluster: u8,
     root_cluster: u32,
     data_cluster_count: u32,
+    /// `next_cluster`が最後に読んだ第1 FATの1 sector（LBAと内容）。
+    /// 連続したcluster chainの次entryはほぼ同じsectorにあるため、chainを
+    /// たどるたびにdiskを読み直さずに済む。FATを書く`set_fat_entry`が
+    /// 同じsectorを書いたら内容も更新し、cacheとdiskを食い違わせない。
+    /// RV32はDMEMが小さいため持たない。
+    #[cfg(not(target_arch = "riscv32"))]
+    fat_cache: Option<(u32, [u8; 512])>,
 }
 
 /// `Fat32::open_file`/`create_file`が返すfile位置の記述子。fd tableへ

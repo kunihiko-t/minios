@@ -545,3 +545,43 @@ fn unlink_deletes_an_lfn_run_spanning_a_cluster_boundary() {
     assert_eq!(second[64], 0x00);
     assert_eq!(read_u32(sector_of(&fs, 32), 4 * 4) & 0x0fff_ffff, 0);
 }
+
+// Catches the FAT sector cache serving stale entries or not caching at
+// all: walking a multi-cluster file must read its FAT sector from disk only
+// once, and a chain change written by set_fat_entry must be visible to the
+// next walk without rereading the disk.
+#[test]
+fn fat_cache_reads_each_sector_once_and_follows_fat_writes() {
+    let mut fs = mounted_writable_fixture();
+    let mut desc = fs.create_file("big.bin").unwrap();
+    let data = [0x5a_u8; 3 * 512];
+    assert_eq!(fs.write_range(&mut desc, 0, &data), Ok(data.len()));
+    let desc = fs.open_file("big.bin").unwrap();
+
+    // 3 cluster目を読むにはchainを2回たどるが、FAT sector（lba 32）を
+    // diskから読むのはcacheが空の最初の1回だけである。
+    fs.reader.reads.clear();
+    fs.fat_cache = None;
+    let mut out = [0u8; 16];
+    assert_eq!(fs.read_range(&desc, 2 * 512, &mut out), Ok(16));
+    assert_eq!(fs.reader.reads.iter().filter(|&&lba| lba == 32).count(), 1);
+    assert_eq!(out, [0x5a; 16]);
+    fs.reader.reads.clear();
+    assert_eq!(fs.read_range(&desc, 2 * 512 + 16, &mut out), Ok(16));
+    assert!(!fs.reader.reads.contains(&32));
+
+    // chainを2 clusterで打ち切ると、cacheも書いた内容へ追従する。
+    let mut scratch = [0u8; 512];
+    let second = fs
+        .next_cluster(desc.first_cluster, &mut scratch)
+        .unwrap()
+        .unwrap();
+    fs.set_fat_entry(second, 0x0fff_ffff, &mut scratch).unwrap();
+    fs.reader.reads.clear();
+    assert_eq!(fs.next_cluster(second, &mut scratch), Ok(None));
+    assert!(!fs.reader.reads.contains(&32));
+    assert_eq!(
+        read_u32(sector_of(&fs, 32), second as usize * 4) & 0x0fff_ffff,
+        0x0fff_ffff
+    );
+}
