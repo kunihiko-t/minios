@@ -96,6 +96,7 @@ file metadataの公開も完了しており、`stat`はpathで解決したfile�
 user heap、時刻と待機、fdの複製、spawnへの引数渡し、user library、user mode shellがそろい、FAT32上のprogramをpipeとredirectでつないで実行できます。
 
 - **`sbrk`**（完了）：guestは`SbrkAllocator`をglobal allocatorにして`Vec`と`String`を使えます（`cargo xtask test user-heap`で検証）。
+  負のincrementはbreakを戻し、丸ごと空いたheap pageをunmapしてframeをkernelへ返します。
 - **`clock`と`sleep`**（完了）：`clock`は`time.rs`の`uptime_millis`を返し、`sleep`は`BlockedUntil(tick)`で待機中のprocessにCPUを渡します（`cargo xtask test user-sleep`で検証）。
   `sleep`は戻り値0を書いてecallの次へ進めてからblockするため、起床後にsyscallをやり直しません。
 - **`yield`**（完了）：sched_aのbusy-waitを`yield`で置き換え、schedulerの検証がtime sliceに依存しなくなりました。

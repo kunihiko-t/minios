@@ -153,12 +153,19 @@ impl LoadedImage {
         self.heap.brk
     }
 
-    /// `sbrk`: breakを`increment` byte進め、旧breakを返す。0は現在値を
-    /// 返すだけである。新しいpageはzero済みのU+R+W（Xなし）でmapする。
+    /// `sbrk`: breakを`increment` byte動かし、旧breakを返す。0は現在値を
+    /// 返すだけである。
+    ///
+    /// 正のincrementは新しいpageをzero済みのU+R+W（Xなし）でmapする。
     /// image page数とheap page数の合計が`MAX_USER_IMAGE_PAGES`を超える、
     /// またはbreakが`USER_GUARD_BOTTOM`を越える要求は何も変えず`ENOMEM`。
     /// frame確保が途中で尽きた場合はmap済みpageを残し（address spaceが
     /// 所有しexit時に回収する）、breakは動かさず`ENOMEM`を返す。
+    ///
+    /// 負のincrementはbreakを戻し、新しいbreakより上で丸ごと空いたpageを
+    /// unmapしてframeをallocatorへ返す。heapの先頭より下へ戻す要求は何も
+    /// 変えず`EINVAL`。一度返したpageを再び伸ばすと、zero済みの新しい
+    /// frameになる。activeなspaceでは呼び出し側が`sfence.vma`する。
     pub fn sbrk<M: FrameStore>(
         &mut self,
         increment: isize,
@@ -167,17 +174,32 @@ impl LoadedImage {
     ) -> Result<u64, isize> {
         use minios_abi::syscall::{EINVAL, ENOMEM};
 
-        // ponytail: 縮小は未対応で負のincrementはEINVAL。heap pageの返却が
-        // 要る時点でunmapと台帳からの除去を追加する。
-        let Ok(increment) = u64::try_from(increment) else {
-            return Err(EINVAL);
-        };
         let old = self.heap.brk;
+        let page = PAGE_SIZE as u64;
+        if increment < 0 {
+            let new_brk = old
+                .checked_sub(increment.unsigned_abs() as u64)
+                .filter(|brk| *brk >= self.heap.start)
+                .ok_or(EINVAL)?;
+            let new_end = new_brk.next_multiple_of(page);
+            // 上から順に外すため、途中で返却に失敗してもmap済み範囲は
+            // `[start, mapped_end)`の連続のまま保たれる。
+            while self.heap.mapped_end > new_end {
+                let last = VirtPage::from_start(self.heap.mapped_end - page).map_err(|_| ENOMEM)?;
+                self.address_space
+                    .unmap_owned_user(allocator, memory, last)
+                    .map_err(|_| ENOMEM)?;
+                self.heap.mapped_end -= page;
+            }
+            self.heap.brk = new_brk;
+            return Ok(old);
+        }
+
+        let increment = increment.unsigned_abs() as u64;
         let new_brk = old
             .checked_add(increment)
             .filter(|end| *end <= USER_GUARD_BOTTOM)
             .ok_or(ENOMEM)?;
-        let page = PAGE_SIZE as u64;
         let new_end = new_brk.next_multiple_of(page);
         let heap_pages = usize::try_from((new_end - self.heap.start) / page).map_err(|_| ENOMEM)?;
         if self.heap.image_pages + heap_pages > MAX_USER_IMAGE_PAGES {
@@ -808,6 +830,124 @@ mod tests {
 
         image.destroy(&mut allocator).unwrap();
         assert_eq!(allocator.stats(), before);
+    }
+
+    // Catches sbrk shrinking leaking frames, unmapping a page still below
+    // the break, or letting the break fall under the heap start: shrinking
+    // must return every wholly freed page to the allocator, keep the page
+    // holding the new break, and remap fresh zeroed frames on regrowth.
+    #[test]
+    fn sbrk_shrinks_by_unmapping_freed_pages_and_regrows_zeroed() {
+        use minios_abi::syscall::EINVAL;
+
+        let bytes = fixture::valid_riscv64_elf();
+        let mut allocator = fixture_allocator();
+        let mut memory = TestFrameStore::default();
+        let mut image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
+        let start = image.brk();
+        let base = allocator.stats();
+        let page = isize::try_from(PAGE_SIZE).unwrap();
+
+        assert_eq!(image.sbrk(3 * page, &mut allocator, &mut memory), Ok(start));
+        let grown = allocator.stats();
+        assert!(grown.allocated >= base.allocated + 3);
+        let third = start + 2 * PAGE_SIZE as u64;
+        let (physical, _) = image
+            .address_space()
+            .translate(&memory, VirtAddr::try_new(third).unwrap())
+            .unwrap();
+        memory
+            .copy_into(physical.as_u64() as usize, 0, b"dirty")
+            .unwrap();
+
+        // breakを2.5 page分戻すと、0.5 pageが残る先頭pageだけがmapされる。
+        assert_eq!(
+            image.sbrk(-(5 * page / 2), &mut allocator, &mut memory),
+            Ok(start + 3 * PAGE_SIZE as u64)
+        );
+        assert_eq!(image.brk(), start + PAGE_SIZE as u64 / 2);
+        assert_eq!(allocator.stats().allocated, grown.allocated - 2);
+        assert!(
+            image
+                .address_space()
+                .translate(&memory, VirtAddr::try_new(start).unwrap())
+                .is_ok()
+        );
+        for gone in [start + PAGE_SIZE as u64, third] {
+            assert_eq!(
+                image
+                    .address_space()
+                    .translate(&memory, VirtAddr::try_new(gone).unwrap()),
+                Err(VmError::NotMapped)
+            );
+        }
+
+        // heap先頭より下へは戻せず、breakも動かない。
+        assert_eq!(image.sbrk(-page, &mut allocator, &mut memory), Err(EINVAL));
+        assert_eq!(image.brk(), start + PAGE_SIZE as u64 / 2);
+
+        // 再成長したpageは新しいzero済みframeである。
+        assert_eq!(
+            image.sbrk(5 * page / 2, &mut allocator, &mut memory),
+            Ok(start + PAGE_SIZE as u64 / 2)
+        );
+        assert_eq!(allocator.stats().allocated, grown.allocated);
+        assert!(
+            read_virtual(&image, &memory, third, PAGE_SIZE)
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+
+        // heap先頭まで戻せばheap pageはすべて返る。
+        assert_eq!(
+            image.sbrk(-(3 * page), &mut allocator, &mut memory),
+            Ok(start + 3 * PAGE_SIZE as u64)
+        );
+        assert_eq!(image.brk(), start);
+        assert_eq!(allocator.stats().allocated, grown.allocated - 3);
+        image.destroy(&mut allocator).unwrap();
+    }
+
+    // Catches the heap-shrink unmap reaching pages it does not own as heap:
+    // stack pages and unmapped pages must be left alone and report false,
+    // and a foreign allocator must be refused before anything changes.
+    #[test]
+    fn unmap_owned_user_skips_stack_and_unmapped_pages() {
+        use crate::vm::VirtPage;
+
+        let bytes = fixture::valid_riscv64_elf();
+        let mut allocator = fixture_allocator();
+        let mut memory = TestFrameStore::default();
+        let mut image = load_image(&bytes, &mut allocator, &mut memory).unwrap();
+        let stats = allocator.stats();
+        let owned = image.address_space().owned_frames();
+
+        let stack = VirtPage::from_start(USER_STACK_BOTTOM).unwrap();
+        let hole = VirtPage::from_start(0x0030_0000).unwrap();
+        for page in [stack, hole] {
+            assert_eq!(
+                image
+                    .address_space_mut()
+                    .unmap_owned_user(&mut allocator, &mut memory, page),
+                Ok(false)
+            );
+        }
+        let mut foreign = test_allocator::<1>(0x1000, 0x41_000);
+        assert_eq!(
+            image
+                .address_space_mut()
+                .unmap_owned_user(&mut foreign, &mut memory, stack),
+            Err(VmError::OutOfFrames)
+        );
+        assert_eq!(allocator.stats(), stats);
+        assert_eq!(image.address_space().owned_frames(), owned);
+        assert!(
+            image
+                .address_space()
+                .translate(&memory, VirtAddr::try_new(USER_STACK_BOTTOM).unwrap())
+                .is_ok()
+        );
+        image.destroy(&mut allocator).unwrap();
     }
 
     // Catches page-copy arithmetic that assumes aligned segments or uses the

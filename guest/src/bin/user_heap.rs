@@ -3,8 +3,11 @@
 //! `sbrk(0)`の初期breakがpage境界かつ`USER_START`以上であることを確かめ、
 //! `SbrkAllocator`をglobal allocatorとして`Vec<u32>`へ複数page分を積んで
 //! 中身を検証する。`alloc::format!`で組んだ`String`をstdoutへ書き、
-//! `sbrk(-1)`の`EINVAL`と巨大な要求の`ENOMEM`がbreakを動かさないことも
-//! 確かめて42で終了する。失敗時はpanicし、70で終了する。E2Eのuser-heap検査が使う。
+//! heap先頭より下へ戻す`EINVAL`と巨大な要求の`ENOMEM`がbreakを動かさない
+//! ことを確かめる。続けて2 page伸ばして書き込んでから負のincrementで戻し、
+//! 再び伸ばしたpageがzeroに戻っている（返却したframeの代わりに新しい
+//! frameがmapされた）ことも確かめて42で終了する。失敗時はpanicし、70で
+//! 終了する。E2Eのuser-heap検査が使う。
 
 #![no_std]
 #![no_main]
@@ -46,9 +49,31 @@ fn main(_args: Args) -> i32 {
     let line = format!("heap vec len={} sum={}\n", words.len(), sum);
     print!("{line}");
 
-    // 拒否された要求はbreakを動かさない。
+    // 拒否された要求はbreakを動かさない。heap先頭より1 byteでも下は`EINVAL`。
     let before = sys_sbrk(0);
-    assert!(sys_sbrk(-1) == EINVAL && sys_sbrk(isize::MAX) == ENOMEM && sys_sbrk(0) == before);
+    let below_start = -(before - start) - 1;
+    assert!(sys_sbrk(below_start) == EINVAL);
+    assert!(sys_sbrk(isize::MAX) == ENOMEM && sys_sbrk(0) == before);
+
+    // allocatorの管理外で2 page伸ばして書き、負のincrementで同じだけ戻す。
+    // 戻した範囲のpageはunmapされるため、再び伸ばすと中身はzeroである。
+    // 部分pageはbreakが残る限りmapされたままなので、先にpage境界まで進める。
+    let pad = (PAGE_SIZE - before % PAGE_SIZE) % PAGE_SIZE;
+    assert_eq!(sys_sbrk(pad), before);
+    let grow = 2 * PAGE_SIZE;
+    let base = sys_sbrk(grow);
+    assert_eq!(base, before + pad);
+    let region = base as *mut u8;
+    // Safety: `[base, base + grow)`は直前の`sbrk`がmapしたばかりのheapで、
+    // allocatorはこの範囲を払い出していない。
+    unsafe { core::ptr::write_bytes(region, 0xab, grow as usize) };
+    assert_eq!(sys_sbrk(-grow), base + grow);
+    assert_eq!(sys_sbrk(0), base);
+    assert_eq!(sys_sbrk(grow), base);
+    // Safety: 同じ範囲を再び`sbrk`でmapした直後で、allocatorは触れていない。
+    let regrown = unsafe { core::slice::from_raw_parts(region, grow as usize) };
+    assert!(regrown.iter().all(|byte| *byte == 0));
+    assert_eq!(sys_sbrk(-grow), base + grow);
 
     println!("heap verified");
     42
