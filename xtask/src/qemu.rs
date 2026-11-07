@@ -2018,8 +2018,9 @@ const USER_SHELL_SCRIPT: [&[u8]; 34] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
-    b"echo redirected > OUT.TXT\n",
-    b"cat OUT.TXT\n",
+    // 小文字だけの8.3名はLFNなしで作られ、一覧でも小文字のまま出る。
+    b"echo redirected > out.txt\n",
+    b"cat out.txt\n",
     b"wc < HELLO.TXT\n",
     b"echo a b c | cat | wc\n",
     // shellを含めprocess tableの上限8個ちょうどを使う7段と、8段の拒否。
@@ -2105,9 +2106,9 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         exit(),
         stdout(b"1 3 18\n"),
         exit(),
-        // echo redirected > OUT.TXT
+        // echo redirected > out.txt
         exit(),
-        // cat OUT.TXT
+        // cat out.txt
         stdout(b"redirected\n"),
         exit(),
         // wc < HELLO.TXT
@@ -2156,7 +2157,7 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         stdout(b"DOCS/\n"),
         stdout(b"Long File Name.txt\n"),
         stdout(b"BIN/\n"),
-        stdout(b"OUT.TXT\n"),
+        stdout(b"out.txt\n"),
         stdout(b"notes.backup\n"),
         stdout("メモ.txt\n".as_bytes()),
         exit(),
@@ -2184,12 +2185,12 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         stdout(b"/\n"),
         // rmdir work
         exit(),
-        // ls：fixtureのentryと、scriptが作ったOUT.TXTだけが残る。
+        // ls：fixtureのentryと、scriptが作ったout.txtだけが残る。
         stdout(b"HELLO.TXT\n"),
         stdout(b"DOCS/\n"),
         stdout(b"Long File Name.txt\n"),
         stdout(b"BIN/\n"),
-        stdout(b"OUT.TXT\n"),
+        stdout(b"out.txt\n"),
         exit(),
         // cd nosuchdir
         control_frame(

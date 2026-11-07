@@ -24,14 +24,17 @@ fn create_file_writes_entry_and_reuses_existing() {
 
     // 書かれたentryの名前・属性と、次slotの終端印を確認する。
     let root = sector_of(&fs, 33);
+    // 小文字だけの名前はLFNを作らず、`NTRes`の印（base 0x08・拡張子0x10）
+    // で小文字として見せる。
     assert_eq!(&root[64..75], b"NEW     TXT");
     assert_eq!(root[75], 0x20);
+    assert_eq!(root[76], 0x18);
     assert_eq!(root[96], 0x00);
 
     let mut names = Vec::new();
     fs.for_each_root_entry(|entry| names.push(String::from(entry.name())))
         .unwrap();
-    assert!(names.contains(&String::from("NEW.TXT")));
+    assert!(names.contains(&String::from("new.txt")));
 
     // 大文字で作り直してもLFNではなく同じentryを返し、subdirの
     // directory名や8.3に直せない名前は拒否する。

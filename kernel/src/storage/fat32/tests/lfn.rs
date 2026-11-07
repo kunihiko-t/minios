@@ -245,7 +245,7 @@ fn lfn_names_too_long_for_utf8_fall_back_to_the_alias() {
     // 漢字100文字はUTF-16では100 unitだが、UTF-8では300 byteになる。
     let name = "字".repeat(100);
     let mut scratch = [0u8; 512];
-    let slot = fs.reserve_long_entry(2, &name, &mut scratch).unwrap();
+    let slot = fs.reserve_long_entry(2, &name, None, &mut scratch).unwrap();
     fs.write_long_entry(&slot, &name, &mut scratch, |record| {
         record[11] = 0x20;
     })

@@ -5,6 +5,7 @@ use super::{DirEntry, Fat32, FatError};
 use crate::storage::{SectorReader, SectorWriter};
 use std::{string::String, vec::Vec};
 
+mod case;
 mod dir;
 mod lfn;
 mod read;

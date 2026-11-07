@@ -1,8 +1,10 @@
 //! 8.3へ正規化できない名前でのentry作成（VFAT long file name）。
 //!
-//! 8.3へ正規化できる名前はこれまでどおり8.3 entryだけを作る。それ以外の
-//! 名前は、同じdirectory内で重複しない8.3 alias（`BASIS~N.EXT`）を
-//! 生成し、LFN record列とalias entryをdirectory末尾の連続slotへ書く。
+//! 8.3へ正規化できる名前は8.3 entryだけを作り、baseと拡張子が小文字だけ
+//! なら`NTRes`の印で小文字として見せる。それ以外の名前（大小文字が混ざる
+//! 8.3名を含む）は、同じdirectory内で重複しない8.3 alias（大文字化した
+//! 8.3名か`BASIS~N.EXT`）を生成し、LFN record列とalias entryをdirectory
+//! 末尾の連続slotへ書く。
 //! LFN record列は名前を13文字ずつUCS-2で持ち、末尾の断片から順に並べ、
 //! 各recordがaliasのchecksumを持つ。読み出し側（`PendingLfn`）は
 //! このchecksumで列とentryの対応を確かめる。
@@ -17,7 +19,7 @@ use alloc::vec::Vec;
 
 use crate::storage::{SectorReader, SectorWriter};
 
-use super::parse::{lfn_checksum, to_short_name};
+use super::parse::{lfn_checksum, short_name_case, to_short_name};
 use super::{DirEntry, Fat32, FatError};
 
 /// LFN recordのattribute（read-only・hidden・system・volume labelの合成）。
@@ -41,18 +43,21 @@ pub(super) struct LongSlot {
 /// 新しく作るentryの名前。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NewName<'a> {
-    /// 8.3へ正規化できた名前。LFN recordは書かない。
-    Short([u8; 11]),
+    /// 8.3へ正規化できた名前と、byte 12（`NTRes`）へ置く小文字の印。
+    /// LFN recordは書かない。
+    Short([u8; 11], u8),
     /// LFNで持つ名前。aliasは`Fat32::lfn_alias`が決める。
     Long(&'a str),
 }
 
 impl<'a> NewName<'a> {
-    /// path要素`name`の作り方を決める。8.3へ正規化できればshort、
-    /// できなければLFNとして受理できるかを確かめる。
+    /// path要素`name`の作り方を決める。8.3へ正規化でき、大小文字を
+    /// `NTRes`の印で表せればshort、それ以外はLFNとして受理できるかを
+    /// 確かめる。`Readme.txt`のように大小が混ざる名前は、表示名を残す
+    /// ためにLFNで持つ。
     pub(super) fn classify<E>(name: &'a str) -> Result<Self, FatError<E>> {
-        if let Some(short) = to_short_name(name) {
-            return Ok(Self::Short(short));
+        if let (Some(short), Some(case)) = (to_short_name(name), short_name_case(name)) {
+            return Ok(Self::Short(short, case));
         }
         if is_valid_long_name(name) {
             Ok(Self::Long(name))
@@ -65,7 +70,7 @@ impl<'a> NewName<'a> {
     /// shortは正規化済み8.3名で、longは表示名のASCII大小文字無視で比べる。
     pub(super) fn matches(&self, entry: &DirEntry) -> bool {
         match self {
-            Self::Short(short) => entry.short_name == *short,
+            Self::Short(short, _) => entry.short_name == *short,
             Self::Long(name) => entry.name().eq_ignore_ascii_case(name),
         }
     }
@@ -181,35 +186,44 @@ pub(super) fn lfn_records(name: &str, checksum: u8) -> Vec<[u8; 32]> {
 
 impl<R: SectorReader + SectorWriter> Fat32<R> {
     /// `dir_cluster`内で既存entryの8.3名と衝突しない`name`のaliasを返す。
-    /// `~1`から`~99`まで埋まっていれば`NoSpace`。
+    /// 8.3へ正規化できる名前（大小が混ざる8.3名）は大文字化した8.3名を
+    /// 先に試し、続けて`~1`から`~99`を試す。全て埋まっていれば`NoSpace`。
+    /// `skip`の位置のentry（同じdirectory内でrenameするsource）は書き込みの
+    /// 前に消えるため、その8.3名は空いているものとして扱う。
     pub(super) fn lfn_alias(
         &mut self,
         dir_cluster: u32,
         name: &str,
+        skip: Option<(u32, u32)>,
         scratch: &mut [u8; 512],
     ) -> Result<[u8; 11], FatError<R::Error>> {
         let mut taken = Vec::new();
-        self.walk_dir(dir_cluster, scratch, |entry, _loc| {
-            taken.push(entry.short_name);
+        self.walk_dir(dir_cluster, scratch, |entry, loc| {
+            if skip != Some((loc.cluster, loc.index)) {
+                taken.push(entry.short_name);
+            }
             false
         })?;
-        (1..=MAX_ALIAS_TAIL)
-            .map(|tail| alias_candidate(name, tail))
+        to_short_name(name)
+            .into_iter()
+            .chain((1..=MAX_ALIAS_TAIL).map(|tail| alias_candidate(name, tail)))
             .find(|alias| !taken.contains(alias))
             .ok_or(FatError::NoSpace)
     }
 
     /// `dir_cluster`へ`name`をLFNで置くためのaliasとslotを確保する。
     /// 書き込みはまだ行わず、続く`write_long_entry`が確保したslotへ書く。
+    /// `skip`は`lfn_alias`へそのまま渡す。
     /// 間にdirectoryの既存recordを削除跡へ変えてもよいが、chainの末尾は
     /// 変えてはならない。
     pub(super) fn reserve_long_entry(
         &mut self,
         dir_cluster: u32,
         name: &str,
+        skip: Option<(u32, u32)>,
         scratch: &mut [u8; 512],
     ) -> Result<LongSlot, FatError<R::Error>> {
-        let alias = self.lfn_alias(dir_cluster, name, scratch)?;
+        let alias = self.lfn_alias(dir_cluster, name, skip, scratch)?;
         let count = name.encode_utf16().count().div_ceil(LFN_CHARS) + 1;
         let start = self.reserve_dir_tail(dir_cluster, count, scratch)?;
         Ok(LongSlot { alias, start })
@@ -217,7 +231,8 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
 
     /// `slot`へ`name`のLFN record列と、`init`で埋めたalias entryを書き、
     /// alias entryの位置`(cluster, index)`を返す。entryの名前byteは
-    /// `init`の後でaliasに置き換える。
+    /// `init`の後でaliasに置き換え、表示名はLFNが持つため`NTRes`の
+    /// 小文字の印は消す。
     pub(super) fn write_long_entry(
         &mut self,
         slot: &LongSlot,
@@ -229,6 +244,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         let mut entry = [0u8; 32];
         init(&mut entry);
         entry[..11].copy_from_slice(&slot.alias);
+        entry[12] = 0;
         records.push(entry);
         self.write_dir_records(slot.start, &records, scratch)
     }
