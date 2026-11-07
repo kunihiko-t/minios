@@ -99,6 +99,25 @@ pub enum ProcessState {
     Killed,
 }
 
+impl ProcessState {
+    /// `procinfo`がguestへ返す`PROC_STATE_*`の値。
+    pub const fn abi_code(self) -> u32 {
+        use minios_abi::syscall::{
+            PROC_STATE_IO, PROC_STATE_KILLED, PROC_STATE_PIPE, PROC_STATE_RUNNABLE,
+            PROC_STATE_SLEEPING, PROC_STATE_STDIN, PROC_STATE_WAITING,
+        };
+        match self {
+            Self::Runnable => PROC_STATE_RUNNABLE,
+            Self::BlockedOnStdin => PROC_STATE_STDIN,
+            Self::BlockedOnPid(_) => PROC_STATE_WAITING,
+            Self::BlockedOnPipe(_) => PROC_STATE_PIPE,
+            Self::BlockedOnIo => PROC_STATE_IO,
+            Self::BlockedUntil(_) => PROC_STATE_SLEEPING,
+            Self::Killed => PROC_STATE_KILLED,
+        }
+    }
+}
+
 /// `open`/`create`がprocessへ割り当てたfile descriptor 1個。
 /// `desc`はFAT32の位置記述子、`offset`は次に読み書きするbyte位置、
 /// `writable`は`create`由来のfdを示す。fdはread専用またはwrite専用で、
@@ -989,6 +1008,14 @@ impl ProcessTable {
 
     pub fn get(&self, pid: usize) -> Option<&Process> {
         self.procs.iter().find(|process| process.pid == pid)
+    }
+
+    /// `index`番目のprocessの`(pid, state, name)`。tableはpidの小さい順に
+    /// 並ぶ（採番は単調増加で、回収は`remove`で順を保つ）。`procinfo`が使う。
+    pub fn summary_at(&self, index: usize) -> Option<(usize, ProcessState, &str)> {
+        self.procs
+            .get(index)
+            .map(|process| (process.pid, process.state, process.name()))
     }
 
     pub fn get_mut(&mut self, pid: usize) -> Option<&mut Process> {
@@ -1977,6 +2004,48 @@ mod tests {
         table.wake_sleepers(100);
         assert_eq!(table.killed_pids().count(), 2);
         assert_eq!(table.pick_next(), Some(0));
+    }
+
+    // Catches `ps` listing processes out of pid order, skipping a slot or
+    // reporting a stale state: summaries must follow the table in pid order,
+    // carry each process's current state as its ABI code, and end after the
+    // last live process — also after an earlier process was taken.
+    #[test]
+    fn summaries_list_live_processes_in_pid_order_with_abi_states() {
+        use minios_abi::syscall::{PROC_STATE_KILLED, PROC_STATE_RUNNABLE, PROC_STATE_WAITING};
+
+        let mut fixture = SpawnFixture::new();
+        let mut table = ProcessTable::new();
+        for name in ["sh", "sleep", "ps"] {
+            table.insert(fixture.spawn(name)).expect("insert process");
+        }
+        table.get_mut(0).unwrap().block_on_pid(2);
+        table.mark_killed(0, 1).expect("kill sleep");
+        let listed = |table: &ProcessTable| {
+            (0..)
+                .map_while(|index| table.summary_at(index))
+                .map(|(pid, state, name)| (pid, state.abi_code(), String::from(name)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            listed(&table),
+            [
+                (0, PROC_STATE_WAITING, String::from("sh")),
+                (1, PROC_STATE_KILLED, String::from("sleep")),
+                (2, PROC_STATE_RUNNABLE, String::from("ps")),
+            ]
+        );
+        let mut taken = table.take(1).expect("take sleep");
+        taken
+            .reclaim(&mut fixture.frames)
+            .unwrap_or_else(|error| panic!("reclaim must succeed: {error:?}"));
+        assert_eq!(
+            listed(&table)
+                .into_iter()
+                .map(|(pid, _, _)| pid)
+                .collect::<Vec<_>>(),
+            [0, 2]
+        );
     }
 
     // Catches a killed waiter being resurrected by peer exit or pipe events:

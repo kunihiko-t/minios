@@ -106,6 +106,7 @@ trap窓の内側で`Vec::remove`すれば要素がずれて、dispatch中のproc
 回収は`exit`やfatal trapと同じ経路を通るため、終了code`EXIT_CODE_KILLED`（75、`'K'`）の台帳記録、`ProcExit` frame、`wake_on_exit`での`BlockedOnPid`とpipe waiterの起床、pageとfdの解放がすべて既存どおりに働きます。
 `Killed`は`is_runnable`を満たさないためpick対象外であり、stdin・pid・pipe・timer待ちのprocessでも回収できます。
 `cargo xtask test proc-kill`は、stdin待ちで止まった二つのvictimへのkill、waitpidでのcode75の回収と`ECHILD`、errno契約（self`EINVAL`・不在`ECHILD`・再kill`Ok`）をQEMUで確認します。
+killerはkillの前に`procinfo`でprocess tableを読み、waiterが`waitpid`、victim二つがstdin待ち、自分が実行中としてpid順に並ぶことも確かめます。
 
 ### exec
 
@@ -124,7 +125,7 @@ run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取�
 [`guest/src/bin/sh.rs`](../../guest/src/bin/sh.rs)は、FAT32 diskへ置く`SH.ELF`としてstdinを1行ずつ読みます。
 `|`で区切った最大7個のcommandをpipelineとして起動し、最初のcommandには`< file`、最後のcommandには`> file`を付けられます。
 `/`を含まないcommand名`NAME`は`/BIN/NAME.ELF`（大文字）へ、`/`を含む語はそのままpathとして解決します。
-built-inは`exit [code]`、`cd [dir]`、`pwd`、`true`、`false`、`wait`の6つです。
+built-inは`exit [code]`、`cd [dir]`、`pwd`、`true`、`false`、`wait [pid...]`、`kill pid...`の7つです。
 1行には`;`、`&&`、`||`でpipelineを並べられます。
 `;`は前の結果に関係なく、`&&`は直前の終了statusが0のときだけ、`||`は0以外のときだけ次のpipelineを実行し、3つは同じ優先度で左から順に評価します（`false && echo no || echo yes`は`yes`を出します）。
 `split_list`が引用符の外の区切りで行を分け、`check_list`が全部を構文検査してから実行するため、構文errorのある行は1つも起動しません。
@@ -132,6 +133,11 @@ built-inは`exit [code]`、`cd [dir]`、`pwd`、`true`、`false`、`wait`の6つ
 
 末尾か区切りの位置の`&`は、そのpipelineをbackgroundで起動して待たずに次へ進みます（`sleep 1 & echo now`）。
 shellは起動したpidを`Jobs`へ記録し、built-inの`wait`が起動順にまとめて`waitpid`します。
+引用符で囲まない語`$!`は最後にbackgroundで起動したpidへ置き換わり、`wait $!`はそのprocessだけを待って終了codeを`$?`に残します。
+built-inの`kill`は`kill` syscallで終了を要求するため、`sleep 5 & kill $!; wait $!; echo $?`は`EXIT_CODE_KILLED`の`75`を出します。
+`kill`をshellのbuilt-inにしているのは、別processのtoolにすると、killされたprocessの回収とtoolの終了のどちらが先にframeへ並ぶかがscheduleで変わるためです。
+`ps`は`procinfo`でprocess tableを読み、pid・状態・名前を1行ずつ出します。
+状態は読んだ瞬間のものなので、`ps`がshellより先に走れば、shellはまだ`waitpid`へ入っておらず`run`と表示されます。
 `-i`の対話shellは、起動したpipelineの最後のpidを`[pid]`としてstderrへ出します。
 backgroundのcommandがconsoleを読むと、shellと次の行を取り合ってしまいます。
 そこで`< file`の無いbackground pipelineには、write端を閉じたpipeのread端をstdinとして渡し、読めばすぐEOFになるようにします（Unixのshellが`/dev/null`を渡すのと同じ目的です）。
@@ -142,7 +148,7 @@ pathを受けるsyscallは[`kernel/src/path.rs`](../../kernel/src/path.rs)の`re
 `spawn`したchildは呼び出し側の作業directoryを引き継ぐため、`cd work`の後の`ls`や`cat a.txt`は`work`の中で動きます。
 shellはcommandを`/BIN/NAME.ELF`という絶対pathへ解決するので、作業directoryを変えてもtoolは見つかります。
 `cd`と`pwd`は1段のcommandでredirectがない場合だけbuilt-inとして扱います。
-起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)と、file操作の[`ls.rs`](../../guest/src/bin/ls.rs)、[`mkdir.rs`](../../guest/src/bin/mkdir.rs)、[`rmdir.rs`](../../guest/src/bin/rmdir.rs)、[`rm.rs`](../../guest/src/bin/rm.rs)、[`mv.rs`](../../guest/src/bin/mv.rs)、実時刻を出す[`date.rs`](../../guest/src/bin/date.rs)、指定した秒数だけ待つ[`sleep.rs`](../../guest/src/bin/sleep.rs)です。
+起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)と、file操作の[`ls.rs`](../../guest/src/bin/ls.rs)、[`mkdir.rs`](../../guest/src/bin/mkdir.rs)、[`rmdir.rs`](../../guest/src/bin/rmdir.rs)、[`rm.rs`](../../guest/src/bin/rm.rs)、[`mv.rs`](../../guest/src/bin/mv.rs)、実時刻を出す[`date.rs`](../../guest/src/bin/date.rs)、指定した秒数だけ待つ[`sleep.rs`](../../guest/src/bin/sleep.rs)、process一覧を出す[`ps.rs`](../../guest/src/bin/ps.rs)です。
 file操作のtoolはそれぞれ`readdir`、`mkdir`、`rmdir`、`unlink`、`rename`を1回ずつ呼ぶだけの薄いprogramで、`ls`はdirectoryの名前に`/`を付けます。
 `ls -l`は`DirEnt`の`size`と`mtime`から`- 18 1980-01-01 00:00 HELLO.TXT`の形の行を作り、fileを指す引数には`stat`の値を使います。
 `"…"`か`'…'`で囲んだ語は、中の空白や`|`、`<`、`>`を文字として含む1語になるため、LFNの`"my notes.txt"`のような名前もtoolへ渡せます。
@@ -303,10 +309,11 @@ wait
 cat &
 wait
 cd / &
+sleep 5 & kill $!; wait $!; echo $?
 nosuch
 ```
 
-標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`ls -l`の3行、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、日本語の名前で作った`メモ.txt`を含むrootの一覧と`こんにちは`、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧、`rm`の終了statusを出す`echo $?`の`1`、`yes`、`a`、`b`、`a;b && c $?`、backgroundの`sleep`より先に終わる`now`が届きます。
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`ls -l`の3行、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、日本語の名前で作った`メモ.txt`を含むrootの一覧と`こんにちは`、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧、`rm`の終了statusを出す`echo $?`の`1`、`yes`、`a`、`b`、`a;b && c $?`、backgroundの`sleep`より先に終わる`now`、killした`sleep`の終了code`75`が届きます。
 標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、閉じていない引用符への`sh: unterminated quote`、存在しないdirectoryへの`sh: cd: nosuchdir: cannot change directory (errno -2)`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`cd / &`への`sh: cd: built-in commands cannot run in the background`、`sh: nosuch: not found (errno -2)`が届きます。
 pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
 このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。

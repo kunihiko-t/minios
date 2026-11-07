@@ -11,8 +11,9 @@ use minios_abi::{
     manifest::ARG_MAX_LEN,
     syscall::{
         DIRENT_LEN, EAGAIN, EBADF, EFAULT, EINVAL, ENOMEM, ENOSYS, ESPIPE, F_GETFD, F_SETFD,
-        FD_CLOEXEC, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, SOCKADDR_LEN,
-        SPAWN_ARG_LEN, SPAWN_MAX_ARGC, STAT_KIND_CONSOLE, STAT_LEN, Stat, SyscallNumber,
+        FD_CLOEXEC, MAX_PATH_LEN, MAX_READ_LEN, MAX_WRITE_LEN, PIPE_OUT_LEN, PROCINFO_LEN,
+        SOCKADDR_LEN, SPAWN_ARG_LEN, SPAWN_MAX_ARGC, STAT_KIND_CONSOLE, STAT_LEN, Stat,
+        SyscallNumber,
     },
 };
 
@@ -119,6 +120,8 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
     } else if number == SyscallNumber::Realtime as usize {
         context.set_register(10, source.realtime() as usize);
         SyscallFlow::Resume
+    } else if number == SyscallNumber::Procinfo as usize {
+        dispatch_procinfo(context, space, memory, source, read_scratch)
     } else if number == SyscallNumber::Sleep as usize {
         // `sleep(0)`はmarkせずyieldと同じ経路へ流す。
         let millis = context.register(10);
@@ -629,6 +632,37 @@ fn dispatch_readdir<M: FrameStore, E, R: ControlSource>(
             SyscallFlow::ReadComplete {
                 start,
                 len: DIRENT_LEN,
+            }
+        }
+        Ok(None) => {
+            context.set_register(10, 0);
+            SyscallFlow::Resume
+        }
+        Err(errno) => errno_flow(context, errno),
+    }
+}
+
+/// `procinfo`。out bufferの`EFAULT`をsourceへ触れる前に確定し、成功時は
+/// `readdir`と同じく`ReadComplete`でscratchからuser memoryへcopyする。
+fn dispatch_procinfo<M: FrameStore, E, R: ControlSource>(
+    context: &mut UserContext,
+    space: &AddressSpace,
+    memory: &M,
+    source: &mut R,
+    read_scratch: &mut [u8; MAX_READ_LEN],
+) -> SyscallFlow<E, R::Error> {
+    let index = context.register(10);
+    let start = context.register(11) as u64;
+    if check_user_writable_range(space, memory, start, PROCINFO_LEN).is_err() {
+        context.set_register(10, EFAULT as usize);
+        return SyscallFlow::Resume;
+    }
+    match source.procinfo(index) {
+        Ok(Some(info)) => {
+            read_scratch[..PROCINFO_LEN].copy_from_slice(&info.to_le_bytes());
+            SyscallFlow::ReadComplete {
+                start,
+                len: PROCINFO_LEN,
             }
         }
         Ok(None) => {

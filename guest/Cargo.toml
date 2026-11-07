@@ -264,6 +264,13 @@ bench = false
 doctest = false
 
 [[bin]]
+name = "minios-guest-ps"
+path = "src/bin/ps.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
 name = "minios-guest-proc-fault"
 path = "src/bin/proc_fault.rs"
 test = false

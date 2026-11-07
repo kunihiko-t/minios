@@ -2022,7 +2022,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 44] = [
+const USER_SHELL_SCRIPT: [&[u8]; 45] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -2079,6 +2079,9 @@ const USER_SHELL_SCRIPT: [&[u8]; 44] = [
     b"cat &\n",
     b"wait\n",
     b"cd / &\n",
+    // built-inの`kill`が`$!`（直前にbackgroundで起動したpid）へ終了を要求し、
+    // `wait $!`がその終了code 75（`EXIT_CODE_KILLED`）を`$?`へ残す。
+    b"sleep 5 & kill $!; wait $!; echo $?\n",
     b"nosuch\n",
 ];
 
@@ -2259,6 +2262,10 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
             FrameKind::Stderr,
             b"sh: cd: built-in commands cannot run in the background\n",
         ),
+        // sleep 5 & kill $!; wait $!; echo $?
+        control_frame(FrameKind::Exit, &75u32.to_le_bytes()),
+        stdout(b"75\n"),
+        exit(),
         // nosuch
         control_frame(FrameKind::Stderr, b"sh: nosuch: not found (errno -2)\n"),
         // EOFでshell自身が0で終了する。

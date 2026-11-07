@@ -1,6 +1,8 @@
 //! processの起動、待機、終了と、時刻、pipe、fdの複製とclose-on-exec。
 
-use minios_abi::syscall::{EINVAL, F_GETFD, F_SETFD, FD_CLOEXEC, PIPE_OUT_LEN, SPAWN_MAX_ARGC};
+use minios_abi::syscall::{
+    EINVAL, EIO, F_GETFD, F_SETFD, FD_CLOEXEC, PIPE_OUT_LEN, PROCINFO_LEN, ProcInfo, SPAWN_MAX_ARGC,
+};
 
 use crate::{Errno, Result, check, fs::File, sys};
 
@@ -53,6 +55,42 @@ pub fn getpid() -> Pid {
 /// `code`で終了する。戻らない。
 pub fn exit(code: i32) -> ! {
     sys::sys_exit(code as u32)
+}
+
+/// process tableのprocessをpidの小さい順に返す。1件ごとに`procinfo`を
+/// 1回呼ぶため、一覧の途中で増減したprocessは反映されたりされなかったりする。
+pub fn processes() -> Processes {
+    Processes {
+        index: 0,
+        done: false,
+    }
+}
+
+/// `processes`が返すiterator。末尾かerrnoで終わる。
+pub struct Processes {
+    index: usize,
+    done: bool,
+}
+
+impl Iterator for Processes {
+    type Item = Result<ProcInfo>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let mut out = [0u8; PROCINFO_LEN];
+        let returned = sys::sys_procinfo(self.index, out.as_mut_ptr());
+        self.index += 1;
+        let item = match check(returned) {
+            Ok(0) => None,
+            Ok(PROCINFO_LEN) => return Some(Ok(ProcInfo::from_le_bytes(out))),
+            Ok(_) => Some(Err(Errno(EIO))),
+            Err(errno) => Some(Err(errno)),
+        };
+        self.done = true;
+        item
+    }
 }
 
 /// `millis`以上待つ。0はyieldと同じ。

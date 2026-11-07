@@ -282,6 +282,13 @@ impl ControlSource for UartControlSource<'_> {
         unsafe { crate::kill_pid(pid) }
     }
 
+    /// guestの`procinfo`をprocess tableへ委譲する。
+    #[cfg(target_arch = "riscv64")]
+    fn procinfo(&mut self, index: usize) -> Result<Option<minios_abi::syscall::ProcInfo>, isize> {
+        // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+        unsafe { crate::proc_info(index) }
+    }
+
     /// guestの`fcntl(F_GETFD)`を現在processのfd tableへ委譲する。
     #[cfg(target_arch = "riscv64")]
     fn cloexec(&mut self, fd: usize) -> Result<bool, isize> {
