@@ -97,6 +97,7 @@ partitionを持たないsuperfloppyで、`VOLUME_SECTORS`は70,000、1 cluster 1
 data cluster数がFAT32の下限65,525以上になることは`VOLUME_SECTORS`の選び方で保証し、host testで確かめます。
 rootには`HELLO.TXT`、`DOCS` directory、LFN付きの`Long File Name.txt`を置き、`DOCS`にはshellやspawn検査用のfileを置きます。
 fileへは非0 byteを含むsectorだけをseekして書き、末尾を`set_len`で宣言するsparse fileにします。
+boot sectorは拡張BPB（volume labelは規定の`NO NAME`）を持ち、BPBが宣言したsector 6へbackupを置きます。rootの子directoryの`..`はFAT32の規約どおりcluster 0を指すため、imageはhostの`fsck.fat`でも検査できます。
 
 [`qemu_command_with_disk`](../../xtask/src/qemu.rs)は、imageを`-drive file=...,format=raw,if=none,id=blk0`として登録し、`virtio-blk-device,drive=blk0,bus=virtio-mmio-bus.0`で最初のslotへ接続します。
 `-global virtio-mmio.force-legacy=false`を付けるため、QEMUはlegacyの`Version`1ではなくmodernの2を報告します。
