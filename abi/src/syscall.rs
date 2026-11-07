@@ -93,6 +93,10 @@ pub enum SyscallNumber {
     /// 作業directoryを`/`始まりの絶対pathとして`a0`の`a1` byteへ書き、
     /// 書いたbyte数を返す（NUL終端しない）。bufferが短ければ`EINVAL`。
     Getcwd = 34,
+    /// Unix epoch（1970-01-01 00:00:00 UTC）からの経過時間をmillisecondで
+    /// 返す。kernelは起動時にRTCを1回だけ読み、以後は`time` CSRで進める。
+    /// RTCを持たないmachineでは`ENODEV`。
+    Realtime = 35,
 }
 
 pub const STDIN: usize = 0;
@@ -290,6 +294,7 @@ mod tests {
         assert_eq!(SyscallNumber::Fcntl as usize, 32);
         assert_eq!(SyscallNumber::Chdir as usize, 33);
         assert_eq!(SyscallNumber::Getcwd as usize, 34);
+        assert_eq!(SyscallNumber::Realtime as usize, 35);
         assert_eq!((F_GETFD, F_SETFD, FD_CLOEXEC), (1, 2, 1));
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);

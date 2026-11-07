@@ -672,6 +672,14 @@ pub extern "C" fn kernel_main(hart_id: usize, dtb: usize) -> ! {
     {
         panic!("MiniOS fdt: machine RAM does not contain the kernel image");
     }
+    // RTCはpaging有効化前のbare mode（VA==PA）で1回だけ読み、その瞬間の
+    // `time` CSRと組にして実時刻の起点にする。RTCのMMIO pageはmapしない。
+    if machine.rtc_base != 0 {
+        // Safety: `rtc_base`はFDTが報告したGoldfish RTCのMMIO baseで、
+        // satpはまだbare modeなので物理addressのまま読める。
+        let unix_nanos = unsafe { drivers::goldfish_rtc::read_unix_nanos(machine.rtc_base) };
+        time::set_realtime_origin(unix_nanos, arch::riscv64::csr::read_time());
+    }
     // ターゲット固有のコンソール初期化。QEMUでは何もしない。
     console::init();
     arch::riscv64::trap::init();

@@ -187,6 +187,7 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 31 | `recvfrom` | `a0=sock`、`a1=buffer pointer`、`a2=length`、`a3=sockaddr pointer` | 受信queueから1 datagramを`a1`へ最大`a2` byte取り、`a3`へ送信元`SockAddr`を8 byteで書き戻す。戻り値は受信byte数。queueが空なら`waitpid`と同じ巻き戻し規約でcallerをblockし、datagram到着で同じecallが再実行される。負のerrnoは`EBADF`/`EINVAL`/`EFAULT`/`ENODEV`/`EIO` |
 | 33 | `chdir` | `a0=path pointer`、`a1=path length` | `path`のdirectoryを呼び出しprocessの作業directoryにして0を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
 | 34 | `getcwd` | `a0=buffer pointer`、`a1=buffer length` | 作業directoryを`/`始まりの絶対pathとして`a0`へ書き、書いたbyte数を返す（NUL終端しない）。bufferが短いか長さ0なら`EINVAL`、書けなければ`EFAULT` |
+| 35 | `realtime` | なし | Unix epoch（1970-01-01 00:00:00 UTC）からの経過時間をmillisecondで返す。起動時にRTCを1回読み、以後は`time` CSRで進める。RTCを持たないmachineでは`ENODEV` |
 | 32 | `fcntl` | `a0=fd`、`a1=command`、`a2=flags` | fdのfd flagを読み書きする。`a1`=`F_GETFD`（1）は現在のflag（`FD_CLOEXEC`（1）か0）を返し、`a1`=`F_SETFD`（2）は`a2`のflagを設定して0を返す。負のerrnoは`EBADF`（未割当か範囲外のfd）/`EINVAL`（未知のcommandか`FD_CLOEXEC`以外のflag bit） |
 
 `write`は、対象範囲がユーザー空間の読み取り可能ページにすべて含まれることを要求します。
@@ -278,6 +279,12 @@ breakはimageに属するため、`exec`は新imageの初期breakから始まり
 `sleep`はmillisecondをtick数へ切り上げ、途中まで経過した現在のtickの分として1 tickを足した起床tickまで呼び出しprocessを`BlockedUntil`へ移します。
 そのため`sleep`の前後に読んだ`clock`の差は、必ず指定値以上になります。
 `sleep`は戻り値0を書いてecallの次へ進めてからblockするため、`read`や`waitpid`と違ってecallは再実行されず、stdinの到着でも早く起きません。
+
+`realtime`は実時刻をUnix epochからのmillisecondで返します。
+kernelは起動時、pagingを有効にする前のbare modeで、Device Treeが報告するGoldfish RTC（`google,goldfish-rtc`）を1回だけ読み、その瞬間の`time` CSRと組にして起点にします。
+以後は`time` CSRの経過cycleをtimebaseで換算して起点へ足すため、値は`clock`の10 msより細かく進み、RTCのMMIO pageはmapしません。
+RTCを持たないmachineでは`ENODEV`です。
+QEMUのRTCは既定でhostの現在時刻から始まり、`-rtc base=2001-02-03T04:05:06`のように起点を指定できます。
 `yield`と`sleep(0)`はprocessをblockせず、timer割り込みと同じ経路で次のprocessを選ばせます。
 runnableなprocessがほかになければ、呼び出し側がすぐに再び選ばれます。
 負のABI error値は次のとおりです。
@@ -292,7 +299,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-12` | `ENOMEM` | kernelがstorage用のframeを確保できない、`spawn`のprocess table満杯（`MAX_PROCESSES`=8個）や資源不足、同時にliveなpipe本数（8本）の枯渇、`sbrk`の上限超過やframe不足 |
 | `-14` | `EFAULT` | 不正なpointerまたは権限不足の範囲 |
 | `-17` | `EEXIST` | `mkdir`の対象と同名のentryが既にある |
-| `-19` | `ENODEV` | block deviceやnetwork deviceが見つからない |
+| `-19` | `ENODEV` | block deviceやnetwork deviceが見つからない、RTCを持たないmachineでの`realtime` |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
 | `-22` | `EINVAL` | `fcntl`の未知のcommandや`FD_CLOEXEC`以外のflag bit、4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、FATが禁じる文字・制御文字・BMP外の文字を含む作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、heap先頭より下へ戻す`sbrk`、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |

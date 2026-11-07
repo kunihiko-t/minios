@@ -54,8 +54,9 @@ pub const GUEST_MKDIR: &str = "minios-guest-mkdir";
 pub const GUEST_RMDIR: &str = "minios-guest-rmdir";
 pub const GUEST_RM: &str = "minios-guest-rm";
 pub const GUEST_MV: &str = "minios-guest-mv";
+pub const GUEST_DATE: &str = "minios-guest-date";
 /// user shellの`BIN/`へ置くtool。`(disk上のpath, guest bin名)`。
-pub const SHELL_TOOLS: [(&str, &str); 8] = [
+pub const SHELL_TOOLS: [(&str, &str); 9] = [
     ("BIN/CAT.ELF", GUEST_CAT),
     ("BIN/WC.ELF", GUEST_WC),
     ("BIN/ECHO.ELF", GUEST_ECHO),
@@ -64,6 +65,7 @@ pub const SHELL_TOOLS: [(&str, &str); 8] = [
     ("BIN/RMDIR.ELF", GUEST_RMDIR),
     ("BIN/RM.ELF", GUEST_RM),
     ("BIN/MV.ELF", GUEST_MV),
+    ("BIN/DATE.ELF", GUEST_DATE),
 ];
 /// scheduler検証のCPU-bound側bin名。
 pub const GUEST_SCHED_A: &str = "minios-guest-sched-a";

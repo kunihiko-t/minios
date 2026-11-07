@@ -94,6 +94,12 @@ dispatch loopのS-modeは`sstatus.SIE`を落としているため、全process�
 そこでidle待ちはstdinと並べて`sip.STIP`をpollし、立っていれば`handle_interrupt`でtickを進めて次のtimerを再アームします。
 この方法なら、process一つだけがsleepしている場合も期限に起こせます。
 
+`clock`が数えるのは起動からの時間で、日付は分かりません。
+実時刻は`realtime`（syscall 35）が返し、kernelは起動時にGoldfish RTCを1回だけ読んで`time::set_realtime_origin`へ渡します。
+`time::realtime_millis_at`は、RTCを読んだ瞬間の`time` CSRからの経過cycleをtimebaseで換算して起点へ足します。
+RTCのregisterを毎回読むには、そのMMIO pageをkernelと全processのaddress spaceへmapし続ける必要があるため、この実装は起動後のRTCを読みません。
+user shellの`date`はこの値を`minios_guest::time::DateTime`でUTCの暦へ直して表示します。
+
 ### 再開可能なStdin decoder
 
 [`kernel/src/user/stdin.rs`](../../kernel/src/user/stdin.rs)の`StdinStaging`は、Stdin frameのheader蓄積とpayload蓄積を`header_len`、`want`、`have`で表すstate machineであり、`feed`は`try_read_byte`が`None`を返すまでbyteを流し込みます。

@@ -12,6 +12,7 @@ pub mod io;
 pub mod net;
 pub mod process;
 pub mod sys;
+pub mod time;
 
 use core::{ffi::CStr, iter::FusedIterator};
 

@@ -18,6 +18,7 @@ static mut MACHINE: MachineSpec = MachineSpec {
     virtio_mmio_irq: [0; minios_kernel::fdt::VIRTIO_MMIO_MAX],
     virtio_mmio_count: 0,
     plic_base: 0x0c00_0000,
+    rtc_base: 0,
 };
 
 /// `kernel_main`が一度だけ呼ぶ。OpenSBIの`a1`が指すDTBを解析し、

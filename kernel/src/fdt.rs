@@ -53,6 +53,10 @@ pub struct MachineSpec {
     /// PLICを持たないmachine記述では0となり、その場合kernelは割り込み
     /// 経路を初期化せずpollingだけで動く。
     pub plic_base: usize,
+    /// `google,goldfish-rtc`互換の先頭nodeのregベース。RTCを持たない
+    /// machine記述では0となり、kernelは実時刻を返せない（`realtime`が
+    /// `ENODEV`）。
+    pub rtc_base: usize,
 }
 
 /// QEMU virtが提供するvirtio-mmio transportのslot数。
@@ -80,6 +84,7 @@ struct NodeScan {
     has_ns16550: bool,
     is_virtio_mmio: bool,
     has_plic: bool,
+    has_goldfish_rtc: bool,
     reg_cells: (u32, u32),
     reg_first: Option<(u64, u64)>,
     irq_first: Option<u32>,
@@ -215,6 +220,12 @@ fn compatible_has_plic(value: &[u8]) -> bool {
         .any(|entry| entry == b"sifive,plic-1.0.0" || entry == b"riscv,plic0")
 }
 
+fn compatible_has_goldfish_rtc(value: &[u8]) -> bool {
+    value
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == b"google,goldfish-rtc")
+}
+
 fn device_type_is_memory(value: &[u8]) -> bool {
     value == b"memory" || value == b"memory\0"
 }
@@ -233,6 +244,7 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
     let mut virtio_mmio_irq = [0u32; VIRTIO_MMIO_MAX];
     let mut virtio_mmio_count = 0usize;
     let mut plic: Option<u64> = None;
+    let mut rtc: Option<u64> = None;
 
     loop {
         let token = read_be32(structure, cursor).map_err(|_| FdtError::BadStructure)?;
@@ -284,6 +296,9 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                 if scan.has_plic && plic.is_none() {
                     plic = scan.reg_first.map(|(address, _)| address);
                 }
+                if scan.has_goldfish_rtc && rtc.is_none() {
+                    rtc = scan.reg_first.map(|(address, _)| address);
+                }
                 if scan.is_virtio_mmio
                     && virtio_mmio_count < VIRTIO_MMIO_MAX
                     && let Some((base, _)) = scan.reg_first
@@ -321,6 +336,7 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
                         scan.has_ns16550 = compatible_has_ns16550(value);
                         scan.is_virtio_mmio = compatible_has_virtio_mmio(value);
                         scan.has_plic = compatible_has_plic(value);
+                        scan.has_goldfish_rtc = compatible_has_goldfish_rtc(value);
                     }
                     "timebase-frequency" => scan.timebase = Some(read_be32(value, 0)?),
                     "interrupts" => scan.irq_first = Some(read_be32(value, 0)?),
@@ -354,6 +370,11 @@ fn walk_structure(structure: &[u8], strings: &[u8]) -> Result<MachineSpec, FdtEr
         // PLICは必須ではない。見つからないmachineでは0のまま返し、
         // kernel側が割り込み経路を立てずpollingだけで動く。
         plic_base: match plic {
+            Some(address) => usize::try_from(address).map_err(|_| FdtError::BadStructure)?,
+            None => 0,
+        },
+        // RTCも必須ではない。無いmachineでは実時刻だけが使えない。
+        rtc_base: match rtc {
             Some(address) => usize::try_from(address).map_err(|_| FdtError::BadStructure)?,
             None => 0,
         },
@@ -408,6 +429,10 @@ mod tests {
     }
 
     fn qemu_virt_dtb_with(with_timebase: bool, with_uart: bool) -> Vec<u8> {
+        qemu_virt_dtb_full(with_timebase, with_uart, true)
+    }
+
+    fn qemu_virt_dtb_full(with_timebase: bool, with_uart: bool, with_rtc: bool) -> Vec<u8> {
         let mut cpus_props = std::vec![
             prop("#address-cells", be32(1)),
             prop("#size-cells", be32(0)),
@@ -431,6 +456,17 @@ mod tests {
                 props: std::vec![
                     prop("reg", reg((2, 2), 0x1000_0000, 0x100)),
                     prop("compatible", b"ns16550a\0".to_vec()),
+                ],
+                children: std::vec![],
+            });
+        }
+        if with_rtc {
+            soc_children.push(Node {
+                name: "rtc@101000",
+                props: std::vec![
+                    prop("interrupts", be32(11)),
+                    prop("reg", reg((2, 2), 0x0010_1000, 0x1000)),
+                    prop("compatible", b"google,goldfish-rtc\0".to_vec()),
                 ],
                 children: std::vec![],
             });
@@ -571,6 +607,16 @@ mod tests {
         assert_eq!(spec.virtio_mmio[..spec.virtio_mmio_count], [0x1000_1000]);
         assert_eq!(spec.virtio_mmio_irq[..spec.virtio_mmio_count], [1]);
         assert_eq!(spec.plic_base, 0x0c00_0000);
+        assert_eq!(spec.rtc_base, 0x0010_1000);
+    }
+
+    // Catches a missing RTC node failing the boot: the RTC is optional, so
+    // a machine without one must still parse with `rtc_base` left at 0.
+    #[test]
+    fn a_machine_without_an_rtc_reports_base_zero() {
+        let spec = MachineSpec::from_dtb(&qemu_virt_dtb_full(true, true, false)).unwrap();
+        assert_eq!(spec.rtc_base, 0);
+        assert_eq!(spec.uart_base, 0x1000_0000);
     }
 
     #[test]

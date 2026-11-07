@@ -105,6 +105,38 @@ fn clock_sleep_and_yield_return_the_documented_flows() {
     assert_eq!(context.register(10), ENOSYS as usize);
 }
 
+// Catches realtime being wired to the boot clock or losing the source's
+// errno: a0 must carry the source's Unix milliseconds unchanged, and a
+// machine without an RTC must see ENODEV instead of a made-up time.
+#[test]
+fn realtime_passes_the_source_value_or_errno_through() {
+    struct RtcSource(isize);
+    impl ControlSource for RtcSource {
+        type Error = SinkError;
+        fn read_stdin(&mut self, _output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+            Ok(Some(0))
+        }
+        fn clock(&mut self) -> isize {
+            1234
+        }
+        fn realtime(&mut self) -> isize {
+            self.0
+        }
+    }
+    let realtime = SyscallNumber::Realtime as usize;
+    let mut sink = FakeSink::default();
+    // 2001-02-03 04:05:06 UTCのUnix時刻（millisecond）。
+    let mut source = RtcSource(981_173_106_000);
+    let (context, flow) =
+        dispatch_fixture(realtime, 0, 0, 0, &mut sink, &mut source, &mut scratch());
+    assert_eq!(flow, SyscallFlow::Resume);
+    assert_eq!(context.register(10), 981_173_106_000);
+
+    let mut source = RtcSource(ENODEV);
+    let (context, _) = dispatch_fixture(realtime, 0, 0, 0, &mut sink, &mut source, &mut scratch());
+    assert_eq!(context.register(10), ENODEV as usize);
+}
+
 // Catches getpid writing anything other than the source's pid into a0.
 #[test]
 fn getpid_returns_the_source_pid() {
