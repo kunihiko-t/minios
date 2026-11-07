@@ -57,7 +57,7 @@ shutting down
 シングルハート構成の`info`は、バナーに続けて`hart id: 0`を表示します。
 `cargo xtask run`は起動ごとに検査用のFAT32 disk imageを生成して接続するため、`ls`や`cat`でその中身を確かめられます。
 `cargo xtask run`が起動するのは起動と診断のためのkernel shellです。
-user shellは`cargo xtask sh`で対話的に起動でき、`cat HELLO.TXT | wc`のようなpipelineや、`ls`、`mkdir`、`rmdir`、`rm`、`mv`によるfile操作（空白を含む名前は`"my notes.txt"`のように引用符で囲む）、`cd`と`pwd`による作業directoryの移動、RTCから得た現在のUTC日時を出す`date`を端末から試せます（Ctrl-Dか`exit`で終了）。`cargo xtask sh --disk work.img`とすると、disk imageを残して次の起動でも同じfileを使えます。
+user shellは`cargo xtask sh`で対話的に起動でき、`cat HELLO.TXT | wc`のようなpipelineや、`ls`（`-l`でsizeと更新日時も出す）、`mkdir`、`rmdir`、`rm`、`mv`によるfile操作（空白を含む名前は`"my notes.txt"`のように引用符で囲む）、`cd`と`pwd`による作業directoryの移動、RTCから得た現在のUTC日時を出す`date`を端末から試せます（Ctrl-Dか`exit`で終了）。`cargo xtask sh --disk work.img`とすると、disk imageを残して次の起動でも同じfileを使えます。
 `cargo xtask test user-shell`は同じshellへscriptを流して出力を検査し、その仕組みは[第23章](docs/guide/23-process-syscalls.md)で説明しています。
 
 ## 対応環境
@@ -160,7 +160,7 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 - user shellのpipelineはshellと合わせてprocess上限に収まる7個のcommandまでで、1行は256 byteまでです。
 - guestの`SbrkAllocator`はfirst-fitのfree-list allocatorで、解放した領域を再利用し、heap末尾の64 KiB以上の空きを`sbrk`でkernelへ返します。threadは扱わないため、単一threadのguestだけが使えます。
 - FAT32へ新しく作る名前は、日本語を含む基本多言語面（BMP）の文字に限られます（制御文字と絵文字などは使えません）。8.3形式へ正規化できない名前と、`Readme.txt`のように大小文字が混ざる名前はLFNで作ります。`notes.txt`のように小文字だけの8.3名はLFNを書かず、Windows NTやLinuxと同じentryの印で小文字のまま残します。名前の照合は大小文字を区別しません。
-- FAT32のentryへ書く作成・更新日時はRTCから得たUTCで、time zoneは扱いません。guestがentryの日時を読むsyscallはありません。
+- FAT32のentryへ書く作成・更新日時はRTCから得たUTCで、time zoneは扱いません。`stat`と`readdir`が返す更新日時はFATの規約どおり2秒単位です。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。`cargo xtask sh --disk <path>`だけは指定したpathのimageを使い続けます。
 - ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長します。下端の空きがpage単位で揃うと、取り込んだpageをframe poolへ返します。
 - ハードウェアアドレス、タイムベース、RAMの上端はOpenSBIが渡すDevice Treeから発見しますが、対象machineはQEMU `virt`の配置契約に限定しています。

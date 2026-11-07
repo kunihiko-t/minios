@@ -189,9 +189,9 @@ childは親の残りの実行とどちらが先に進んでもよいため、検
 reap済みpid・自分自身・存在しないpidへの`waitpid`が`ECHILD`を返すことも確かめます。
 親が`waitpid`でblockするため、childの`spawn-child`とExit(42) frameは必ず親の`waitpid verified`とExit(42)より先に出ます。
 この確定的な順序をexact照合で検査することが、親が本当にblockしていたことの直接証拠です。
-`file-stat`ではfile_stat guestが`stat`で`DOCS/NOTE.TXT`と`DOCS/CHILD.ELF`のsizeとfile kind、`DOCS`のdirectory kindを確かめます。
+`file-stat`ではfile_stat guestが`stat`で`DOCS/NOTE.TXT`と`DOCS/CHILD.ELF`のsizeとfile kind、fixtureが固定した更新日時（1980-01-01 00:00:00）、`DOCS`のdirectory kindを確かめます。
 不在pathの`ENOENT`、fileを途中要素に持つpathの`ENOTDIR`、書き込めないout pointerの`EFAULT`、`open`したfdへの`fstat`が`stat`と同じmetadataを返すこと、stdoutへの`fstat`がsize 0の`STAT_KIND_CONSOLE`を返すことも確かめてから、標準出力へ出して終了コード42を返すことを要求します。
-`file-readdir`ではfile_readdir guestが`readdir`でrootの3件（HELLO.TXT、DOCS、`Long File Name.txt`）と`DOCS`の4件（NOTE.TXT、CHILD.ELF、FDCHILD.ELF、PIPECH.ELF）をindex順に確かめ、`.`/`..`が列挙に含まれないこととkindが`STAT_KIND_*`と一致することを確認します。
+`file-readdir`ではfile_readdir guestが`readdir`でrootの3件（HELLO.TXT、DOCS、`Long File Name.txt`）と`DOCS`の4件（NOTE.TXT、CHILD.ELF、FDCHILD.ELF、PIPECH.ELF）をindex順に確かめ、`.`/`..`が列挙に含まれないこととkindが`STAT_KIND_*`と一致すること、各entryの`mtime`がfixtureの日時で、rootのentryの`size`が`stat`と一致することを確認します。
 index超過の0、fileへの指定の`ENOTDIR`、不在pathの`ENOENT`、書き込めないout pointerの`EFAULT`も確かめてから、標準出力へ出して終了コード42を返すことを要求します。
 `file-exec`ではfile_exec guestが`exec`のerrno経路（不在pathの`ENOENT`、directoryの`EISDIR`、非ELFの`EINVAL`、読めないpath pointerの`EFAULT`）を確かめてから`DOCS/CHILD.ELF`へexecします。
 execに成功するとguest imageは置き換わるため戻らず、差し替え後のCHILD.ELFが`spawn-child`を標準出力へ出し、`getpid()+41`で終了します。
@@ -225,8 +225,10 @@ childのExit frameが写した`spawn-child`より先に来る順序のexact照�
 childがbasenameの`ECHO.ELF`と渡した3個の文字列をこの順で標準出力へ書き、失敗したspawnがpidを消費していないことも確かめてから、`spawn args verified`を出して終了コード42を返すことを要求します。
 frame列のexact照合と最後のdiagnosticで、argvの中身と順序、frameの回収を検査します。
 `user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`、`ls`、`mkdir`、`rmdir`、`rm`、`mv`、`date`をdisk imageの`BIN`へ置きます。
+QEMUへは`-rtc base=2001-02-03T04:05:00`を渡し、scriptが作ったfileの更新日時を`2001-02-03 04:05`へ揃えます。
+fixtureのentryの日時は1980-01-01 00:00に固定されています。
 Ready frameの後にscriptをStdin frameとして送り、最後に長さ0のStdin frameでEOFを伝えます。
-scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、小文字だけの8.3名として作り一覧にも小文字で出る`echo redirected > out.txt`とその`cat`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、引用符で囲んだ空白入りの名前へのredirectと`cat`・`rm`、引用符の中の`|`、閉じていない引用符、日本語の名前`メモ.txt`へのredirectと`ls`・`cat`・`rm`、`mkdir`・LFN名への`mv`・`cd`と`pwd`・作業directoryでの`ls`・`cat`・`rm`・`cd ..`・`rmdir`・rootの`ls`によるfile操作、存在しないdirectoryへの`cd`、不在fileへの`rm`、存在しない`nosuch`の順です。
+scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、小文字だけの8.3名として作り一覧にも小文字で出る`echo redirected > out.txt`とその`cat`、fixtureのfileと作ったfileのsize・更新日時を出す`ls -l HELLO.TXT out.txt DOCS/NOTE.TXT`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、引用符で囲んだ空白入りの名前へのredirectと`cat`・`rm`、引用符の中の`|`、閉じていない引用符、日本語の名前`メモ.txt`へのredirectと`ls`・`cat`・`rm`、`mkdir`・LFN名への`mv`・`cd`と`pwd`・作業directoryでの`ls`・`cat`・`rm`・`cd ..`・`rmdir`・rootの`ls`によるfile操作、存在しないdirectoryへの`cd`、不在fileへの`rm`、存在しない`nosuch`の順です。
 8段の行は何も起動されず、`too many commands`の標準エラー1行だけになります。
 1 frameに2行を詰めた送り方と、1行を2 frameへ分けた送り方も含めます。
 shellは行ごとにchildを起動順に`waitpid`し、pipelineでconsoleへ書くのは最後のcommandだけです。

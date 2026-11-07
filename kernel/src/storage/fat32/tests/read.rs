@@ -499,7 +499,8 @@ fn stat_reports_size_and_kind_for_files_and_directories() {
         file,
         FileStat {
             size: 11,
-            directory: false
+            directory: false,
+            modified: 0,
         }
     );
 
@@ -508,7 +509,8 @@ fn stat_reports_size_and_kind_for_files_and_directories() {
         dir,
         FileStat {
             size: 0,
-            directory: true
+            directory: true,
+            modified: 0,
         }
     );
 

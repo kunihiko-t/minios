@@ -41,12 +41,13 @@ fn main(_args: Args) -> i32 {
     assert_eq!(reader.as_raw_fd(), FIRST_FILE_FD);
     assert_eq!(writer.as_raw_fd(), FIRST_FILE_FD + 1);
 
-    // pipe端のmetadata規約: kind=PIPE, size=0。
+    // pipe端のmetadata規約: kind=PIPE, size=0、日時を持たないのでmtime=0。
     assert_eq!(
         reader.stat(),
         Ok(Stat {
             size: 0,
-            kind: STAT_KIND_PIPE
+            kind: STAT_KIND_PIPE,
+            mtime: 0,
         })
     );
 

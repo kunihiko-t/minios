@@ -294,6 +294,8 @@ fn dirent_fixture() -> DirEnt {
     DirEnt {
         name_len: 9,
         kind: STAT_KIND_FILE,
+        size: 18,
+        mtime: 981_173_106,
         name,
     }
 }
@@ -392,12 +394,14 @@ impl FileSource {
             stat_result: Ok(Stat {
                 size: 18,
                 kind: STAT_KIND_FILE,
+                mtime: 981_173_106,
             }),
             fstats: 0,
             seen_fstat_fd: None,
             fstat_result: Ok(Stat {
                 size: 18,
                 kind: STAT_KIND_FILE,
+                mtime: 981_173_106,
             }),
             readdirs: 0,
             seen_readdir_index: None,
