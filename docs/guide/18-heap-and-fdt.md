@@ -90,6 +90,17 @@ frame allocatorの管理上端はこのヒープ初期位置まで下がり、�
 現在は`Vec<OwnedFrame>`を自身で所有し、件数の上限はframe poolとヒープの成長だけで決まります。
 `push`は`try_reserve(1)`で先に容量を確保し、失敗したら`CapacityExceeded`とframeを呼び出し側へ返すため、rollback経路はframeを失いません。
 
+### guestのallocator
+
+guest programのheapは、kernelの`sbrk`が動かすbreakの下にあります。
+[`guest/src/heap.rs`](../../guest/src/heap.rs)の`SbrkAllocator`は、その上に載せたfirst-fitのfree-list allocatorです。
+空きblockはaddress順の単方向listで持ち、各空きblockの先頭16 byteに大きさと次の空きblockのaddressを書きます。
+割り当てたblockにはheaderを付けません。`GlobalAlloc::dealloc`は割り当て時と同じ`Layout`を受け取るため、大きさを同じ式（16 byte単位への切り上げ）で復元できます。
+空きblockで足りなければ`sbrk`でheapを4 KiB以上まとめて伸ばし、解放したblockは前後の空きblockと結合します。
+heap末尾の空きが64 KiB以上になれば、`sbrk`の負のincrementでkernelへ返します。
+breakはprogramが`sbrk`を直接呼んで動かすこともあるため、allocatorはbreakを覚えておかず、返す直前に`sbrk(0)`で確かめます。
+アルゴリズムの本体`FreeList`は`sbrk`を引数で受け取るため、`cargo test -p minios-guest --lib`がhost上の配列をheapに見立てて、再利用・結合・整列・返却と、乱数で数千回の確保と解放を繰り返したときの不変条件を検査します。
+
 ## 実行と確認
 
 DTBから発見したmachine記述は次のコマンドで確認します。

@@ -4,11 +4,13 @@
 //! 受け、検証はkernelに任せる。testが意図的に不正pointerを渡して`EFAULT`
 //! を確かめられるようにするためである。戻り値は非負の結果か負のerrno。
 
+#[cfg(target_arch = "riscv64")]
 use core::arch::asm;
 use minios_abi::syscall::SyscallNumber;
 
 /// `a7=number`、`a0`..`a3`を引数として`ecall`し、`a0`の戻り値を返す。
 /// 使わない引数registerには0を渡す。
+#[cfg(target_arch = "riscv64")]
 fn ecall(number: SyscallNumber, a0: usize, a1: usize, a2: usize, a3: usize) -> isize {
     let returned: isize;
     // Safety: ecallはkernelへtrapし、全registerはuser trap contextで保存復元される。
@@ -28,6 +30,13 @@ fn ecall(number: SyscallNumber, a0: usize, a1: usize, a2: usize, a3: usize) -> i
     returned
 }
 
+/// host上のunit test用。libをhostでbuildできるようにするだけで、testは
+/// syscallを呼ばない（呼べばpanicする）。
+#[cfg(not(target_arch = "riscv64"))]
+fn ecall(number: SyscallNumber, _a0: usize, _a1: usize, _a2: usize, _a3: usize) -> isize {
+    unreachable!("syscall {number:?} only runs on the MiniOS guest target")
+}
+
 /// `write`を呼ぶ。戻り値は書いたbyte数か負のerrno。
 pub fn sys_write(fd: usize, pointer: *const u8, len: usize) -> isize {
     ecall(SyscallNumber::Write, fd, pointer as usize, len, 0)
@@ -35,7 +44,10 @@ pub fn sys_write(fd: usize, pointer: *const u8, len: usize) -> isize {
 
 /// `exit`。kernelはこの呼び出しの後guestへ戻らない。
 pub fn sys_exit(code: u32) -> ! {
+    #[cfg(not(target_arch = "riscv64"))]
+    unreachable!("exit({code}) only runs on the MiniOS guest target");
     // Safety: exitのecallはresumeしない契約のため、noreturnでよい。
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         asm!(
             "ecall",

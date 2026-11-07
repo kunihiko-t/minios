@@ -158,7 +158,7 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 - pipeは同時に8本まで、bufferは256 byteで、満杯のときは書き込み側が待ちます。
 - UDP socketは同時に4個までで、TCPは扱いません。
 - user shellのpipelineはshellと合わせてprocess上限に収まる7個のcommandまでで、1行は256 byteまでです。
-- guestのheapは`sbrk`で伸ばし縮みできますが、`SbrkAllocator`はbump allocatorなので、解放した領域を再利用せず、heapも縮めません。
+- guestの`SbrkAllocator`はfirst-fitのfree-list allocatorで、解放した領域を再利用し、heap末尾の64 KiB以上の空きを`sbrk`でkernelへ返します。threadは扱わないため、単一threadのguestだけが使えます。
 - FAT32へ新しく作る名前は印字可能なASCIIに限られ、8.3形式へ正規化できない名前はLFNで作ります。8.3へ正規化できる名前は大文字の8.3名になり、元の大小文字は残りません。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。
 - ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長します。下端の空きがpage単位で揃うと、取り込んだpageをframe poolへ返します。
