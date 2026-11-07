@@ -34,6 +34,7 @@ fn stat_writes_the_serialized_metadata_to_the_out_pointer() {
         Stat {
             size: 18,
             kind: STAT_KIND_FILE,
+            mtime: 981_173_106,
         }
     );
     // 成功時の戻り値は`ReadComplete`のcopy-out経路が`a0`へ書く

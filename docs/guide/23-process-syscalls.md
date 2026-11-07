@@ -132,6 +132,7 @@ shellはcommandを`/BIN/NAME.ELF`という絶対pathへ解決するので、作�
 `cd`と`pwd`は1段のcommandでredirectがない場合だけbuilt-inとして扱います。
 起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)と、file操作の[`ls.rs`](../../guest/src/bin/ls.rs)、[`mkdir.rs`](../../guest/src/bin/mkdir.rs)、[`rmdir.rs`](../../guest/src/bin/rmdir.rs)、[`rm.rs`](../../guest/src/bin/rm.rs)、[`mv.rs`](../../guest/src/bin/mv.rs)です。
 file操作のtoolはそれぞれ`readdir`、`mkdir`、`rmdir`、`unlink`、`rename`を1回ずつ呼ぶだけの薄いprogramで、`ls`はdirectoryの名前に`/`を付けます。
+`ls -l`は`DirEnt`の`size`と`mtime`から`- 18 1980-01-01 00:00 HELLO.TXT`の形の行を作り、fileを指す引数には`stat`の値を使います。
 `"…"`か`'…'`で囲んだ語は、中の空白や`|`、`<`、`>`を文字として含む1語になるため、LFNの`"my notes.txt"`のような名前もtoolへ渡せます。
 escapeはなく、引用符は語の全体を囲む必要があります。閉じていない引用符や`a"b"`のような語の途中の引用符は構文errorで、何も起動しません。
 
@@ -252,6 +253,7 @@ cat HELLO.TXT
 cat HELLO.TXT | wc
 echo redirected > out.txt
 cat out.txt
+ls -l HELLO.TXT out.txt DOCS/NOTE.TXT
 wc < HELLO.TXT
 echo a b c | cat | wc
 echo a b c | cat | cat | cat | cat | cat | wc
@@ -283,7 +285,7 @@ rm nosuch.txt
 nosuch
 ```
 
-標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、日本語の名前で作った`メモ.txt`を含むrootの一覧と`こんにちは`、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧が届きます。
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`ls -l`の3行、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、日本語の名前で作った`メモ.txt`を含むrootの一覧と`こんにちは`、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧が届きます。
 標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、閉じていない引用符への`sh: unterminated quote`、存在しないdirectoryへの`sh: cd: nosuchdir: cannot change directory (errno -2)`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`sh: nosuch: not found (errno -2)`が届きます。
 pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
 このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。

@@ -62,6 +62,44 @@ impl DateTime {
     }
 }
 
+impl DateTime {
+    /// UTCの日時をUnix時刻（秒）へ戻す。`from_unix_seconds`の逆で、
+    /// Howard Hinnantの`days_from_civil`による。月・日・時・分・秒が暦に
+    /// 無い値（2月30日など）か、1970年より前の日時は`None`。
+    pub fn to_unix_seconds(&self) -> Option<u64> {
+        let leap = self.year % 4 == 0 && (self.year % 100 != 0 || self.year % 400 == 0);
+        let month_len = match self.month {
+            2 if leap => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            1..=12 => 31,
+            _ => return None,
+        };
+        if !(1..=month_len).contains(&self.day)
+            || self.hour > 23
+            || self.minute > 59
+            || self.second > 59
+        {
+            return None;
+        }
+        // 1月と2月は3月始まりの年では前年に属する。
+        let year = self.year - i64::from(self.month <= 2);
+        let era = year.div_euclid(400);
+        let year_of_era = year.rem_euclid(400);
+        let march_month = (i64::from(self.month) + 9) % 12;
+        let day_of_year = (153 * march_month + 2) / 5 + i64::from(self.day) - 1;
+        let day_of_era = 365 * year_of_era + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let days = era * DAYS_PER_400_YEARS + day_of_era - DAYS_FROM_YEAR_0_MARCH;
+        let days = u64::try_from(days).ok()?;
+        Some(
+            days * SECONDS_PER_DAY
+                + u64::from(self.hour) * 3_600
+                + u64::from(self.minute) * 60
+                + u64::from(self.second),
+        )
+    }
+}
+
 impl fmt::Display for DateTime {
     /// `YYYY-MM-DD HH:MM:SS`の形で書く。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -98,6 +136,35 @@ mod tests {
         assert_eq!(format(4_107_542_400), "2100-03-01 00:00:00");
         assert_eq!(format(1_709_251_199), "2024-02-29 23:59:59");
         assert_eq!(format(253_402_300_799), "9999-12-31 23:59:59");
+    }
+
+    // Catches the inverse conversion disagreeing with the forward one, or
+    // accepting dates the calendar does not have: every day of a 400-year
+    // cycle must round-trip, and Feb 29 of a non-leap year, month 13,
+    // hour 24 and dates before the epoch must be rejected.
+    #[test]
+    fn utc_dates_convert_back_to_unix_seconds() {
+        for day in (0..(400 * 366)).step_by(7) {
+            let seconds = day * 86_400 + 12_345;
+            assert_eq!(
+                DateTime::from_unix_seconds(seconds).to_unix_seconds(),
+                Some(seconds)
+            );
+        }
+        let at = |year, month, day, hour| DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute: 0,
+            second: 0,
+        };
+        assert_eq!(at(2000, 2, 29, 0).to_unix_seconds(), Some(951_782_400));
+        assert_eq!(at(2100, 2, 29, 0).to_unix_seconds(), None);
+        assert_eq!(at(2026, 13, 1, 0).to_unix_seconds(), None);
+        assert_eq!(at(2026, 4, 31, 0).to_unix_seconds(), None);
+        assert_eq!(at(2026, 1, 1, 24).to_unix_seconds(), None);
+        assert_eq!(at(1969, 12, 31, 23).to_unix_seconds(), None);
     }
 
     // Catches the day-by-day walk going wrong anywhere in a 400-year cycle:

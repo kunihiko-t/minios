@@ -5,7 +5,8 @@
 //! `ENOENT`・file途中要素の`ENOTDIR`・書けないout pointerの`EFAULT`を
 //! 確かめる。`open`したfdへの`fstat`が`stat`と同じmetadataを返すことと、
 //! stdoutへの`fstat`がsize 0の`STAT_KIND_CONSOLE`を返すことも確認して
-//! 42で終了する。
+//! 42で終了する。fixtureのentryの更新日時は1980-01-01 00:00:00に固定され、
+//! consoleは日時を持たないため0である。
 //! 失敗時はpanicし、70で終了する。E2Eのfile-stat検査が使う。
 
 #![no_std]
@@ -31,6 +32,8 @@ const DOCS_PATH: &[u8] = b"DOCS";
 /// file要素を途中に挟む不正path。最終要素の解決前に`ENOTDIR`を返す。
 const THROUGH_FILE_PATH: &[u8] = b"DOCS/NOTE.TXT/DEEP";
 const MISSING_PATH: &[u8] = b"MISSING.TXT";
+/// fixtureのentryが持つ更新日時（1980-01-01 00:00:00 UTC）のUnix時刻。
+const FIXTURE_MTIME: u64 = 315_532_800;
 
 minios_guest::entry!(main);
 
@@ -38,6 +41,7 @@ fn main(_args: Args) -> i32 {
     let file = |size| Stat {
         size,
         kind: STAT_KIND_FILE,
+        mtime: FIXTURE_MTIME,
     };
 
     // file pathのstat：sizeとkindがdir entryと一致すること。
@@ -66,7 +70,8 @@ fn main(_args: Args) -> i32 {
         Stat::from_le_bytes(out),
         Stat {
             size: 0,
-            kind: STAT_KIND_CONSOLE
+            kind: STAT_KIND_CONSOLE,
+            mtime: 0,
         }
     );
 

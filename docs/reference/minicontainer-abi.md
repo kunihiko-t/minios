@@ -171,9 +171,9 @@ syscall番号は`a7`、引数は`a0..a5`、戻り値は`a0`へ置きます。
 | 15 | `getpid` | なし | 呼び出したprocessのpidを返す |
 | 16 | `spawn` | `a0=path pointer`、`a1=path length`、`a2=argv pointer`、`a3=argc` | `open`と同じpath規約で、pathのELF fileを新しいprocessとして起動する。`a3`が1以上なら`a2`の`argc`個のentryがchildのargvになり、0なら`a2`は読まずargvはpathのbasename 1個になる。戻り値はchildのpidか負のerrno |
 | 17 | `waitpid` | `a0=pid` | `pid`のprocessの終了codeを返す。childに限らず、自分以外のliveなprocessを待てる。対象がliveなら呼び出しprocessをblockし、対象の終了後に同じecallが再実行されてcodeを返す。負のerrnoは`ECHILD`/`EINVAL` |
-| 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
-| 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ8 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（8）か負のerrno |
-| 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ263 byteの`DirEnt`として書き込む。`a1`=0は作業directory（既定はroot）を指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（263）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
+| 18 | `stat` | `a0=path pointer`、`a1=path length`、`a2=out pointer` | `open`と同じpath規約で、fileまたはdirectoryのmetadataを`a2`のuser bufferへ16 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（16）か負のerrno |
+| 19 | `fstat` | `a0=fd`、`a1=out pointer` | fdが指すfileのmetadataを`a1`のuser bufferへ16 byteの`Stat`として書き込む。戻り値は`STAT_LEN`（16）か負のerrno |
+| 20 | `readdir` | `a0=path pointer`、`a1=path length`、`a2=index`、`a3=out pointer` | `path`が指すdirectoryの`index`番目のentryを`a3`のuser bufferへ275 byteの`DirEnt`として書き込む。`a1`=0は作業directory（既定はroot）を指す。indexが末尾を越えれば0を返し、それ以外の成功は`DIRENT_LEN`（275）を返す。負のerrnoは`ENOENT`/`ENOTDIR`/`EINVAL`/`EFAULT` |
 | 21 | `exec` | `a0=path pointer`、`a1=path length` | `path`のfileをELFとして読み込み、呼び出しprocessのimageを置き替える。pidとfd tableは引き継ぎ、close-on-execのfdだけを閉じる。成功時は戻らず新imageのentryから始まる。負のerrnoは`ENOENT`/`EISDIR`/`EINVAL`/`EFAULT`/`ENOMEM` |
 | 22 | `pipe` | `a0=out pointer` | kernel管理のbyte channelを1本作成し、read端とwrite端のfdを`a0`のuser bufferへ8 byte（2個の`u32`）で書き込む。戻り値は`PIPE_OUT_LEN`（8）か負のerrno |
 | 23 | `sbrk` | `a0=increment（符号付き）` | 呼び出しprocessのheap breakを`increment` byte動かし、旧breakを返す。0は現在のbreakを返す。負のincrementはbreakを戻し、新しいbreakより上で丸ごと空いたpageをunmapしてframeをkernelへ返す。戻したpageを再び伸ばすとzero済みの新しいpageになる。負のerrnoは`EINVAL`（heap先頭より下へ戻す要求）/`ENOMEM` |
@@ -246,10 +246,10 @@ argvを導入する前の呼び出し側は`a2`と`a3`に0を渡していたた�
 `waitpid`は`a0`のpidを持つprocessの終了codeを返します。待てる対象は`spawn`したchildに限らず、自分以外のliveなprocessです。manifest v2でkernelが起動したtask同士も相互に待てます。対象が既に終了していればkernelが保持する終了codeを1回だけ消費して返し（reap）、liveなら呼び出しprocessを対象の終了までblockします。`read`と同じく、block中は`sepc`がecallへ戻されるため、wake後の再実行でcodeを返します。
 対象が自分自身・存在しない・既にreap済み・異常終了でstatusを持たない場合は`ECHILD`、wait連鎖が呼び出し側へ戻るcycleは`EINVAL`を返します。複数のprocessが同じpidを待つこともでき、終了時に全員がwakeしますが、codeを回収できるのは先に再実行された1つだけで、残りは`ECHILD`を受け取ります。kernelは終了codeをprocess数上限分だけ台帳へ保持し、超過分は最古からdropします。
 
-`stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの8 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、残り4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1、`STAT_KIND_PIPE` = 2、`STAT_KIND_CONSOLE` = 3）です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile、pipe、consoleのentryを受理して未割り当てfdに`EBADF`を返します。pipeとconsoleのentryの`size`は常に0です。
-どちらも`read`と同じく、out pointerが指す8 byteがユーザー空間の書き込み可能ページにすべて含まれることを要求し、検証を通ってからstorageやfd tableへ触れます。成功時の戻り値は`read`系のbyte数規約に従う`STAT_LEN`（8）です。
+`stat`と`fstat`はfileのmetadataを`Stat`構造としてuser bufferへ書き込みます。`Stat`はlittle-endianの16 byteで、先頭4 byteが`size`（fileのbyte数。directoryはFAT32の規約で0）、次の4 byteが`kind`（`STAT_KIND_FILE` = 0、`STAT_KIND_DIR` = 1、`STAT_KIND_PIPE` = 2、`STAT_KIND_CONSOLE` = 3）、残り8 byteが`mtime`（最終更新日時のUnix時刻、秒）です。`mtime`はFAT32のentryの更新日時をUTCとして読んだ値で、FATの時刻は2秒単位です。日時を持たないentry、root directory、pipeとconsoleの`mtime`は0です。`stat`はfileとdirectoryの両方を受理し、`fstat`はfile、pipe、consoleのentryを受理して未割り当てfdに`EBADF`を返します。pipeとconsoleのentryの`size`は常に0です。
+どちらも`read`と同じく、out pointerが指す16 byteがユーザー空間の書き込み可能ページにすべて含まれることを要求し、検証を通ってからstorageやfd tableへ触れます。成功時の戻り値は`read`系のbyte数規約に従う`STAT_LEN`（16）です。
 
-`readdir`はdirectoryの中身をindex順に1件ずつ返します。`DirEnt`は263 byteで、先頭4 byteが`name_len`、次の4 byteが`kind`（`STAT_KIND_*`と同じ値）、残り255 byteがゼロ詰めの`name`です。`readdir`は呼び出しごとにdirectoryを先頭から走査して`index`番目のentryを返すため、一覧はindex 0からの連続呼び出しで得ます。`.`と`..`は列挙に含まれず、末尾を越えたindexは0を返します。空path（`a1`=0）は作業directory（既定はroot）を指し、fileへの指定は`ENOTDIR`を返します。out pointerの検証は`stat`と同じく、走査より先に`EFAULT`を確定します。
+`readdir`はdirectoryの中身をindex順に1件ずつ返します。`DirEnt`は275 byteで、先頭4 byteが`name_len`、次の4 byteが`kind`（`STAT_KIND_*`と同じ値）、次の4 byteが`size`、次の8 byteが`mtime`（どちらも同じentryへの`stat`と同じ値）、残り255 byteがゼロ詰めの`name`です。`size`と`mtime`を持つので、`ls -l`のような一覧はentryごとに`stat`を呼ばずに済みます。`readdir`は呼び出しごとにdirectoryを先頭から走査して`index`番目のentryを返すため、一覧はindex 0からの連続呼び出しで得ます。`.`と`..`は列挙に含まれず、末尾を越えたindexは0を返します。空path（`a1`=0）は作業directory（既定はroot）を指し、fileへの指定は`ENOTDIR`を返します。out pointerの検証は`stat`と同じく、走査より先に`EFAULT`を確定します。
 
 `exec`は呼び出したprocessのimageを`path`のELFで置き替えます。pidとfd tableは引き継ぎ、address spaceと実行contextだけが新しくなります。新imageの構築がすべて成功してから差し替えるため、失敗した`exec`はerrnoを返して旧imageのまま動き続けます。成功時は`a0`の戻り値ではなく新imageの`_start`へ入り、引数は空です。
 

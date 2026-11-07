@@ -575,6 +575,7 @@ fn dispatch_fstat<M: FrameStore, E, R: ControlSource>(
         Some(_) => Ok(Stat {
             size: 0,
             kind: STAT_KIND_CONSOLE,
+            mtime: 0,
         }),
         None => source.fstat(fd),
     };

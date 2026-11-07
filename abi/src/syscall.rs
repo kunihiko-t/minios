@@ -141,39 +141,50 @@ pub const STAT_KIND_PIPE: u32 = 2;
 /// `Stat::kind`の値。consoleのstdin/stdout/stderrを指すfd。`size`は常に0。
 pub const STAT_KIND_CONSOLE: u32 = 3;
 /// `stat`/`fstat`が`out` pointerへ書き込む`Stat`のbyte長。
-pub const STAT_LEN: usize = 8;
+pub const STAT_LEN: usize = 16;
 
 /// `stat`/`fstat`がuser bufferへ書き込むmetadata。`size`はfileの
 /// byte数（directoryはFAT32の規約で0）、`kind`は`STAT_KIND_*`。
+/// `mtime`は最終更新日時のUnix時刻（秒）で、日時を持たないentry、
+/// root directory、pipe端とconsoleは0である。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stat {
     pub size: u32,
     pub kind: u32,
+    pub mtime: u64,
 }
 
 impl Stat {
-    /// LEの8 byteへserializeする。guestは同じlayoutで読み戻す。
-    pub const fn to_le_bytes(self) -> [u8; STAT_LEN] {
-        let size = self.size.to_le_bytes();
-        let kind = self.kind.to_le_bytes();
-        [
-            size[0], size[1], size[2], size[3], kind[0], kind[1], kind[2], kind[3],
-        ]
+    /// `size`、`kind`、`mtime`の順にLEの16 byteへserializeする。guestは
+    /// 同じlayoutで読み戻す。
+    pub fn to_le_bytes(self) -> [u8; STAT_LEN] {
+        let mut out = [0u8; STAT_LEN];
+        out[0..4].copy_from_slice(&self.size.to_le_bytes());
+        out[4..8].copy_from_slice(&self.kind.to_le_bytes());
+        out[8..16].copy_from_slice(&self.mtime.to_le_bytes());
+        out
     }
 
     /// `to_le_bytes`が書いた形式から読み戻す。guest側のdecodeに使う。
-    pub const fn from_le_bytes(bytes: [u8; STAT_LEN]) -> Self {
+    pub fn from_le_bytes(bytes: [u8; STAT_LEN]) -> Self {
         Self {
             size: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             kind: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            mtime: u64::from_le_bytes([
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                bytes[15],
+            ]),
         }
     }
 }
 
 /// `DirEnt::name`の容量。FAT32のLFN上限255 charと同じ。
 pub const DIRENT_NAME_LEN: usize = 255;
+/// `DirEnt`のうち名前より前のfield（`name_len`、`kind`、`size`、`mtime`）の
+/// byte長。
+pub const DIRENT_HEADER_LEN: usize = 4 + 4 + 4 + 8;
 /// `readdir`が`out` pointerへ書き込む`DirEnt`のbyte長。
-pub const DIRENT_LEN: usize = 4 + 4 + DIRENT_NAME_LEN;
+pub const DIRENT_LEN: usize = DIRENT_HEADER_LEN + DIRENT_NAME_LEN;
 
 /// `sendto`/`recvfrom`の`SockAddr`のbyte長。`{ip: u32, port: u16, pad: u16}`
 /// のLE列（8 byte）。`ip`はIPv4 addressをdotted-quad順の整数として持つ
@@ -192,33 +203,45 @@ pub const FD_CLOEXEC: usize = 1;
 pub const PIPE_OUT_LEN: usize = 8;
 
 /// `readdir`がuser bufferへ書き込むdirectory entry。`name_len`は
-/// `name`内の有効byte数で、`kind`は`STAT_KIND_*`を再利用する。
+/// `name`内の有効byte数で、`kind`は`STAT_KIND_*`を再利用する。`size`と
+/// `mtime`は同じentryへの`stat`と同じ値で、`ls -l`がentryごとに`stat`を
+/// 呼ばずに済む。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirEnt {
     pub name_len: u32,
     pub kind: u32,
+    pub size: u32,
+    pub mtime: u64,
     pub name: [u8; DIRENT_NAME_LEN],
 }
 
 impl DirEnt {
-    /// LEの`DIRENT_LEN` byteへserializeする。`name`の未使用部は0。
+    /// `name_len`、`kind`、`size`、`mtime`、`name`の順にLEの`DIRENT_LEN`
+    /// byteへserializeする。`name`の未使用部は0。
     pub fn to_le_bytes(&self) -> [u8; DIRENT_LEN] {
-        let name_len = self.name_len.to_le_bytes();
-        let kind = self.kind.to_le_bytes();
         let mut out = [0u8; DIRENT_LEN];
-        out[0..4].copy_from_slice(&name_len);
-        out[4..8].copy_from_slice(&kind);
-        out[8..].copy_from_slice(&self.name);
+        out[0..4].copy_from_slice(&self.name_len.to_le_bytes());
+        out[4..8].copy_from_slice(&self.kind.to_le_bytes());
+        out[8..12].copy_from_slice(&self.size.to_le_bytes());
+        out[12..20].copy_from_slice(&self.mtime.to_le_bytes());
+        out[DIRENT_HEADER_LEN..].copy_from_slice(&self.name);
         out
     }
 
     /// `to_le_bytes`が書いた形式から読み戻す。guest側のdecodeに使う。
     pub fn from_le_bytes(bytes: [u8; DIRENT_LEN]) -> Self {
+        let field = |range: core::ops::Range<usize>| {
+            let mut value = [0u8; 8];
+            value[..range.len()].copy_from_slice(&bytes[range]);
+            u64::from_le_bytes(value)
+        };
         let mut name = [0u8; DIRENT_NAME_LEN];
-        name.copy_from_slice(&bytes[8..]);
+        name.copy_from_slice(&bytes[DIRENT_HEADER_LEN..]);
         Self {
-            name_len: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            kind: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            name_len: field(0..4) as u32,
+            kind: field(4..8) as u32,
+            size: field(8..12) as u32,
+            mtime: field(12..20),
             name,
         }
     }
@@ -332,41 +355,50 @@ mod tests {
         assert_eq!(STAT_KIND_DIR, 1);
         assert_eq!(STAT_KIND_PIPE, 2);
         assert_eq!(STAT_KIND_CONSOLE, 3);
-        assert_eq!(STAT_LEN, 8);
+        assert_eq!(STAT_LEN, 16);
         assert_eq!(PIPE_OUT_LEN, 8);
     }
 
     // Catches the Stat wire layout drifting: size must occupy the first
-    // four LE bytes and kind the last four, matching what the guest reads.
+    // four LE bytes, kind the next four and mtime the last eight, matching
+    // what the guest reads.
     #[test]
-    fn stat_serializes_size_then_kind_as_le_bytes() {
+    fn stat_serializes_size_kind_and_mtime_as_le_bytes() {
         let stat = Stat {
             size: 0x0102_0304,
             kind: STAT_KIND_DIR,
+            mtime: 0x0a0b_0c0d_0e0f_1011,
         };
         assert_eq!(
             stat.to_le_bytes(),
-            [0x04, 0x03, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00]
+            [
+                0x04, 0x03, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x11, 0x10, 0x0f, 0x0e, 0x0d, 0x0c,
+                0x0b, 0x0a
+            ]
         );
         assert_eq!(Stat::from_le_bytes(stat.to_le_bytes()), stat);
     }
 
-    // Catches the DirEnt wire layout drifting: name_len first, kind next,
-    // then the zero-padded name — matching what the guest decodes.
+    // Catches the DirEnt wire layout drifting: name_len first, then kind,
+    // size and mtime, then the zero-padded name — matching what the guest
+    // decodes.
     #[test]
-    fn dirent_serializes_name_len_kind_and_a_zero_padded_name() {
+    fn dirent_serializes_its_header_and_a_zero_padded_name() {
         let mut name = [0u8; DIRENT_NAME_LEN];
         name[..9].copy_from_slice(b"HELLO.TXT");
         let dirent = DirEnt {
             name_len: 9,
             kind: STAT_KIND_FILE,
+            size: 18,
+            mtime: 315_532_800,
             name,
         };
         let bytes = dirent.to_le_bytes();
-        assert_eq!(&bytes[..8], &[9, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&bytes[8..17], b"HELLO.TXT");
-        assert!(bytes[17..].iter().all(|byte| *byte == 0));
+        assert_eq!(&bytes[..12], &[9, 0, 0, 0, 0, 0, 0, 0, 18, 0, 0, 0]);
+        assert_eq!(&bytes[12..20], &315_532_800u64.to_le_bytes());
+        assert_eq!(&bytes[20..29], b"HELLO.TXT");
+        assert!(bytes[29..].iter().all(|byte| *byte == 0));
         assert_eq!(DirEnt::from_le_bytes(bytes), dirent);
-        assert_eq!(DIRENT_LEN, 263);
+        assert_eq!((DIRENT_HEADER_LEN, DIRENT_LEN), (20, 275));
     }
 }

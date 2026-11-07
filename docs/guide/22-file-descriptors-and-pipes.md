@@ -59,9 +59,12 @@ writableなfdへの`read`とread専用fdへの`write`は`EBADF`です。
 file末尾を越えるoffsetは受理され、その位置からの`read`は0を返します。
 `pread`と`pwrite`は`a3`の明示offsetで読み書きし、fdが保持するoffsetを動かしません。
 
-`stat`は`a0/a1`のpath、`fstat`は`a0`のfdを受け、8 byteの`Stat`（`size: u32`、`kind: u32`のLE）を書きます。
+`stat`は`a0/a1`のpath、`fstat`は`a0`のfdを受け、16 byteの`Stat`（`size: u32`、`kind: u32`、`mtime: u64`のLE）を書きます。
 `kind`は`STAT_KIND_FILE`、`STAT_KIND_DIR`、`STAT_KIND_PIPE`、`STAT_KIND_CONSOLE`のいずれかで、directory、pipe、consoleの`size`は0です。
-`readdir`は`a0/a1`のdirectory、`a2`のindex、`a3`のbufferを受け、`DIRENT_LEN`（263）byteの`DirEnt`を書きます。
+`mtime`はFAT32のentryが持つ更新日時のUnix時刻（秒）で、pipe、console、root directoryと日時を持たないentryは0です。
+file fdの`size`は`FileDesc`が持つ値ですが、`mtime`は`Fat32::modified_of`がdirectory recordを読んで求めます。
+`readdir`は`a0/a1`のdirectory、`a2`のindex、`a3`のbufferを受け、`DIRENT_LEN`（275）byteの`DirEnt`を書きます。
+`DirEnt`は名前と`kind`に加えて`stat`と同じ`size`と`mtime`を持ち、user shellの`ls -l`はこれだけで1行を組み立てます。
 `a1`=0は作業directory（既定はroot）を指す`readdir`固有の規約で、indexが末尾を越えると0を返します。
 どの経路もout bufferの`EFAULT`をsourceの呼び出しより先に確定し、成功時は`ReadComplete`経由でscratchからuser memoryへcopyします。
 

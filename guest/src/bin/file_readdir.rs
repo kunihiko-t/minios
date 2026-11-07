@@ -3,7 +3,8 @@
 //! `readdir`でrootの3件（HELLO.TXT→file、DOCS→dir、`Long File
 //! Name.txt`→file）をindex順に、`DOCS`の4件（NOTE.TXT、CHILD.ELF、
 //! FDCHILD.ELF、PIPECH.ELF）をindex順に
-//! 確認し、index超過の0・file pathの`ENOTDIR`・不在pathの`ENOENT`・
+//! 確認する。各entryの更新日時はfixtureが固定した1980-01-01 00:00:00で、
+//! rootのfileは`stat`と同じsizeを持つ。続いてindex超過の0・file pathの`ENOTDIR`・不在pathの`ENOENT`・
 //! 書けないout pointerの`EFAULT`を確かめて42で終了する。
 //! 失敗時はpanicし、70で終了する。E2Eのfile-readdir検査が使う。
 
@@ -11,13 +12,20 @@
 #![no_main]
 
 use minios_abi::syscall::{EFAULT, ENOENT, ENOTDIR, STAT_KIND_DIR, STAT_KIND_FILE};
-use minios_guest::{Args, Errno, fs::read_dir, println, sys::sys_readdir};
+use minios_guest::{
+    Args, Errno,
+    fs::{read_dir, stat},
+    println,
+    sys::sys_readdir,
+};
 
 /// disk image fixtureの`DOCS`directory。
 const DOCS_PATH: &[u8] = b"DOCS";
 /// directoryではないfile path。`ENOTDIR`を返す。
 const FILE_PATH: &[u8] = b"HELLO.TXT";
 const MISSING_PATH: &[u8] = b"MISSING";
+/// fixtureのentryが持つ更新日時（1980-01-01 00:00:00 UTC）のUnix時刻。
+const FIXTURE_MTIME: u64 = 315_532_800;
 
 /// `path`のentryがindex順に`expected`と一致し、その次で末尾になることを
 /// 確かめる。末尾の確認で`readdir`はindex超過の0を返す。
@@ -27,6 +35,7 @@ fn assert_entries(path: &[u8], expected: &[(&[u8], u32)]) {
         let entry = entries.next().unwrap().unwrap();
         assert_eq!(&entry.name[..entry.name_len as usize], *name);
         assert_eq!(entry.kind, *kind);
+        assert_eq!(entry.mtime, FIXTURE_MTIME);
     }
     assert!(entries.next().is_none());
 }
@@ -43,6 +52,13 @@ fn main(_args: Args) -> i32 {
             (b"Long File Name.txt", STAT_KIND_FILE),
         ],
     );
+
+    // `DirEnt`のsizeは同じentryへの`stat`と一致する（directoryは0）。
+    for entry in read_dir(b"") {
+        let entry = entry.unwrap();
+        let name = &entry.name[..entry.name_len as usize];
+        assert_eq!(entry.size, stat(name).unwrap().size);
+    }
 
     // subdirectoryも同じindex規約。`.`/`..`は列挙に含まれない。
     assert_entries(

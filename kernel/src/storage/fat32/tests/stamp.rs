@@ -133,6 +133,31 @@ fn writing_updates_only_the_modification_time() {
     assert_eq!(u16_at(record, 24), fat_date(2026, 11, 7));
 }
 
+// Catches stat, readdir and fstat disagreeing on the modification time or
+// losing it in the FAT round trip: all three must report the instant the
+// clock gave at the last write, truncated to FAT's two-second step, and an
+// entry without dates must report 0.
+#[test]
+fn stat_and_fstat_report_the_modification_time() {
+    set_now(AT_2001);
+    let mut fs = mounted_writable_fixture().with_clock(test_clock);
+    let mut desc = fs.create_file("notes.txt").unwrap();
+    set_now(AT_2026);
+    assert_eq!(fs.write_range(&mut desc, 0, b"hi"), Ok(2));
+
+    // 16:00:01は2秒単位へ落ちて16:00:00になる。
+    let expected = (AT_2026 / 1_000) - 1;
+    assert_eq!(fs.stat("notes.txt").unwrap().modified, expected);
+    assert_eq!(fs.modified_of(&desc), Ok(expected));
+    let mut listed = Vec::new();
+    fs.for_each_entry("", |entry| {
+        listed.push((String::from(entry.name()), entry.modified()))
+    })
+    .unwrap();
+    assert!(listed.contains(&(String::from("notes.txt"), expected)));
+    assert!(listed.contains(&(String::from("HELLO.TXT"), 0)));
+}
+
 // Catches a missing clock writing a made-up date: without `with_clock`
 // the date and time fields of a new entry stay zero as before.
 #[test]

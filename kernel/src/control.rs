@@ -333,6 +333,7 @@ impl ControlSource for UartControlSource<'_> {
             return Ok(Stat {
                 size: 0,
                 kind: STAT_KIND_DIR,
+                mtime: 0,
             });
         }
         let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
@@ -344,13 +345,14 @@ impl ControlSource for UartControlSource<'_> {
             } else {
                 STAT_KIND_FILE
             },
+            mtime: info.modified,
         })
     }
 
-    /// guestの`fstat`をfdのentryから返す。file fdは`FileDesc`が保持する
-    /// size（open時の値を`write_range`が更新する）を返すため、sessionへ
-    /// 触れずに済む。pipe端とconsoleはsize 0でそれぞれの`STAT_KIND_*`を
-    /// 返す。未割当fdは`EBADF`。
+    /// guestの`fstat`をfdのentryから返す。file fdのsizeは`FileDesc`が保持する
+    /// 値（open時の値を`write_range`が更新する）で、更新日時だけはsessionから
+    /// directory recordを読む。pipe端とconsoleはsize 0・mtime 0でそれぞれの
+    /// `STAT_KIND_*`を返す。未割当fdは`EBADF`。
     #[cfg(target_arch = "riscv64")]
     fn fstat(&mut self, fd: usize) -> Result<minios_abi::syscall::Stat, isize> {
         use minios_abi::syscall::{EBADF, STAT_KIND_FILE, Stat};
@@ -360,17 +362,25 @@ impl ControlSource for UartControlSource<'_> {
         // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
         let entry = unsafe { crate::fd_entry_mut(fd) }.ok_or(EBADF)?;
         Ok(match entry {
-            FdEntry::File(file) => Stat {
-                size: file.desc().size(),
-                kind: STAT_KIND_FILE,
-            },
+            FdEntry::File(file) => {
+                let desc = *file.desc();
+                // Safety: dispatch経由でtrap handlerの実行窓から呼ばれる。
+                let session = unsafe { crate::borrow_file_storage() }.map_err(storage_errno)?;
+                Stat {
+                    size: desc.size(),
+                    kind: STAT_KIND_FILE,
+                    mtime: session.modified_of(&desc).map_err(fat_errno)?,
+                }
+            }
             FdEntry::Pipe { .. } => Stat {
                 size: 0,
                 kind: minios_abi::syscall::STAT_KIND_PIPE,
+                mtime: 0,
             },
             FdEntry::Console(_) => Stat {
                 size: 0,
                 kind: minios_abi::syscall::STAT_KIND_CONSOLE,
+                mtime: 0,
             },
         })
     }
@@ -403,6 +413,8 @@ impl ControlSource for UartControlSource<'_> {
             } else {
                 STAT_KIND_FILE
             },
+            size: entry.size(),
+            mtime: entry.modified(),
             name: buffer,
         }))
     }

@@ -127,6 +127,11 @@ pub(super) fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
         first_cluster: (high << 16) | low,
         size: u32::from_le_bytes([record[28], record[29], record[30], record[31]]),
         directory: attributes & 0x10 != 0,
+        #[cfg(not(target_arch = "riscv32"))]
+        modified: super::stamp::fat_to_unix_seconds(
+            u16::from_le_bytes([record[24], record[25]]),
+            u16::from_le_bytes([record[22], record[23]]),
+        ),
     })
 }
 

@@ -224,7 +224,24 @@ impl<R: SectorReader> Fat32<R> {
         Ok(FileStat {
             size: entry.size,
             directory: entry.directory,
+            modified: entry.modified,
         })
+    }
+
+    /// 開いた`file`のdirectory recordが持つ最終更新日時（Unix時刻の秒）。
+    /// 日時を持たないentryは0。`fstat`が使う。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub fn modified_of(&mut self, file: &FileDesc) -> Result<u64, FatError<R::Error>> {
+        let mut scratch = [0; 512];
+        let lba = self.data_sector_lba(file.dir_cluster, file.dir_index / 16)?;
+        self.reader
+            .read_sector(lba, &mut scratch)
+            .map_err(FatError::Read)?;
+        let offset = (file.dir_index % 16) as usize * 32;
+        Ok(super::stamp::fat_to_unix_seconds(
+            super::parse::read_u16(&scratch, offset + 24),
+            super::parse::read_u16(&scratch, offset + 22),
+        ))
     }
 
     /// 開いたfileの`offset` byte目から`output`へ最大`output.len()` byte

@@ -47,6 +47,9 @@ pub struct DirEntry {
     first_cluster: u32,
     size: u32,
     directory: bool,
+    /// 最終更新日時のUnix時刻（秒）。日時fieldが0か暦に無い値なら0。
+    #[cfg(not(target_arch = "riscv32"))]
+    modified: u64,
 }
 
 impl DirEntry {
@@ -62,6 +65,12 @@ impl DirEntry {
 
     pub const fn is_directory(&self) -> bool {
         self.directory
+    }
+
+    /// 最終更新日時のUnix時刻（秒）。日時を持たないentryは0。
+    #[cfg(not(target_arch = "riscv32"))]
+    pub const fn modified(&self) -> u64 {
+        self.modified
     }
 }
 
@@ -162,6 +171,8 @@ pub struct FileStat {
     pub size: u32,
     /// directoryなら`true`。
     pub directory: bool,
+    /// 最終更新日時のUnix時刻（秒）。日時を持たないentryは0。
+    pub modified: u64,
 }
 
 /// directory走査中のentryの物理位置。`dir_head`はそのentryを含む

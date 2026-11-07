@@ -13,6 +13,24 @@ use minios_abi::time::DateTime;
 
 use super::parse::write_u16;
 
+/// entryの更新日`date`と更新時刻`time`をUnix時刻（秒）へ戻す。日付が0
+/// （日時を書かないimplementationが作ったentry）か、暦に無い値なら0。
+pub(super) fn fat_to_unix_seconds(date: u16, time: u16) -> u64 {
+    if date == 0 {
+        return 0;
+    }
+    DateTime {
+        year: 1980 + i64::from(date >> 9),
+        month: ((date >> 5) & 0x0f) as u8,
+        day: (date & 0x1f) as u8,
+        hour: (time >> 11) as u8,
+        minute: ((time >> 5) & 0x3f) as u8,
+        second: ((time & 0x1f) * 2) as u8,
+    }
+    .to_unix_seconds()
+    .unwrap_or(0)
+}
+
 /// FATが表せる最初の瞬間（1980-01-01 00:00:00 UTC）のUnix時刻（秒）。
 const FAT_EPOCH_SECONDS: u64 = 315_532_800;
 /// FATが表せる最後の年。年の7 bitが1980からの127年までを持つ。

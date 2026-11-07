@@ -810,8 +810,12 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let bundle = PayloadBundle::create_user_shell()?;
         let disk = shell_tool_disk(None)?;
-        let (command, command_line) =
-            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
+        // `ls -l`が出す更新日時を決めるため、RTCを分の頭から始める。scriptは
+        // 数秒で終わるので、作ったfileの日時は同じ分に収まる。
+        let (command, command_line) = with_rtc_base(
+            qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path()),
+            USER_SHELL_RTC_BASE,
+        );
         let completed =
             run_stdin_command(command, command_line.clone(), &user_shell_stdin(), deadline)?;
         bundle.remove();
@@ -2018,13 +2022,16 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 34] = [
+const USER_SHELL_SCRIPT: [&[u8]; 35] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
     // 小文字だけの8.3名はLFNなしで作られ、一覧でも小文字のまま出る。
     b"echo redirected > out.txt\n",
     b"cat out.txt\n",
+    // `-l`はsize・更新日時付きの長い形。fixtureの日時は1980-01-01に固定され、
+    // scriptが作ったfileはRTCの起点の分になる。
+    b"ls -l HELLO.TXT out.txt DOCS/NOTE.TXT\n",
     b"wc < HELLO.TXT\n",
     b"echo a b c | cat | wc\n",
     // shellを含めprocess tableの上限8個ちょうどを使う7段と、8段の拒否。
@@ -2114,6 +2121,11 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         exit(),
         // cat out.txt
         stdout(b"redirected\n"),
+        exit(),
+        // ls -l HELLO.TXT out.txt DOCS/NOTE.TXT
+        stdout(b"-       18 1980-01-01 00:00 HELLO.TXT\n"),
+        stdout(b"-       11 2001-02-03 04:05 out.txt\n"),
+        stdout(b"-       17 1980-01-01 00:00 DOCS/NOTE.TXT\n"),
         exit(),
         // wc < HELLO.TXT
         stdout(b"1 3 18\n"),
@@ -3921,6 +3933,10 @@ fn qemu_command_with_payload_and_net(kernel: &Path, bundle: &Path) -> (Command, 
 /// user-sleep検査でRTCを始める日時（UTC）。user_sleep guestの`RTC_BASE_MS`と
 /// 同じ瞬間である。
 const USER_SLEEP_RTC_BASE: &str = "2001-02-03T04:05:06";
+
+/// user-shell検査でRTCを始める日時（UTC）。`ls -l`の日時が`2001-02-03 04:05`
+/// になる。
+const USER_SHELL_RTC_BASE: &str = "2001-02-03T04:05:00";
 
 /// QEMUのRTCを`base`（UTCの`YYYY-MM-DDTHH:MM:SS`）から始める`-rtc`引数を
 /// commandとその表示へ足す。既定のRTCはhostの現在時刻から始まる。
