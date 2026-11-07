@@ -57,7 +57,7 @@ shutting down
 シングルハート構成の`info`は、バナーに続けて`hart id: 0`を表示します。
 `cargo xtask run`は起動ごとに検査用のFAT32 disk imageを生成して接続するため、`ls`や`cat`でその中身を確かめられます。
 `cargo xtask run`が起動するのは起動と診断のためのkernel shellです。
-user shellは`cargo xtask sh`で対話的に起動でき、`cat HELLO.TXT | wc`のようなpipelineや、`ls`（`-l`でsizeと更新日時も出す）、`mkdir`、`rmdir`、`rm`、`mv`によるfile操作（空白を含む名前は`"my notes.txt"`のように引用符で囲む）、`cd`と`pwd`による作業directoryの移動、RTCから得た現在のUTC日時を出す`date`を端末から試せます（Ctrl-Dか`exit`で終了）。`cargo xtask sh --disk work.img`とすると、disk imageを残して次の起動でも同じfileを使えます。
+user shellは`cargo xtask sh`で対話的に起動でき、`cat HELLO.TXT | wc`のようなpipeline、`;`・`&&`・`||`によるcommandの連結と`$?`、`ls`（`-l`でsizeと更新日時も出す）、`mkdir`、`rmdir`、`rm`、`mv`によるfile操作（空白を含む名前は`"my notes.txt"`のように引用符で囲む）、`cd`と`pwd`による作業directoryの移動、RTCから得た現在のUTC日時を出す`date`を端末から試せます（Ctrl-Dか`exit`で終了）。`cargo xtask sh --disk work.img`とすると、disk imageを残して次の起動でも同じfileを使えます。
 `cargo xtask test user-shell`は同じshellへscriptを流して出力を検査し、その仕組みは[第23章](docs/guide/23-process-syscalls.md)で説明しています。
 
 ## 対応環境
