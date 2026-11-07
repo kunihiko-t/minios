@@ -9,6 +9,13 @@ impl ParseError {
     }
 }
 
+/// 8.3 entryのbyte 12（`NTRes`）のうち、baseを小文字で見せる印。
+/// Windows NTとLinuxのvfatは、英字が全て小文字の8.3名をLFNなしで
+/// 持つためにこの印を使う。
+pub(super) const CASE_LOWER_BASE: u8 = 0x08;
+/// `NTRes`のうち、拡張子を小文字で見せる印。
+pub(super) const CASE_LOWER_EXT: u8 = 0x10;
+
 pub(super) fn uppercase_ascii(byte: u8) -> u8 {
     if byte.is_ascii_lowercase() {
         byte - b'a' + b'A'
@@ -86,17 +93,27 @@ pub(super) fn parse_dir_entry(record: &[u8]) -> Option<DirEntry> {
         }
     }
 
+    // 表示名は大文字の8.3名を基本にし、`NTRes`の印があればbaseと拡張子を
+    // それぞれ小文字で見せる。
+    let case = record[12];
+    let display = |byte: u8, flag: u8| {
+        if case & flag != 0 {
+            byte.to_ascii_lowercase()
+        } else {
+            uppercase_ascii(byte)
+        }
+    };
     let mut name = [0; 255];
     let mut name_len = 0;
     for &byte in &record[..base_len] {
-        name[name_len] = uppercase_ascii(byte);
+        name[name_len] = display(byte, CASE_LOWER_BASE);
         name_len += 1;
     }
     if extension_len != 0 {
         name[name_len] = b'.';
         name_len += 1;
         for &byte in &record[8..8 + extension_len] {
-            name[name_len] = uppercase_ascii(byte);
+            name[name_len] = display(byte, CASE_LOWER_EXT);
             name_len += 1;
         }
     }
@@ -285,6 +302,25 @@ pub(super) fn write_u16(sector: &mut [u8], offset: usize, value: u16) {
 #[cfg(not(target_arch = "riscv32"))]
 pub(super) fn write_u32(sector: &mut [u8], offset: usize, value: u32) {
     sector[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// 8.3へ正規化できる`name`の大小文字を`NTRes`の印で表せるなら、その印を
+/// 返す。baseと拡張子のそれぞれについて、英字が小文字だけなら印を立て、
+/// 大文字だけか英字を含まなければ立てない。大小が混ざる部分があれば
+/// `None`で、その名前は大小文字を残すためにLFNで持つ。
+#[cfg(not(target_arch = "riscv32"))]
+pub(super) fn short_name_case(name: &str) -> Option<u8> {
+    let (base, ext) = name.split_once('.').unwrap_or((name, ""));
+    let part = |part: &str, flag: u8| {
+        let lower = part.bytes().any(|byte| byte.is_ascii_lowercase());
+        let upper = part.bytes().any(|byte| byte.is_ascii_uppercase());
+        match (lower, upper) {
+            (true, true) => None,
+            (true, false) => Some(flag),
+            (false, _) => Some(0),
+        }
+    };
+    Some(part(base, CASE_LOWER_BASE)? | part(ext, CASE_LOWER_EXT)?)
 }
 
 /// `name`をFATのraw 8.3名へ正規化する。小文字ASCIIは大文字化し、

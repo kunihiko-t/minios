@@ -87,16 +87,17 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         init: impl FnOnce(&mut [u8]),
     ) -> Result<(u32, u32), FatError<R::Error>> {
         match new {
-            NewName::Short(short) => {
+            NewName::Short(short, case) => {
                 let (cluster, index, terminator) = self.find_free_dir_slot(dir_cluster, scratch)?;
                 self.place_dir_entry(cluster, index, terminator, scratch, |record| {
                     init(record);
                     record[..11].copy_from_slice(&short);
+                    record[12] = case;
                 })?;
                 Ok((cluster, index))
             }
             NewName::Long(name) => {
-                let slot = self.reserve_long_entry(dir_cluster, name, scratch)?;
+                let slot = self.reserve_long_entry(dir_cluster, name, None, scratch)?;
                 self.write_long_entry(&slot, name, scratch, |record| init(record))
             }
         }
@@ -661,14 +662,14 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             }
             parent.first_cluster
         };
-        let short = match new {
-            NewName::Short(short) => short,
+        let (short, case) = match new {
+            NewName::Short(short, case) => (short, case),
             NewName::Long(name) => {
                 return self.rename_long(&entry, &loc, new_dir, name, &mut scratch);
             }
         };
         if new_dir == loc.dir_head {
-            return self.rename_in_place(&loc, &short, entry.directory, &mut scratch);
+            return self.rename_in_place(&loc, &short, case, entry.directory, &mut scratch);
         }
 
         // 移すdirの中に自分を入れると`..`chainが閉じるため拒否する。
@@ -678,7 +679,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         let replaced = self.check_rename_target(
             entry.directory,
             new_dir,
-            NewName::Short(short),
+            NewName::Short(short, case),
             (loc.cluster, loc.index),
             &mut scratch,
         )?;
@@ -725,6 +726,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         self.place_dir_entry(tcluster, tindex, terminator, &mut scratch, |slot| {
             slot.copy_from_slice(&record);
             slot[..11].copy_from_slice(&short);
+            slot[12] = case;
         })?;
         if entry.directory {
             let parent = if new_dir == self.root_cluster {
@@ -746,19 +748,21 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         &mut self,
         loc: &DirLoc,
         short: &[u8; 11],
+        case: u8,
         source_is_dir: bool,
         scratch: &mut [u8; 512],
     ) -> Result<RenameOutcome, FatError<R::Error>> {
         let replaced = self.check_rename_target(
             source_is_dir,
             loc.dir_head,
-            NewName::Short(*short),
+            NewName::Short(*short, case),
             (loc.cluster, loc.index),
             scratch,
         )?;
 
         // sourceのLFN runを消し、置換対象を削除してから、entryのname
-        // byteを新8.3名へ書き換える。
+        // byteを新8.3名へ、`NTRes`を新しい小文字の印へ書き換える。
+        // 大小文字だけを変えるrenameもここで表示名が変わる。
         let (run_start, run_end) = self.lfn_run_bounds(loc, scratch)?;
         if run_start != (loc.cluster, loc.index) {
             self.mark_deleted_range(loc.dir_head, run_start, run_end, scratch)?;
@@ -774,6 +778,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             .map_err(FatError::Read)?;
         let offset = (loc.index % 16) as usize * 32;
         scratch[offset..offset + 11].copy_from_slice(short);
+        scratch[offset + 12] = case;
         self.reader
             .write_sector(lba, scratch)
             .map_err(FatError::Read)?;
@@ -806,7 +811,8 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             (loc.cluster, loc.index),
             scratch,
         )?;
-        let slot = self.reserve_long_entry(new_dir, name, scratch)?;
+        let slot =
+            self.reserve_long_entry(new_dir, name, Some((loc.cluster, loc.index)), scratch)?;
 
         let (run_start, _) = self.lfn_run_bounds(loc, scratch)?;
         let mut record = [0u8; 32];

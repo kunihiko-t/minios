@@ -28,7 +28,8 @@ fn rename_rewrites_the_entry_name_and_preserves_contents() {
 }
 
 // Catches rename duplicating the entry or failing on a same-name
-// rename: renaming an entry to its own name must be a no-op success.
+// rename: renaming an entry to its own name (in another case) must succeed
+// in place, keeping the 8.3 name and only changing how it is listed.
 #[test]
 fn rename_to_the_same_name_is_a_noop() {
     let mut fs = mounted_writable_fixture();

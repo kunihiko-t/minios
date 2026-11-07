@@ -225,7 +225,7 @@ childがbasenameの`ECHO.ELF`と渡した3個の文字列をこの順で標準�
 frame列のexact照合と最後のdiagnosticで、argvの中身と順序、frameの回収を検査します。
 `user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`、`ls`、`mkdir`、`rmdir`、`rm`、`mv`をdisk imageの`BIN`へ置きます。
 Ready frameの後にscriptをStdin frameとして送り、最後に長さ0のStdin frameでEOFを伝えます。
-scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、`echo redirected > OUT.TXT`、`cat OUT.TXT`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、引用符で囲んだ空白入りの名前へのredirectと`cat`・`rm`、引用符の中の`|`、閉じていない引用符、日本語の名前`メモ.txt`へのredirectと`ls`・`cat`・`rm`、`mkdir`・LFN名への`mv`・`cd`と`pwd`・作業directoryでの`ls`・`cat`・`rm`・`cd ..`・`rmdir`・rootの`ls`によるfile操作、存在しないdirectoryへの`cd`、不在fileへの`rm`、存在しない`nosuch`の順です。
+scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、小文字だけの8.3名として作り一覧にも小文字で出る`echo redirected > out.txt`とその`cat`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、引用符で囲んだ空白入りの名前へのredirectと`cat`・`rm`、引用符の中の`|`、閉じていない引用符、日本語の名前`メモ.txt`へのredirectと`ls`・`cat`・`rm`、`mkdir`・LFN名への`mv`・`cd`と`pwd`・作業directoryでの`ls`・`cat`・`rm`・`cd ..`・`rmdir`・rootの`ls`によるfile操作、存在しないdirectoryへの`cd`、不在fileへの`rm`、存在しない`nosuch`の順です。
 8段の行は何も起動されず、`too many commands`の標準エラー1行だけになります。
 1 frameに2行を詰めた送り方と、1行を2 frameへ分けた送り方も含めます。
 shellは行ごとにchildを起動順に`waitpid`し、pipelineでconsoleへ書くのは最後のcommandだけです。

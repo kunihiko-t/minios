@@ -250,8 +250,8 @@ harnessは`SH.ELF`をboot payloadにし、build済みのtool（`xtask/src/guest.
 echo hello world
 cat HELLO.TXT
 cat HELLO.TXT | wc
-echo redirected > OUT.TXT
-cat OUT.TXT
+echo redirected > out.txt
+cat out.txt
 wc < HELLO.TXT
 echo a b c | cat | wc
 echo a b c | cat | cat | cat | cat | cat | wc
