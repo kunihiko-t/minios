@@ -2,6 +2,7 @@ use crate::storage::{SectorReader, SectorWriter};
 
 use super::lfn::NewName;
 use super::parse::{is_valid_component, read_u16, read_u32, write_u16, write_u32};
+use super::stamp::FatStamp;
 use super::{
     DIR_ATTR_DIR, DIR_ATTR_FILE, DOT_DOT_SHORT_NAME, DOT_SHORT_NAME, DirEntry, DirLoc,
     DirRecordPos, FAT_EOC, FSINFO_LEAD_SIG, FSINFO_STRUCT_SIG, FSINFO_TRAIL_SIG, FSINFO_UNKNOWN,
@@ -13,6 +14,18 @@ use super::{
 /// RV32ではそもそも構成されない。
 #[cfg(not(target_arch = "riscv32"))]
 impl<R: SectorReader + SectorWriter> Fat32<R> {
+    /// 作成・更新したentryへ日時を書くための時計を設定する。`clock`は
+    /// Unix時刻（millisecond）を返し、`None`を返す間は日時fieldへ触れない。
+    pub fn with_clock(mut self, clock: fn() -> Option<u64>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// 今の時計が示す瞬間をFATの日時へ直す。時計が無ければ`None`。
+    fn stamp(&self) -> Option<FatStamp> {
+        (self.clock)().map(FatStamp::from_unix_millis)
+    }
+
     /// `path`が示すfileを作成またはwritableに開く。fileが既にあれば
     /// 内容を保ったまま記述子を返す。無ければ親directoryへentryを追加し、
     /// 空のfileとして返す。最終要素が8.3へ正規化できれば8.3 entryだけを
@@ -86,6 +99,14 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         scratch: &mut [u8; 512],
         init: impl FnOnce(&mut [u8]),
     ) -> Result<(u32, u32), FatError<R::Error>> {
+        // 作成・最終アクセス・更新の日時はどれも今の瞬間にする。
+        let stamp = self.stamp();
+        let init = |record: &mut [u8]| {
+            init(record);
+            if let Some(stamp) = stamp {
+                stamp.write_created(record);
+            }
+        };
         match new {
             NewName::Short(short, case) => {
                 let (cluster, index, terminator) = self.find_free_dir_slot(dir_cluster, scratch)?;
@@ -201,6 +222,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         } else {
             dir_cluster
         };
+        let stamp = self.stamp();
         let result = (|fs: &mut Self| -> Result<(), FatError<R::Error>> {
             let lba = fs.data_sector_lba(new_cluster, 0)?;
             // 新規確保clusterはalloc_clusterがzero-fill済みだが、その
@@ -215,6 +237,11 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
             scratch[43] = DIR_ATTR_DIR;
             write_u16(&mut scratch, 52, (dotdot_cluster >> 16) as u16);
             write_u16(&mut scratch, 58, dotdot_cluster as u16);
+            // `.`と`..`もdirectory自身と同じ作成日時を持つ（Linuxのvfatと同じ）。
+            if let Some(stamp) = stamp {
+                stamp.write_created(&mut scratch[..32]);
+                stamp.write_created(&mut scratch[32..64]);
+            }
             fs.reader
                 .write_sector(lba, &scratch)
                 .map_err(FatError::Read)?;
@@ -587,6 +614,10 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         write_u16(scratch, offset + 20, (file.first_cluster >> 16) as u16);
         write_u16(scratch, offset + 26, (file.first_cluster & 0xffff) as u16);
         write_u32(scratch, offset + 28, file.size);
+        // 内容を書き換えたので、更新日時と最終アクセス日を今の瞬間にする。
+        if let Some(stamp) = self.stamp() {
+            stamp.write_modified(&mut scratch[offset..offset + 32]);
+        }
         self.reader
             .write_sector(lba, scratch)
             .map_err(FatError::Read)

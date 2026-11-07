@@ -10,6 +10,7 @@ mod dir;
 mod lfn;
 mod read;
 mod rename;
+mod stamp;
 mod write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

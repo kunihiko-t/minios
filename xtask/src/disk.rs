@@ -26,6 +26,9 @@ pub const NOTE_TXT: &[u8] = b"note inside docs\n";
 pub const LFN_TXT: &[u8] = b"long file contents\n";
 
 const SECTOR: usize = 512;
+/// fixtureのentryが持つFATの日付（1980-01-01）。年は1980年からの7 bit、
+/// 月は4 bit、日は5 bitで、`(0 << 9) | (1 << 5) | 1`である。
+const FIXTURE_FAT_DATE: u16 = (1 << 5) | 1;
 const SECTORS_PER_CLUSTER: u8 = 1;
 const RESERVED_SECTORS: u16 = 32;
 const FAT_COUNT: u8 = 2;
@@ -427,6 +430,12 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
             record[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
             record[26..28].copy_from_slice(&((cluster & 0xffff) as u16).to_le_bytes());
             record[28..32].copy_from_slice(&size.to_le_bytes());
+            // 作成日・最終アクセス日・更新日。imageを再現できるよう日時は固定し、
+            // FATが表せる最初の日（1980-01-01 00:00:00）にする。0のままでは
+            // 月と日が0の不正な日付になる。
+            for offset in [16, 18, 24] {
+                record[offset..offset + 2].copy_from_slice(&FIXTURE_FAT_DATE.to_le_bytes());
+            }
         };
     {
         let root = &mut image[root_start..root_start + SECTOR];
