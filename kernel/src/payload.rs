@@ -263,6 +263,7 @@ pub(crate) fn run_boot_payload(
             // callerを`BlockedOnIo`で寝かせられるようにする。戻ったら即解除。
             crate::storage::virtio_blk::set_io_block_allowed(true);
         }
+        time::start_quantum();
         // Safety: processがuser address space・連続した専用kernel stack・保存済み
         // contextを所有する。assemblyはkernel satpとboot stackを復元して戻る。
         let exit = unsafe {

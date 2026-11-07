@@ -39,6 +39,37 @@ pub fn sleep_deadline(now: u64, millis: usize) -> u64 {
     now.saturating_add(ticks).saturating_add(1)
 }
 
+/// 現在processをdispatchした時刻（`time` CSR）。run loopが`__run_user`の
+/// 直前に`start_quantum`で書き、U-mode中のtimer割り込みが`quantum_expired`で
+/// 読む。同時にdispatchされるprocessは1つだけである。
+#[cfg(target_arch = "riscv64")]
+static QUANTUM_START: AtomicU64 = AtomicU64::new(0);
+
+/// 今からdispatchするprocessの持ち時間を始める。
+#[cfg(target_arch = "riscv64")]
+pub fn start_quantum() {
+    QUANTUM_START.store(crate::arch::riscv64::csr::read_time(), Ordering::Relaxed);
+}
+
+/// dispatchしてから1 tick分の時間が経ったか。tickは時刻を数えるために毎回
+/// 処理するが、preemptはこれが真のときだけにする。前のprocessがkernel内で
+/// 長く過ごす間に期限を過ぎたtickは、次のprocessのdispatch直後に届くため、
+/// tickのたびにpreemptすると次のprocessは何もしないうちに順番を失う。
+#[cfg(target_arch = "riscv64")]
+pub fn quantum_expired() -> bool {
+    quantum_elapsed(
+        QUANTUM_START.load(Ordering::Relaxed),
+        crate::arch::riscv64::csr::read_time(),
+        TIMEBASE.load(Ordering::Relaxed) / TICKS_PER_SECOND,
+    )
+}
+
+/// `start`から`now`までに`cycles_per_tick`以上経ったか。`time` CSRは
+/// 単調増加なので、wrapしても差は正しく求まる。
+pub fn quantum_elapsed(start: u64, now: u64, cycles_per_tick: u64) -> bool {
+    now.wrapping_sub(start) >= cycles_per_tick
+}
+
 /// timer割り込みがpendingか（`sip.STIP`）。run loopのidle待ちは
 /// S-mode割り込みを遮断したまま回るため、これをpollしてtickを進める。
 #[cfg(target_arch = "riscv64")]
@@ -85,7 +116,29 @@ fn schedule_next() -> Result<(), minios_kernel::sbi::SbiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sleep_deadline, ticks_to_millis};
+    use super::{CYCLES_PER_TICK, quantum_elapsed, sleep_deadline, ticks_to_millis};
+
+    // Catches a tick that was already pending at dispatch preempting the
+    // newly dispatched process: only a full tick of run time ends a quantum.
+    #[test]
+    fn a_quantum_ends_only_after_a_full_tick() {
+        assert!(!quantum_elapsed(1_000, 1_000, CYCLES_PER_TICK));
+        assert!(!quantum_elapsed(
+            1_000,
+            1_000 + CYCLES_PER_TICK - 1,
+            CYCLES_PER_TICK
+        ));
+        assert!(quantum_elapsed(
+            1_000,
+            1_000 + CYCLES_PER_TICK,
+            CYCLES_PER_TICK
+        ));
+        assert!(quantum_elapsed(
+            u64::MAX - 10,
+            CYCLES_PER_TICK,
+            CYCLES_PER_TICK
+        ));
+    }
 
     // Catches sleep waking early: the tick count must round up and add one
     // for the partially elapsed current tick.
