@@ -116,6 +116,9 @@ pub fn dispatch_syscall<M: FrameStore, S: ControlSink, R: ControlSource>(
     } else if number == SyscallNumber::Clock as usize {
         context.set_register(10, source.clock() as usize);
         SyscallFlow::Resume
+    } else if number == SyscallNumber::Realtime as usize {
+        context.set_register(10, source.realtime() as usize);
+        SyscallFlow::Resume
     } else if number == SyscallNumber::Sleep as usize {
         // `sleep(0)`はmarkせずyieldと同じ経路へ流す。
         let millis = context.register(10);

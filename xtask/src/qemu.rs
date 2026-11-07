@@ -749,7 +749,11 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
     if kind == TestKind::UserSleep {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let bundle = PayloadBundle::create_user_sleep()?;
-        let (command, command_line) = qemu_command_with_payload(&kernel, bundle.path());
+        // guestは実時刻がこの起点の直後にあることを確かめる。
+        let (command, command_line) = with_rtc_base(
+            qemu_command_with_payload(&kernel, bundle.path()),
+            USER_SLEEP_RTC_BASE,
+        );
         let completed = run_command_with_capture(command, command_line.clone(), deadline)?;
         bundle.remove();
         return verify_exact_frames(
@@ -3911,6 +3915,23 @@ fn qemu_command_with_payload_and_net(kernel: &Path, bundle: &Path) -> (Command, 
     let command_line = render_command(QEMU_PROGRAM, &args);
     let mut command = Command::new(QEMU_PROGRAM);
     command.args(&args);
+    (command, command_line)
+}
+
+/// user-sleep検査でRTCを始める日時（UTC）。user_sleep guestの`RTC_BASE_MS`と
+/// 同じ瞬間である。
+const USER_SLEEP_RTC_BASE: &str = "2001-02-03T04:05:06";
+
+/// QEMUのRTCを`base`（UTCの`YYYY-MM-DDTHH:MM:SS`）から始める`-rtc`引数を
+/// commandとその表示へ足す。既定のRTCはhostの現在時刻から始まる。
+fn with_rtc_base((mut command, command_line): (Command, String), base: &str) -> (Command, String) {
+    let value = format!("base={base}");
+    command.args(["-rtc", value.as_str()]);
+    let command_line = format!(
+        "{command_line} {} {}",
+        shell_quote("-rtc"),
+        shell_quote(&value)
+    );
     (command, command_line)
 }
 

@@ -212,7 +212,8 @@ parentが`waitpid`でblockするため、childのstdoutとExit frameはparentの
 heap先頭より下へ戻す`EINVAL`と巨大な要求の`ENOMEM`がbreakを動かさないこと、2 page伸ばして書いたheapを負のincrementで戻してから再び伸ばすとzeroに戻っていることも確かめてから、`heap verified`を出して終了コード42を返すことを要求します。
 diskを使わない単一processの経路なので、exact照合で検査します。
 `user-sleep`ではuser_sleep guestが`clock`を読み、`sleep(50)`の後にもう一度読んで差が50以上であることを確かめます。
-`yield`と`sleep(0)`がどちらも0を返すことも確かめてから、`sleep verified`を出して終了コード42を返すことを要求します。
+`yield`と`sleep(0)`がどちらも0を返すことも確かめます。
+harnessはQEMUへ`-rtc base=2001-02-03T04:05:06`を渡し、guestは`realtime`がその起点から10分以内にあってUTCの暦で2001-02-03の4時台になること、`sleep`の前後で50 ms以上進むことも確かめてから、`sleep verified`を出して終了コード42を返すことを要求します。
 測った差は実行ごとに変わるため標準出力へは出さず、frame列のexact照合で検査します。
 processが一つだけなので、sleep中はrun loopのidle待ちがtimer tickを進めて起こす経路も通ります。
 `user-dup`ではuser_dup guestが`pipe`のwrite端を`dup2`でfd 1へ移してから`DOCS/CHILD.ELF`を`spawn`し、退避しておいたconsoleでfd 1を戻します。
@@ -223,7 +224,7 @@ childのExit frameが写した`spawn-child`より先に来る順序のexact照�
 `argc`の上限超過と長すぎる文字列の`EINVAL`、読めないargvの`EFAULT`がchildを作らないことを確かめてから、`argc`が0のspawnと`echoargs`、`alpha`、`beta gamma`を渡したspawnを順に`waitpid`します。
 childがbasenameの`ECHO.ELF`と渡した3個の文字列をこの順で標準出力へ書き、失敗したspawnがpidを消費していないことも確かめてから、`spawn args verified`を出して終了コード42を返すことを要求します。
 frame列のexact照合と最後のdiagnosticで、argvの中身と順序、frameの回収を検査します。
-`user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`、`ls`、`mkdir`、`rmdir`、`rm`、`mv`をdisk imageの`BIN`へ置きます。
+`user-shell`ではuser shellの`SH.ELF`をboot payloadにし、harnessがbuildした`cat`、`wc`、`echo`、`ls`、`mkdir`、`rmdir`、`rm`、`mv`、`date`をdisk imageの`BIN`へ置きます。
 Ready frameの後にscriptをStdin frameとして送り、最後に長さ0のStdin frameでEOFを伝えます。
 scriptは`echo hello world`、`cat HELLO.TXT`、`cat HELLO.TXT | wc`、小文字だけの8.3名として作り一覧にも小文字で出る`echo redirected > out.txt`とその`cat`、`wc < HELLO.TXT`、`echo a b c | cat | wc`、shellを含めてprocess上限の8個を使い切る7段のpipeline、上限を越える8段のpipeline、8.3へ正規化できないためLFNで作る`echo saved > notes.backup`とその`cat`、引用符で囲んだ空白入りの名前へのredirectと`cat`・`rm`、引用符の中の`|`、閉じていない引用符、日本語の名前`メモ.txt`へのredirectと`ls`・`cat`・`rm`、`mkdir`・LFN名への`mv`・`cd`と`pwd`・作業directoryでの`ls`・`cat`・`rm`・`cd ..`・`rmdir`・rootの`ls`によるfile操作、存在しないdirectoryへの`cd`、不在fileへの`rm`、存在しない`nosuch`の順です。
 8段の行は何も起動されず、`too many commands`の標準エラー1行だけになります。

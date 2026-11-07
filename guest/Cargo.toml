@@ -250,6 +250,13 @@ bench = false
 doctest = false
 
 [[bin]]
+name = "minios-guest-date"
+path = "src/bin/date.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
 name = "minios-guest-proc-fault"
 path = "src/bin/proc_fault.rs"
 test = false

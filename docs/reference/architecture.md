@@ -35,6 +35,7 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
 
 ### 機器とコンソール
 
+- `drivers/goldfish_rtc.rs`：QEMU `virt`のGoldfish RTCからUnix時刻をnanosecondで読みます。kernelは起動時のbare modeで1回だけ呼び、以後は`time` CSRで時刻を進めます。
 - `drivers/plic.rs`：QEMU `virt`のPLICを初期化し、S-mode contextのthreshold・優先度・enable・claim/completeを提供します。
   UART受信とvirtio used-buffer完了の二系統のsourceをdispatchし、FDTにPLICが無いmachineでは無効のままpolling経路へ退避します。
 - `drivers/uart.rs`：QEMU `virt`の16550互換UARTについて、`write_byte`、`read_byte`、`has_byte`、`fmt::Write`だけを公開します。
@@ -99,7 +100,7 @@ ELF loaderが返す`LoadedImage`は、実行前は**inactive**です。
 
 - `user/context.rs`：entry、user stack、`sstatus.SPP=0`を持つ`UserContext`を定義します。
 - `user/memory.rs`：user pointerを参照として解釈せず、pageごとに`U=1`とread権限を確認してcopyします。
-- `user/syscall/`（`mod.rs`と`dispatch.rs`）：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`、`pipe`、`sbrk`、`clock`、`sleep`、`yield`、`dup2`、`kill`、`socket`、`sendto`、`recvfrom`、`fcntl`をdispatchします。
+- `user/syscall/`（`mod.rs`と`dispatch.rs`）：`a7`の番号と`a0`〜`a3`のargumentsから`write`、`exit`、`read`、`read_file`、`open`、`close`、`create`、`unlink`、`lseek`、`pread`、`pwrite`、`rename`、`mkdir`、`rmdir`、`getpid`、`spawn`、`waitpid`、`stat`、`fstat`、`readdir`、`exec`、`pipe`、`sbrk`、`clock`、`sleep`、`yield`、`dup2`、`kill`、`socket`、`sendto`、`recvfrom`、`fcntl`、`chdir`、`getcwd`、`realtime`をdispatchします。
 - `user/run.rs`：実行用address spaceとkernel trap stackを所有し、Exit control frameの後に回収します。
 - `boot_payload.rs`：予約windowから固定長headerを先に検証し、manifestとELF rangeを二段目でparseします。
 

@@ -588,6 +588,15 @@ impl ControlSource for UartControlSource<'_> {
         isize::try_from(crate::time::uptime_millis()).unwrap_or(isize::MAX)
     }
 
+    /// guestの`realtime`へ、起動時にRTCから得た時刻を`time` CSRで進めた
+    /// Unix時刻（millisecond）を返す。RTCの無いmachineは`ENODEV`。
+    #[cfg(target_arch = "riscv64")]
+    fn realtime(&mut self) -> isize {
+        crate::time::realtime_millis().map_or(minios_abi::syscall::ENODEV, |millis| {
+            isize::try_from(millis).unwrap_or(isize::MAX)
+        })
+    }
+
     /// guestの`sleep`で現在processを起床tickまでのsleep状態へmarkする。
     #[cfg(target_arch = "riscv64")]
     fn sleep(&mut self, millis: usize) -> Result<(), isize> {

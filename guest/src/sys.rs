@@ -232,6 +232,12 @@ pub fn sys_clock() -> isize {
     ecall(SyscallNumber::Clock, 0, 0, 0, 0)
 }
 
+/// `realtime`を呼ぶ。Unix epochからの経過millisecondを返す。RTCの無い
+/// machineでは`ENODEV`。
+pub fn sys_realtime() -> isize {
+    ecall(SyscallNumber::Realtime, 0, 0, 0, 0)
+}
+
 /// `sleep`を呼ぶ。`millis`以上経過してから0を返す。0はyieldと同じ。
 pub fn sys_sleep(millis: usize) -> isize {
     ecall(SyscallNumber::Sleep, millis, 0, 0, 0)

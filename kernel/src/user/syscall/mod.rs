@@ -277,6 +277,12 @@ pub trait ControlSource {
         ENOSYS
     }
 
+    /// Unix epochからの経過millisecondを返す。負の値はそのまま`a0`へ
+    /// 返すerrnoである。default実装は`ENOSYS`。
+    fn realtime(&mut self) -> isize {
+        ENOSYS
+    }
+
     /// 呼び出しprocessを`millis`（1以上）経過までのsleep状態へmarkする。
     /// dispatchは`Ok`で`a0`へ0を書き`Yield`を返すため、guestは起床後に
     /// ecallの次から再開する。`Err`はそのまま`a0`へ返すerrnoである。
