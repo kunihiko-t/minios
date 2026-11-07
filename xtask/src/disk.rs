@@ -535,9 +535,11 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
 }
 
 /// 使用中のimage pathと実バイト列の受け渡し用。QEMU起動時だけfileへ
-/// materializeし、終了後は呼び出し側が削除する。
+/// materializeし、終了後は呼び出し側が削除する。`keep`のimageは
+/// （`cargo xtask sh --disk`が指定したpathのもの）削除しない。
 pub struct DiskImage {
     path: PathBuf,
+    keep: bool,
 }
 
 impl DiskImage {
@@ -563,24 +565,41 @@ impl DiskImage {
                 .expect("system clock must be after Unix epoch")
                 .as_nanos()
         ));
-        let image = image_bytes(files);
-        let mut file = std::fs::File::create(&path)
-            .map_err(|error| format!("could not create {}: {error}", path.display()))?;
-        // 非0 byteを含む領域だけをseek+writeし、残りはholeのままにする。
-        let mut lba = 0u32;
-        while (lba as usize) < VOLUME_SECTORS as usize {
-            let start = lba as usize * SECTOR;
-            let sector = &image[start..start + SECTOR];
-            if sector.iter().any(|byte| *byte != 0) {
-                write_sector(&mut file, lba, sector)
-                    .map_err(|error| format!("could not write sector {lba}: {error}"))?;
+        write_image(&path, files)?;
+        Ok(Self { path, keep: false })
+    }
+
+    /// `path`のimageを使う。無ければ`files`を置いた新しいimageを作る。
+    /// どちらの場合も終了後に削除しない。既存fileの大きさがMiniOSのimageと
+    /// 違えば、別のfileを壊さないよう使わずにerrorを返す。戻り値の`bool`は
+    /// 新しく作ったかどうかである。
+    pub fn open_or_create(path: &Path, files: &[(&str, &[u8])]) -> Result<(Self, bool), String> {
+        let expected = u64::from(VOLUME_SECTORS) * SECTOR as u64;
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.len() == expected => Ok((
+                Self {
+                    path: path.to_owned(),
+                    keep: true,
+                },
+                false,
+            )),
+            Ok(metadata) => Err(format!(
+                "{} is {} bytes, not a MiniOS disk image ({expected} bytes)",
+                path.display(),
+                metadata.len()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                write_image(path, files)?;
+                Ok((
+                    Self {
+                        path: path.to_owned(),
+                        keep: true,
+                    },
+                    true,
+                ))
             }
-            lba += 1;
+            Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
         }
-        // 末尾を宣言して読み出し側がshort readしないようにする。
-        file.set_len(u64::from(VOLUME_SECTORS) * SECTOR as u64)
-            .map_err(|error| format!("could not size {}: {error}", path.display()))?;
-        Ok(Self { path })
     }
 
     pub fn path(&self) -> &Path {
@@ -588,8 +607,33 @@ impl DiskImage {
     }
 
     pub fn remove(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
+}
+
+/// `files`を置いたFAT32 imageを、使用sectorだけを書いたsparse fileとして
+/// `path`へ書く。
+fn write_image(path: &Path, files: &[(&str, &[u8])]) -> Result<(), String> {
+    let image = image_bytes(files);
+    let mut file = std::fs::File::create(path)
+        .map_err(|error| format!("could not create {}: {error}", path.display()))?;
+    // 非0 byteを含む領域だけをseek+writeし、残りはholeのままにする。
+    let mut lba = 0u32;
+    while (lba as usize) < VOLUME_SECTORS as usize {
+        let start = lba as usize * SECTOR;
+        let sector = &image[start..start + SECTOR];
+        if sector.iter().any(|byte| *byte != 0) {
+            write_sector(&mut file, lba, sector)
+                .map_err(|error| format!("could not write sector {lba}: {error}"))?;
+        }
+        lba += 1;
+    }
+    // 末尾を宣言して読み出し側がshort readしないようにする。
+    file.set_len(u64::from(VOLUME_SECTORS) * SECTOR as u64)
+        .map_err(|error| format!("could not size {}: {error}", path.display()))?;
+    Ok(())
 }
 
 impl Drop for DiskImage {
@@ -763,5 +807,40 @@ mod tests {
         assert!(fat * 512 >= (clusters + 2) * 4);
         // 1 sector少ないFATではentryが収まらないことを確認する。
         assert!((fat - 1) * 512 < (clusters + 2) * 4);
+    }
+
+    // Catches `cargo xtask sh --disk` losing the user's files or clobbering
+    // an unrelated file: a missing path is created and survives the drop, an
+    // existing image is reused as is, and a file of the wrong size is refused
+    // without being modified.
+    #[test]
+    fn open_or_create_keeps_and_reuses_images_and_refuses_foreign_files() {
+        use super::DiskImage;
+
+        let dir = std::env::temp_dir().join(format!("minios-disk-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("persist.img");
+        let _ = std::fs::remove_file(&path);
+
+        let (disk, created) = DiskImage::open_or_create(&path, &[]).unwrap();
+        assert!(created);
+        drop(disk);
+        assert!(path.exists());
+
+        // 中身に印を付け、再利用で上書きされないことを確かめる。
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[SECTOR * 40] = 0x5a;
+        std::fs::write(&path, &bytes).unwrap();
+        let (disk, created) = DiskImage::open_or_create(&path, &[]).unwrap();
+        assert!(!created);
+        drop(disk);
+        assert_eq!(std::fs::read(&path).unwrap()[SECTOR * 40], 0x5a);
+
+        let foreign = dir.join("notes.txt");
+        std::fs::write(&foreign, b"not a disk").unwrap();
+        assert!(DiskImage::open_or_create(&foreign, &[]).is_err());
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"not a disk");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

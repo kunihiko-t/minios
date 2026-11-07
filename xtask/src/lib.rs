@@ -581,7 +581,7 @@ fn phase_plan_for(command: &Command) -> Option<Vec<Phase>> {
         Command::Setup
         | Command::Build
         | Command::Run
-        | Command::Sh
+        | Command::Sh(_)
         | Command::Bundle(_)
         | Command::Fuzz(_) => None,
     }
@@ -597,7 +597,7 @@ pub fn run(command: Command) -> Result<(), XtaskError> {
             cargo::build_kernel(false)?;
         }
         Command::Run => qemu::run_kernel()?,
-        Command::Sh => qemu::run_user_shell()?,
+        Command::Sh(disk) => qemu::run_user_shell(disk.as_deref())?,
         Command::Bundle(options) => {
             let request = bundle::BundleRequest {
                 name: options.name,

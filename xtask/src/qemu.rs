@@ -559,21 +559,39 @@ pub fn run_kernel() -> Result<(), QemuError> {
     }
 }
 
+/// user shellの`BIN/`へ置く`SHELL_TOOLS`の全toolを`(disk上のpath, ELF)`で返す。
+fn shell_tool_files() -> Result<Vec<(&'static str, Vec<u8>)>, QemuError> {
+    crate::guest::SHELL_TOOLS
+        .iter()
+        .map(|&(path, bin)| Ok((path, built_bin_elf_bytes(bin)?)))
+        .collect()
+}
+
 /// user shellの`BIN/`へ`SHELL_TOOLS`の全toolを置いたdisk imageを作る。
-/// `cargo xtask sh`とuser-shell検査が同じimageを使う。
-fn shell_tool_disk() -> Result<crate::disk::DiskImage, QemuError> {
-    let mut tools = Vec::new();
-    for (path, bin) in crate::guest::SHELL_TOOLS {
-        tools.push((path, built_bin_elf_bytes(bin)?));
-    }
+/// `persist`が`Some(path)`なら、そのpathのimageを使うか新しく作り、終了後も
+/// 残す。無ければtemp dirへ作り、終了時に消す。`cargo xtask sh`とuser-shell
+/// 検査が同じ中身のimageを使う。
+fn shell_tool_disk(persist: Option<&Path>) -> Result<crate::disk::DiskImage, QemuError> {
+    let tools = shell_tool_files()?;
     let files: Vec<(&str, &[u8])> = tools
         .iter()
         .map(|(path, elf)| (*path, elf.as_slice()))
         .collect();
-    crate::disk::DiskImage::create_with_files(&files).map_err(|error| QemuError::Bundle {
+    let disk_error = |error| QemuError::Bundle {
         stage: "disk image",
         error,
-    })
+    };
+    let Some(path) = persist else {
+        return crate::disk::DiskImage::create_with_files(&files).map_err(disk_error);
+    };
+    let (disk, created) =
+        crate::disk::DiskImage::open_or_create(path, &files).map_err(disk_error)?;
+    if created {
+        eprintln!("created disk image {}", path.display());
+    } else {
+        eprintln!("using disk image {}", path.display());
+    }
+    Ok(disk)
 }
 
 /// user shell（`SH.ELF`）をboot payloadにしてQEMUを起動し、host端末とつなぐ。
@@ -584,8 +602,9 @@ fn shell_tool_disk() -> Result<crate::disk::DiskImage, QemuError> {
 /// 標準エラーへ書く。Ready frameより前のfirmwareとkernelのboot logは表示せず、
 /// Readyが来ないままQEMUが終わった場合だけ標準エラーへ出す。`Diagnostic`は
 /// 標準エラーへ流す。shellがEOFか`exit`で終わるとkernelがQEMUを止め、
-/// この関数も戻る。
-pub fn run_user_shell() -> Result<(), QemuError> {
+/// この関数も戻る。`disk`を渡すとそのpathのdisk imageを使って残すため、
+/// shellで書いたfileを次の起動でも読める。
+pub fn run_user_shell(disk: Option<&Path>) -> Result<(), QemuError> {
     use crate::console::{ConsoleEvent, FrameStream, stdin_frames};
     use std::io::Read;
     use std::sync::mpsc;
@@ -594,7 +613,7 @@ pub fn run_user_shell() -> Result<(), QemuError> {
     let elf = built_bin_elf_bytes(crate::guest::GUEST_SH)?;
     let bundle =
         PayloadBundle::create_with(assemble_test_bundle(b"version=1\nname=sh\narg=-i\n", &elf)?)?;
-    let disk = shell_tool_disk()?;
+    let disk = shell_tool_disk(disk)?;
     let (mut command, command_line) =
         qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
     let mut child = command
@@ -786,7 +805,7 @@ pub fn run_test(kind: TestKind, deadline: Duration) -> Result<String, QemuError>
     if kind == TestKind::UserShell {
         let kernel = cargo::build_kernel(false).map_err(QemuError::Build)?;
         let bundle = PayloadBundle::create_user_shell()?;
-        let disk = shell_tool_disk()?;
+        let disk = shell_tool_disk(None)?;
         let (command, command_line) =
             qemu_command_with_payload_and_disk(&kernel, bundle.path(), disk.path());
         let completed =
