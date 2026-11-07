@@ -46,7 +46,12 @@ U-mode実行中のtrapは、第15章の[`__user_trap_entry`](../../kernel/src/ar
 [`classify_user_trap`](../../kernel/src/user/trap.rs)は、interrupt bit付きの原因code 5で保存済み`sstatus.SPP`が0の場合だけ`TrapAction::Timer`を返します。
 割り込みは実行済みの命令ではないため、ecallと違って`sepc`を進めません。
 
-[`kernel/src/main.rs`](../../kernel/src/main.rs)の`user_trap_timer`は`time::handle_interrupt`で次のtickを再アームし、outcomeを`USER_RUN_OUTCOME_PREEMPTED`にして`RunExit::ReturnToKernel`を返します。
+[`kernel/src/user_trap.rs`](../../kernel/src/user_trap.rs)の`user_trap_timer`は`time::handle_interrupt`でtickを数えて次のtickを再アームし、outcomeを`USER_RUN_OUTCOME_PREEMPTED`にして`RunExit::ReturnToKernel`を返します。
+ただし、dispatchされてから1 tick分の時間（`time::quantum_expired`）が経っていなければ、preemptせずに`RunExit::Resume`で同じprocessへ戻ります。
+tickの期限は前のprocessがsyscallでkernel内に長くいる間にも過ぎますが、kernel内ではS-modeの割り込みを止めているため、そのtickは次のprocessがU-modeへ入った直後に届きます。
+このとき毎回preemptすると、`yield`で順番を譲られたprocessが何もしないうちに順番を失い、同じことが続けば実質的に走れません。
+run loopは`__run_user`の直前に`time::start_quantum`でdispatch時刻を記録し、各processに少なくとも1 tick分の持ち時間を保証します。
+tick自体は毎回数えるため、`clock`と`sleep`の時刻は遅れません。
 tickの周期は[`kernel/src/time.rs`](../../kernel/src/time.rs)の`TICKS_PER_SECOND`（100）で決まり、`__user_run_leave`がkernel satpとboot stackを復元して`__run_user`の呼び出し元へ戻ります。
 
 ### run loop
@@ -97,12 +102,10 @@ dispatch loopのS-modeは`sstatus.SIE`を落としているため、全process�
 
 ## 実行と確認
 
-[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)は`a1`、`a2`、`a3`の各出力の後に`yield`を呼んで終了code 0で、[`guest/src/bin/sched_b.rs`](../../guest/src/bin/sched_b.rs)は最初に一度だけ`yield`してから`b1`から`b3`を出力し、終了code 7で`exit`します。
+[`guest/src/bin/sched_a.rs`](../../guest/src/bin/sched_a.rs)は`a1`、`a2`、`a3`の各出力の後に`yield`を呼んで終了code 0で、[`guest/src/bin/sched_b.rs`](../../guest/src/bin/sched_b.rs)は`b1`から`b3`をすぐに出力して終了code 7で`exit`します。
 [`guest/src/bin/sched_r.rs`](../../guest/src/bin/sched_r.rs)は`r1`を出してから`read(stdin)`でblockし、入力が届くと`r2`を出して終了code 5で`exit`します。
 sched_aが各出力の後に`yield`するため、切り替えの時点はtime sliceの長さではなくguestの命令列で決まり、testの結果がQEMUの速度に左右されません。
-sched_bの先頭の`yield`は、spawn中に期限を過ぎたtimer tickが最初のdispatch直後に届き、sched_aが`a1`を書く前にpreemptされた場合の備えです。
-そのときsched_bは何も書かずに順番を返し、tickを再armされたsched_aが`a1`を書きます。
-sched_rは`yield`を呼ばず、sched_bも出力を始めた後は`yield`しないので、それ以外の切り替えはtimerプリエンプションか`read`のblockで起こります。
+sched_rとsched_bは`yield`を呼ばないので、それ以外の切り替えはtimerプリエンプションか`read`のblockで起こります。
 
 `sched` testは`spin`（sched_a）と`quick`（sched_b）の二つのimageを持つbundleを実行します。
 次の出力ではcontrol frameのheader byteを取り除き、payloadのtextだけを残しています。

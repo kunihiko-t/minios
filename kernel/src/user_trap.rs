@@ -226,8 +226,10 @@ fn user_trap_fatal(scause: usize, stval: usize) -> RunExit {
     RunExit::ReturnToKernel
 }
 
-/// U-mode実行中のsupervisor timer割り込み。次tickを再アームしてからkernelへ
-/// 戻り、schedulerが`Preempted`として中断processを再選対象へ戻す。
+/// U-mode実行中のsupervisor timer割り込み。tickを数えて次tickを再アームし、
+/// dispatchから1 tick分走っていればkernelへ戻ってschedulerが`Preempted`として
+/// 中断processを再選対象へ戻す。まだ走っていなければ（dispatch直後に、前の
+/// processのkernel内処理の間に期限を過ぎたtickが届いた場合）同じprocessへ戻る。
 #[cfg(all(
     target_arch = "riscv64",
     not(any(
@@ -244,6 +246,9 @@ fn user_trap_timer() -> RunExit {
         crate::console::emergency_print(format_args!("MiniOS user timer: {error:?}\r\n"));
         USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_SOURCE_FAILURE, Ordering::Relaxed);
         return RunExit::ReturnToKernel;
+    }
+    if !time::quantum_expired() {
+        return RunExit::Resume;
     }
     USER_RUN_OUTCOME.store(USER_RUN_OUTCOME_PREEMPTED, Ordering::Relaxed);
     RunExit::ReturnToKernel
