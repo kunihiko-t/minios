@@ -360,7 +360,10 @@ pub(crate) fn probe_and_mount(
                 if source != 0 {
                     crate::drivers::plic::enable(source);
                 }
-                return crate::storage::fat32::Fat32::mount(blk).map_err(Rv64StorageError::Fat);
+                // 作成・更新したentryへは、RTCから得た実時刻を日時として書く。
+                return crate::storage::fat32::Fat32::mount(blk)
+                    .map(|fs| fs.with_clock(crate::time::realtime_millis))
+                    .map_err(Rv64StorageError::Fat);
             }
             Err(
                 VirtioError::BadMagic

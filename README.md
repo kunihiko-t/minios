@@ -160,6 +160,7 @@ OCI image、volume、Linux binary互換、multi-tenant isolation、Windowsは保
 - user shellのpipelineはshellと合わせてprocess上限に収まる7個のcommandまでで、1行は256 byteまでです。
 - guestの`SbrkAllocator`はfirst-fitのfree-list allocatorで、解放した領域を再利用し、heap末尾の64 KiB以上の空きを`sbrk`でkernelへ返します。threadは扱わないため、単一threadのguestだけが使えます。
 - FAT32へ新しく作る名前は、日本語を含む基本多言語面（BMP）の文字に限られます（制御文字と絵文字などは使えません）。8.3形式へ正規化できない名前と、`Readme.txt`のように大小文字が混ざる名前はLFNで作ります。`notes.txt`のように小文字だけの8.3名はLFNを書かず、Windows NTやLinuxと同じentryの印で小文字のまま残します。名前の照合は大小文字を区別しません。
+- FAT32のentryへ書く作成・更新日時はRTCから得たUTCで、time zoneは扱いません。guestがentryの日時を読むsyscallはありません。
 - `cargo xtask run`と各testは起動ごとにdisk imageを作り直して終了時に削除するため、書き込んだ内容は次の起動へ残りません。`cargo xtask sh --disk <path>`だけは指定したpathのimageを使い続けます。
 - ヒープはmanaged RAM末尾の1 MiBから始まり、不足するとframe poolのpageを取り込んで成長します。下端の空きがpage単位で揃うと、取り込んだpageをframe poolへ返します。
 - ハードウェアアドレス、タイムベース、RAMの上端はOpenSBIが渡すDevice Treeから発見しますが、対象machineはQEMU `virt`の配置契約に限定しています。

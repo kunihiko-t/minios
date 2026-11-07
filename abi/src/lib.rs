@@ -5,3 +5,4 @@ pub mod boot;
 pub mod control;
 pub mod manifest;
 pub mod syscall;
+pub mod time;

@@ -7,6 +7,8 @@
 mod lfn;
 mod parse;
 mod read;
+#[cfg(not(target_arch = "riscv32"))]
+mod stamp;
 #[cfg(test)]
 mod tests;
 #[cfg(not(target_arch = "riscv32"))]
@@ -90,6 +92,17 @@ pub struct Fat32<R> {
     /// RV32はDMEMが小さいため持たない。
     #[cfg(not(target_arch = "riscv32"))]
     fat_cache: Option<(u32, [u8; 512])>,
+    /// 作成・更新したentryへ書く日時の取得元。Unix時刻（millisecond）を
+    /// 返し、`None`なら日時fieldへ触れない。既定は常に`None`の
+    /// `no_clock`で、kernelは`with_clock`でRTC由来の実時刻を渡す。
+    #[cfg(not(target_arch = "riscv32"))]
+    clock: fn() -> Option<u64>,
+}
+
+/// 日時を持たない`Fat32`の既定の時計。
+#[cfg(not(target_arch = "riscv32"))]
+fn no_clock() -> Option<u64> {
+    None
 }
 
 /// `Fat32::open_file`/`create_file`が返すfile位置の記述子。fd tableへ

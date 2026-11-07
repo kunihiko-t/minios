@@ -35,7 +35,7 @@ NEORV32向けRV32IMカーネルは、M-modeで起動してUARTシェルを実行
 
 ### 機器とコンソール
 
-- `drivers/goldfish_rtc.rs`：QEMU `virt`のGoldfish RTCからUnix時刻をnanosecondで読みます。kernelは起動時のbare modeで1回だけ呼び、以後は`time` CSRで時刻を進めます。
+- `drivers/goldfish_rtc.rs`：QEMU `virt`のGoldfish RTCからUnix時刻をnanosecondで読みます。kernelは起動時のbare modeで1回だけ呼び、以後は`time` CSRで時刻を進めます。得た時刻はFAT32のentryの作成・更新日時にも使い、Unix時刻からUTCの暦への変換はguestの`date`と共有する`minios_abi::time::DateTime`が行います。
 - `drivers/plic.rs`：QEMU `virt`のPLICを初期化し、S-mode contextのthreshold・優先度・enable・claim/completeを提供します。
   UART受信とvirtio used-buffer完了の二系統のsourceをdispatchし、FDTにPLICが無いmachineでは無効のままpolling経路へ退避します。
 - `drivers/uart.rs`：QEMU `virt`の16550互換UARTについて、`write_byte`、`read_byte`、`has_byte`、`fmt::Write`だけを公開します。

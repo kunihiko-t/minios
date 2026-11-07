@@ -86,6 +86,8 @@ impl<R: SectorReader> Fat32<R> {
             data_cluster_count: geometry.data_cluster_count,
             #[cfg(not(target_arch = "riscv32"))]
             fat_cache: None,
+            #[cfg(not(target_arch = "riscv32"))]
+            clock: super::no_clock,
         }
     }
 
