@@ -26,7 +26,7 @@ Cargoは`cargo xtask ...`を、ワークスペース内の`xtask`バイナリー
 cargo xtask setup
 cargo xtask build
 cargo xtask run
-cargo xtask sh
+cargo xtask sh [--disk <path>]
 cargo xtask bundle [--name <name>] [--arg <value>]... [--output <path>]
 cargo xtask test [all|boot|trap|timer|memory|vm|elf|user-entry|user-trap|user-syscall|user-exit|kernel-stack|fdt|heap|virtio|payload|payload-args|payload-stdin|file|file-fd|file-write|file-unlink|file-seek|file-rename|file-mkdir|file-spawn|file-waitpid|file-stat|file-readdir|file-exec|file-fdinherit|file-pipe|user-heap|user-sleep|user-dup|spawn-args|user-shell|sched|sched-io|sched-io-partial|irq-uart|irq-blk|net-arp|net-ping|net-udp|net-sock|proc-fault|proc-kill|shell|smp-boot|smp-timer|smp-ipi]
 cargo xtask check

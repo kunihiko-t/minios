@@ -303,6 +303,12 @@ $ exit
 端末でCtrl-Dを押すと長さ0の`Stdin` frame（EOF）が届き、shellは0で終了します。
 Ready frameより前のfirmwareとkernelのboot logは表示せず、起動に失敗したときだけ標準エラーへ出します。
 
+`cargo xtask sh`は既定で毎回新しいdisk imageを作り、終了時に消します。
+`cargo xtask sh --disk work.img`のようにpathを渡すと、そのpathにimageが無ければ作り、あればそのimageを使い、どちらの場合も終了後に残します。
+shellで作ったfileやdirectoryは、同じpathを渡した次の起動でも読めます。
+大きさがMiniOSのimageと違うfileは、別のfileを壊さないよう使わずにerrorにします。
+imageの`BIN`にあるtoolは作ったときのものなので、toolを作り直したら新しいpathを使うかimageを消してください。
+
 ## よくある失敗
 
 - `insert`の前にpidを使う：`Process::spawn`が返すprocessのpidは仮の`usize::MAX`で、実際のpidは`ProcessTable::insert`が採番します。

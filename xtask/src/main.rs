@@ -24,5 +24,8 @@ fn error_message(error: &cli::CliError) -> String {
         cli::CliError::InvalidFuzzOptions(detail) => {
             format!("invalid fuzz options: {detail}\n\n{}", cli::help())
         }
+        cli::CliError::InvalidShOptions(detail) => {
+            format!("invalid sh options: {detail}\n\n{}", cli::help())
+        }
     }
 }
