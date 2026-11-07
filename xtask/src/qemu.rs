@@ -2014,7 +2014,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 30] = [
+const USER_SHELL_SCRIPT: [&[u8]; 34] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -2034,6 +2034,11 @@ const USER_SHELL_SCRIPT: [&[u8]; 30] = [
     b"rm \"my notes.txt\"\n",
     b"echo \"a | b\"\n",
     b"echo \"oops\n",
+    // 日本語の名前はLFNのUCS-2で作られ、UTF-8のまま一覧と読み戻しができる。
+    "echo こんにちは > メモ.txt\n".as_bytes(),
+    b"ls\n",
+    "cat メモ.txt\n".as_bytes(),
+    "rm メモ.txt\n".as_bytes(),
     // file操作のtool。LFN名へのmoveと一覧、片付け後のrootを確かめる。
     // `cd`の後は相対pathも、spawnしたtoolのpathも作業directory基準になる。
     b"mkdir work\n",
@@ -2144,6 +2149,22 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         exit(),
         // echo "oops：閉じていない引用符は何も起動しない。
         control_frame(FrameKind::Stderr, b"sh: unterminated quote\n"),
+        // echo こんにちは > メモ.txt
+        exit(),
+        // ls：rootの一覧の末尾に日本語の名前が出る。
+        stdout(b"HELLO.TXT\n"),
+        stdout(b"DOCS/\n"),
+        stdout(b"Long File Name.txt\n"),
+        stdout(b"BIN/\n"),
+        stdout(b"OUT.TXT\n"),
+        stdout(b"notes.backup\n"),
+        stdout("メモ.txt\n".as_bytes()),
+        exit(),
+        // cat メモ.txt
+        stdout("こんにちは\n".as_bytes()),
+        exit(),
+        // rm メモ.txt
+        exit(),
         // mkdir work
         exit(),
         // mv notes.backup work/saved.notes

@@ -203,7 +203,7 @@ pathを受けるsyscallはどれも、`/`で始まるpathをroot directoryから
 作業directoryは`chdir`で変え、`getcwd`で読みます。`spawn`したchildは呼び出し側の作業directoryを引き継ぎ、`exec`は作業directoryを変えません。
 `open`は`read_file`と同じpath規約で、成功するとfileをread-onlyの`fd`へ結び付けます。
 `open`、`create`、`pipe`は、fd 0、1、2が空いていても使わず、`FIRST_FILE_FD`（3）以上で最小の空きslotを割り当てます。
-`create`はfileが存在しなければentryを親directoryへ追加し、存在すればそのfileをwritableに開きます。8.3形へ正規化できる名前は小文字を大文字化した8.3名だけで作ります。それ以外の名前（空白を含む、拡張子が4文字以上など）はVFATのLFN record列と、`LONGFI~1.TXT`のような重複しない8.3 aliasで作ります。既存entryとの照合は、8.3名なら正規化した8.3名で、LFNなら表示名の大小文字を無視して行います。FATが名前に禁じる`" * : < > ? |`を含む名前と、末尾が空白か`.`の長い名前は`EINVAL`です。
+`create`はfileが存在しなければentryを親directoryへ追加し、存在すればそのfileをwritableに開きます。8.3形へ正規化できる名前は小文字を大文字化した8.3名だけで作ります。それ以外の名前（空白を含む、拡張子が4文字以上など）はVFATのLFN record列と、`LONGFI~1.TXT`のような重複しない8.3 aliasで作ります。既存entryとの照合は、8.3名なら正規化した8.3名で、LFNなら表示名の大小文字を無視して行います。長い名前には日本語など基本多言語面（BMP、U+FFFFまで）の文字を使え、LFN recordへUCS-2で書きます。このとき8.3 aliasでは8.3名に使えない文字が`_`に置き替わります（`メモ.txt`は`__~1.TXT`）。FATが名前に禁じる`" * : < > ? |`を含む名前、制御文字やBMP外の文字（絵文字など）を含む名前、末尾が空白か`.`の長い名前は`EINVAL`です。
 file fdへの`read`と`write`は現在のoffsetから行い、処理した分だけoffsetを進めます。
 fdはread専用（`open`由来）またはwrite専用（`create`由来）のどちらかであり、writable fdへの`read`とread-only fdへの`write`は`EBADF`を返します。
 `write`のoffsetがfile sizeを越える場合は穴あき書き込みになるため`EINVAL`を返します。size以内なら上書きと末尾への追記ができます。
@@ -295,7 +295,7 @@ runnableなprocessがほかになければ、呼び出し側がすぐに再び�
 | `-19` | `ENODEV` | block deviceやnetwork deviceが見つからない |
 | `-20` | `ENOTDIR` | パス途中の要素がfileである、`rmdir`の対象がfileである、`rename`でdirectoryをfileへ改名しようとした |
 | `-21` | `EISDIR` | `read_file`や`create`、`unlink`、`spawn`の対象がdirectoryである |
-| `-22` | `EINVAL` | `fcntl`の未知のcommandや`FD_CLOEXEC`以外のflag bit、4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、FATが禁じる文字を含む作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、heap先頭より下へ戻す`sbrk`、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |
+| `-22` | `EINVAL` | `fcntl`の未知のcommandや`FD_CLOEXEC`以外のflag bit、4 KiBを超える入出力長、256 byteを超えるpath、UTF-8でないpath、無効なパス要素、FATが禁じる文字・制御文字・BMP外の文字を含む作成名、file sizeを越えるwrite offset、負になる`lseek`結果や未知のwhence、directoryを自身または子孫の中へ移す`rename`、`spawn`の対象がELFとして受理できない、`spawn`の`argc`の上限超過、上限を超えるかNULを含むかUTF-8でない`spawn`のargv文字列、`waitpid`のwait連鎖が呼び出し側へ戻るcycle、heap先頭より下へ戻す`sbrk`、`kill`の対象が自分自身、`sendto`/`recvfrom`の上限を超える長さ |
 | `-24` | `EMFILE` | processの同時open数（fd 0、1、2とは別に16個）を超えた。pipeの両端もこのtableのslotを使う。socket table（4個）が満杯 |
 | `-28` | `ENOSPC` | freeなclusterやdirectory entryが残っていない |
 | `-29` | `ESPIPE` | pipe fdとconsole entryへの`lseek`/`pread`/`pwrite` |

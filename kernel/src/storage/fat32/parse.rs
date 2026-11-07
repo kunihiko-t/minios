@@ -120,8 +120,10 @@ pub(super) fn matches_component(entry: &DirEntry, part: &str) -> bool {
         || normalize_input_name(part).is_some_and(|wanted| wanted == entry.short_name)
 }
 
-/// path要素として受理する文字種。LFNは空白を含む印字可能ASCIIを許すが、
-/// 区切りと衝突する`/`と`\`、`.`と`..`そのものは拒否する。
+/// path要素として受理する文字種。LFNは空白と非ASCII（日本語など）を含む
+/// 名前を許すが、制御文字、区切りと衝突する`/`と`\`、`.`と`..`そのもの、
+/// LFNのUCS-2で表せない基本多言語面（BMP）の外の文字は拒否する。長さは
+/// `DirEnt`の名前欄に合わせてUTF-8で255 byteまでである。
 #[cfg(not(target_arch = "riscv32"))]
 pub(super) fn is_valid_component(part: &str) -> bool {
     !part.is_empty()
@@ -129,8 +131,8 @@ pub(super) fn is_valid_component(part: &str) -> bool {
         && part != ".."
         && part.len() <= 255
         && part
-            .bytes()
-            .all(|byte| (0x20..=0x7e).contains(&byte) && byte != b'\\')
+            .chars()
+            .all(|ch| !ch.is_control() && ch != '\\' && ch != '/' && u32::from(ch) <= 0xffff)
 }
 
 /// raw 8.3名に対するLFN checksum。LFN record列がどのshort entryへ
@@ -148,8 +150,9 @@ pub(super) fn lfn_checksum(short_name: &[u8; 11]) -> u8 {
 /// IMEMへ機構を載せない。
 #[cfg(not(target_arch = "riscv32"))]
 pub(super) struct PendingLfn {
-    /// chunk番号順にdecodeしたASCII byte。chunk `s`は`(s-1)*13`から始まる。
-    name: [u8; 255],
+    /// chunk番号順に集めたUCS-2の文字。chunk `s`は`(s-1)*13`から始まる。
+    /// 20 chunk（LFNの最大）の260文字まで入る。
+    units: [u16; 260],
     /// 連続性を検査する次に来るべきseq。0は未収集または中断。
     expected_seq: u8,
     /// 最終chunk（disk上では先頭）が持つchunk総数。
@@ -157,7 +160,7 @@ pub(super) struct PendingLfn {
     checksum: u8,
     /// seq 1まで揃ったか。
     complete: bool,
-    /// 非ASCIIやbuf超過など、decode不能にした印。
+    /// seq超過や連続性の破綻など、decode不能にした印。
     invalid: bool,
 }
 
@@ -165,7 +168,7 @@ pub(super) struct PendingLfn {
 impl PendingLfn {
     pub(super) const fn new() -> Self {
         Self {
-            name: [0; 255],
+            units: [0; 260],
             expected_seq: 0,
             chunk_count: 0,
             checksum: 0,
@@ -196,22 +199,13 @@ impl PendingLfn {
             return;
         }
         let start = (seq as usize - 1) * 13;
-        if start + 13 > self.name.len() {
+        if start + 13 > self.units.len() {
             self.invalid = true;
             self.reset();
             return;
         }
         for (index, &offset) in CHAR_OFFSETS.iter().enumerate() {
-            let ch = u16::from_le_bytes([record[offset], record[offset + 1]]);
-            let decoded = match ch {
-                0x0000 | 0xffff => 0,
-                0x20..=0x7e => ch as u8,
-                _ => {
-                    self.invalid = true;
-                    0
-                }
-            };
-            self.name[start + index] = decoded;
+            self.units[start + index] = u16::from_le_bytes([record[offset], record[offset + 1]]);
         }
         self.expected_seq = seq - 1;
         if seq == 1 {
@@ -221,18 +215,38 @@ impl PendingLfn {
 
     /// `record`が引き受けるLFN名を`entry`へ適用する。checksumまたは
     /// 収集条件が合わなければ8.3名のままにし、どちらでも状態をresetする。
+    /// 名前はUCS-2からUTF-8へ直す。制御文字やsurrogateを含む名前と、UTF-8で
+    /// 255 byte（`DirEnt`の名前欄）に収まらない名前も8.3名のままにする。
     pub(super) fn apply(&mut self, entry: &mut DirEntry, record: &[u8]) {
         if self.complete
             && !self.invalid
             && self.checksum == lfn_checksum(record[..11].try_into().unwrap())
         {
             let end = self.chunk_count as usize * 13;
-            let name_len = self.name[..end]
+            let units = &self.units[..end];
+            let len = units
                 .iter()
-                .position(|&byte| byte == 0)
+                .position(|&unit| matches!(unit, 0x0000 | 0xffff))
                 .unwrap_or(end);
-            entry.name[..name_len].copy_from_slice(&self.name[..name_len]);
-            entry.name_len = name_len as u8;
+            let mut name = [0u8; 255];
+            let mut written = 0usize;
+            let mut valid = len > 0;
+            for &unit in &units[..len] {
+                let Some(ch) = char::from_u32(u32::from(unit)).filter(|ch| !ch.is_control()) else {
+                    valid = false;
+                    break;
+                };
+                let Some(slot) = name.get_mut(written..written + ch.len_utf8()) else {
+                    valid = false;
+                    break;
+                };
+                ch.encode_utf8(slot);
+                written += ch.len_utf8();
+            }
+            if valid {
+                entry.name = name;
+                entry.name_len = written as u8;
+            }
         }
         self.reset();
     }
