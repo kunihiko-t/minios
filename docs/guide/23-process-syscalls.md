@@ -263,6 +263,10 @@ cat 'my notes.txt'
 rm "my notes.txt"
 echo "a | b"
 echo "oops
+echo こんにちは > メモ.txt
+ls
+cat メモ.txt
+rm メモ.txt
 mkdir work
 mv notes.backup work/saved.notes
 cd work
@@ -279,7 +283,7 @@ rm nosuch.txt
 nosuch
 ```
 
-標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧が届きます。
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、日本語の名前で作った`メモ.txt`を含むrootの一覧と`こんにちは`、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧が届きます。
 標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、閉じていない引用符への`sh: unterminated quote`、存在しないdirectoryへの`sh: cd: nosuchdir: cannot change directory (errno -2)`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`sh: nosuch: not found (errno -2)`が届きます。
 pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
 このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。

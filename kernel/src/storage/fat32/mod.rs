@@ -49,7 +49,8 @@ pub struct DirEntry {
 
 impl DirEntry {
     pub fn name(&self) -> &str {
-        // parse時に0x21..=0x7eと'.'だけへ正規化済みのため、UTF-8変換は失敗しない。
+        // 8.3名はparse時に0x21..=0x7eと'.'だけへ正規化済みで、LFN名は
+        // `PendingLfn::apply`がUCS-2から正しいUTF-8へ直すため、変換は失敗しない。
         core::str::from_utf8(&self.name[..self.name_len as usize]).expect("validated FAT name")
     }
 

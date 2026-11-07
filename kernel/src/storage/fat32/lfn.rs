@@ -88,22 +88,24 @@ fn alias_basis(name: &str) -> ([u8; 8], usize, [u8; 3], usize) {
         Some(index) => (&trimmed[..index], &trimmed[index + 1..]),
         None => (trimmed, ""),
     };
-    // 1文字の名前として8.3へ正規化できる文字だけを残す。
-    let convert = |byte: u8| {
-        let upper = byte.to_ascii_uppercase();
-        let probe = [upper];
-        core::str::from_utf8(&probe)
-            .ok()
-            .and_then(to_short_name)
-            .map_or(b'_', |_| upper)
+    // 1文字の名前として8.3へ正規化できる文字だけを残し、それ以外（非ASCIIの
+    // 文字を含む）は1文字を`_`1個にする。
+    let convert = |ch: char| {
+        let mut probe = [0u8; 4];
+        let upper = ch.to_ascii_uppercase();
+        if upper.is_ascii() && to_short_name(upper.encode_utf8(&mut probe)).is_some() {
+            upper as u8
+        } else {
+            b'_'
+        }
     };
     let mut base_out = [b' '; 8];
     let mut base_len = 0;
-    for byte in base.bytes().filter(|byte| !matches!(byte, b' ' | b'.')) {
+    for ch in base.chars().filter(|ch| !matches!(ch, ' ' | '.')) {
         if base_len == base_out.len() {
             break;
         }
-        base_out[base_len] = convert(byte);
+        base_out[base_len] = convert(ch);
         base_len += 1;
     }
     if base_len == 0 {
@@ -112,11 +114,11 @@ fn alias_basis(name: &str) -> ([u8; 8], usize, [u8; 3], usize) {
     }
     let mut ext_out = [b' '; 3];
     let mut ext_len = 0;
-    for byte in ext.bytes().filter(|byte| *byte != b' ') {
+    for ch in ext.chars().filter(|ch| *ch != ' ') {
         if ext_len == ext_out.len() {
             break;
         }
-        ext_out[ext_len] = convert(byte);
+        ext_out[ext_len] = convert(ch);
         ext_len += 1;
     }
     (base_out, base_len, ext_out, ext_len)
@@ -152,8 +154,10 @@ pub(super) fn alias_candidate(name: &str, tail: u32) -> [u8; 11] {
 /// 各recordは`checksum`でaliasへ結び付く。名前の後ろは0x0000を1文字置き、
 /// 残りを0xffffで埋める（13文字ちょうどなら終端文字は置かない）。
 pub(super) fn lfn_records(name: &str, checksum: u8) -> Vec<[u8; 32]> {
-    let bytes = name.as_bytes();
-    let count = bytes.len().div_ceil(LFN_CHARS);
+    // 名前はUCS-2で持つ。`is_valid_component`がBMPの外の文字を拒否するため、
+    // UTF-16の1 unitが1文字に対応する。
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let count = units.len().div_ceil(LFN_CHARS);
     let mut records = Vec::with_capacity(count);
     for seq in (1..=count).rev() {
         let mut record = [0u8; 32];
@@ -163,8 +167,8 @@ pub(super) fn lfn_records(name: &str, checksum: u8) -> Vec<[u8; 32]> {
         let start = (seq - 1) * LFN_CHARS;
         for (index, &offset) in LFN_CHAR_OFFSETS.iter().enumerate() {
             let position = start + index;
-            let ch: u16 = match position.cmp(&bytes.len()) {
-                core::cmp::Ordering::Less => u16::from(bytes[position]),
+            let ch: u16 = match position.cmp(&units.len()) {
+                core::cmp::Ordering::Less => units[position],
                 core::cmp::Ordering::Equal => 0x0000,
                 core::cmp::Ordering::Greater => 0xffff,
             };
@@ -206,7 +210,7 @@ impl<R: SectorReader + SectorWriter> Fat32<R> {
         scratch: &mut [u8; 512],
     ) -> Result<LongSlot, FatError<R::Error>> {
         let alias = self.lfn_alias(dir_cluster, name, scratch)?;
-        let count = name.len().div_ceil(LFN_CHARS) + 1;
+        let count = name.encode_utf16().count().div_ceil(LFN_CHARS) + 1;
         let start = self.reserve_dir_tail(dir_cluster, count, scratch)?;
         Ok(LongSlot { alias, start })
     }

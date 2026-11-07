@@ -182,3 +182,75 @@ fn moving_a_long_named_file_under_a_short_name_removes_the_alias() {
     let root = sector_of(&fs, 33);
     assert_eq!((root[2 * 32], root[3 * 32]), (0xe5, 0xe5));
 }
+
+// Catches non-ASCII names being mangled on the way to or from disk: a
+// Japanese name must be written as UCS-2 LFN records, listed back as the
+// same UTF-8, resolve by that name, and get an alias of one `_` per char.
+#[test]
+fn japanese_names_round_trip_through_lfn_records() {
+    let mut fs = mounted_writable_fixture();
+    let mut desc = fs.create_file("メモ.txt").unwrap();
+    assert_eq!(fs.write_range(&mut desc, 0, b"hi"), Ok(2));
+    fs.create_dir("日本語のフォルダ").unwrap();
+    fs.create_file("日本語のフォルダ/中身.md").unwrap();
+
+    assert_eq!(
+        names(&mut fs, ""),
+        ["HELLO.TXT", "SUBDIR", "メモ.txt", "日本語のフォルダ"]
+    );
+    assert_eq!(names(&mut fs, "日本語のフォルダ"), ["中身.md"]);
+    assert_eq!(fs.open_file("メモ.txt").unwrap().size, 2);
+    // aliasは非ASCIIの1文字を`_`1個にした8.3名で、そのpathでも開ける。
+    assert_eq!(&alias_candidate("メモ.txt", 1), b"__~1    TXT");
+    assert_eq!(fs.open_file("__~1.TXT").unwrap().size, 2);
+    // LFN recordはUTF-16の文字単位で、2文字+`.txt`の6文字は1 recordに収まる。
+    let records = lfn_records("メモ.txt", 0);
+    assert_eq!(records.len(), 1);
+    // 「メ」はU+30E1、「モ」はU+30E2で、little endianのUCS-2として並ぶ。
+    assert_eq!(&records[0][1..5], &[0xe1, 0x30, 0xe2, 0x30]);
+}
+
+// Catches the 20-record LFN limit being cut short: a 255-character name
+// needs all 20 records, and must be listed back whole.
+#[test]
+fn a_255_character_name_uses_all_twenty_records() {
+    let mut fs = mounted_writable_fixture();
+    let name = "n".repeat(255);
+    assert_eq!(lfn_records(&name, 0).len(), 20);
+    fs.create_file(&name).unwrap();
+    assert!(names(&mut fs, "").contains(&name));
+    assert!(fs.open_file(&name).is_ok());
+}
+
+// Catches names the LFN encoding cannot carry being accepted: characters
+// outside the BMP and control characters are rejected before any write.
+#[test]
+fn non_bmp_and_control_characters_are_rejected() {
+    let mut fs = mounted_writable_fixture();
+    let before = *sector_of(&fs, 33);
+    for name in ["絵文字😀.txt", "tab\there", "bell\u{7}", "del\u{7f}"] {
+        assert!(
+            matches!(fs.create_file(name), Err(FatError::InvalidName)),
+            "{name:?}"
+        );
+    }
+    assert_eq!(sector_of(&fs, 33), &before);
+}
+
+// Catches a foreign LFN whose UTF-8 form exceeds the 255-byte name field
+// overflowing the buffer: such an entry must fall back to its 8.3 alias.
+#[test]
+fn lfn_names_too_long_for_utf8_fall_back_to_the_alias() {
+    let mut fs = mounted_writable_fixture();
+    // 漢字100文字はUTF-16では100 unitだが、UTF-8では300 byteになる。
+    let name = "字".repeat(100);
+    let mut scratch = [0u8; 512];
+    let slot = fs.reserve_long_entry(2, &name, &mut scratch).unwrap();
+    fs.write_long_entry(&slot, &name, &mut scratch, |record| {
+        record[11] = 0x20;
+    })
+    .unwrap();
+    let listed = names(&mut fs, "");
+    // basisは`_`8文字で、tailの分だけ切り詰めたaliasになる。
+    assert!(listed.contains(&String::from("______~1")), "{listed:?}");
+}
