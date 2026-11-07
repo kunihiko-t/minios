@@ -4,7 +4,7 @@
 use crate::user::context::UserContext;
 use minios_abi::{
     control::FrameKind,
-    syscall::{DirEnt, ENOSYS, STDERR, STDIN, STDOUT, Stat},
+    syscall::{DirEnt, ENOSYS, ProcInfo, STDERR, STDIN, STDOUT, Stat},
 };
 
 mod dispatch;
@@ -245,6 +245,14 @@ pub trait ControlSource {
     /// そのまま`a0`へ返すerrnoである。default実装は`ENOSYS`。
     fn readdir(&mut self, path: &str, index: usize) -> Result<Option<DirEnt>, isize> {
         let _ = (path, index);
+        Err(ENOSYS)
+    }
+
+    /// process tableの`index`番目（pidの小さい順）のprocessを返す。
+    /// `Ok(None)`はindexが末尾を越えたことを表す。`Err`はそのまま`a0`へ
+    /// 返すerrnoである。default実装は`ENOSYS`。
+    fn procinfo(&mut self, index: usize) -> Result<Option<ProcInfo>, isize> {
+        let _ = index;
         Err(ENOSYS)
     }
 

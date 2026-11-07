@@ -238,6 +238,12 @@ pub fn sys_realtime() -> isize {
     ecall(SyscallNumber::Realtime, 0, 0, 0, 0)
 }
 
+/// `procinfo`を呼ぶ。process tableの`index`番目を`out`へ`ProcInfo`として
+/// 書き込む。indexが末尾を越えれば0を返す。
+pub fn sys_procinfo(index: usize, out: *mut u8) -> isize {
+    ecall(SyscallNumber::Procinfo, index, out as usize, 0, 0)
+}
+
 /// `sleep`を呼ぶ。`millis`以上経過してから0を返す。0はyieldと同じ。
 pub fn sys_sleep(millis: usize) -> isize {
     ecall(SyscallNumber::Sleep, millis, 0, 0, 0)

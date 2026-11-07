@@ -645,6 +645,41 @@ pub(crate) unsafe fn wait_pid(target: usize) -> Result<Option<u32>, isize> {
     table.block_waitpid(caller, target).map(|()| None)
 }
 
+/// `procinfo`のtable側処理。`index`番目（pidの小さい順）のprocessを
+/// `ProcInfo`へ写し、末尾を越えれば`Ok(None)`を返す。process名は
+/// `PROC_NAME_LEN` byteへUTF-8の文字境界で切り詰める。process tableが
+/// 無い（単一processの経路）なら`ENOSYS`。
+///
+/// # Safety
+///
+/// trap handlerの実行窓からのみ呼ぶこと。tableは読むだけで変更しない。
+#[cfg(target_arch = "riscv64")]
+#[allow(clippy::deref_addrof)]
+pub(crate) unsafe fn proc_info(
+    index: usize,
+) -> Result<Option<minios_abi::syscall::ProcInfo>, isize> {
+    use minios_abi::syscall::{PROC_NAME_LEN, ProcInfo};
+
+    let table = unsafe { *&raw const PROC_TABLE_PTR };
+    let Some(table) = (unsafe { table.as_ref() }) else {
+        return Err(minios_abi::syscall::ENOSYS);
+    };
+    Ok(table.summary_at(index).map(|(pid, state, name)| {
+        let mut len = name.len().min(PROC_NAME_LEN);
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        let mut buffer = [0u8; PROC_NAME_LEN];
+        buffer[..len].copy_from_slice(&name.as_bytes()[..len]);
+        ProcInfo {
+            pid: pid as u32,
+            state: state.abi_code(),
+            name_len: len as u32,
+            name: buffer,
+        }
+    }))
+}
+
 /// `kill`のtable側処理。`target`を`Killed`へmarkして`Ok(())`を返し、
 /// 実際の回収と`waitpid`への終了code通知はrun loopが行う。`ECHILD`は
 /// 対象不在、`EINVAL`は自分自身、process contextがなければ`ENOSYS`。

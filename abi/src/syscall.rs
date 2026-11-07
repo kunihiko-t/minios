@@ -97,6 +97,10 @@ pub enum SyscallNumber {
     /// 返す。kernelは起動時にRTCを1回だけ読み、以後は`time` CSRで進める。
     /// RTCを持たないmachineでは`ENODEV`。
     Realtime = 35,
+    /// process tableの`a0`番目（pidの小さい順）のprocessを`a1`のuser bufferへ
+    /// `PROCINFO_LEN` byteの`ProcInfo`として書き込み、`PROCINFO_LEN`を返す。
+    /// indexが末尾を越えれば0。書けないbufferは`EFAULT`。
+    Procinfo = 36,
 }
 
 pub const STDIN: usize = 0;
@@ -201,6 +205,63 @@ pub const FD_CLOEXEC: usize = 1;
 /// `pipe`が`a0`のuser bufferへ書き込むfd pairのbyte長。
 /// `[read_fd: u32, write_fd: u32]`のLE列。
 pub const PIPE_OUT_LEN: usize = 8;
+
+/// `ProcInfo::state`の値。dispatchを待っているか、いま走っている。
+pub const PROC_STATE_RUNNABLE: u32 = 0;
+/// `sleep`の経過を待っている。
+pub const PROC_STATE_SLEEPING: u32 = 1;
+/// `waitpid`で他のprocessの終了を待っている。
+pub const PROC_STATE_WAITING: u32 = 2;
+/// stdinへの入力を待っている。
+pub const PROC_STATE_STDIN: u32 = 3;
+/// pipeの読み書きができるようになるのを待っている。
+pub const PROC_STATE_PIPE: u32 = 4;
+/// block deviceの完了を待っている。
+pub const PROC_STATE_IO: u32 = 5;
+/// `kill`で終了を要求され、run loopの回収を待っている。
+pub const PROC_STATE_KILLED: u32 = 6;
+/// `ProcInfo::name`の容量。長いprocess名はUTF-8の文字境界で切り詰める。
+pub const PROC_NAME_LEN: usize = 32;
+/// `procinfo`が`a1`のuser bufferへ書き込む`ProcInfo`のbyte長。
+pub const PROCINFO_LEN: usize = 4 + 4 + 4 + PROC_NAME_LEN;
+
+/// `procinfo`がuser bufferへ書き込むprocess 1個の記述。`state`は
+/// `PROC_STATE_*`、`name_len`は`name`内の有効byte数である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcInfo {
+    pub pid: u32,
+    pub state: u32,
+    pub name_len: u32,
+    pub name: [u8; PROC_NAME_LEN],
+}
+
+impl ProcInfo {
+    /// `pid`、`state`、`name_len`、`name`の順にLEの`PROCINFO_LEN` byteへ
+    /// serializeする。
+    pub fn to_le_bytes(&self) -> [u8; PROCINFO_LEN] {
+        let mut out = [0u8; PROCINFO_LEN];
+        out[0..4].copy_from_slice(&self.pid.to_le_bytes());
+        out[4..8].copy_from_slice(&self.state.to_le_bytes());
+        out[8..12].copy_from_slice(&self.name_len.to_le_bytes());
+        out[12..].copy_from_slice(&self.name);
+        out
+    }
+
+    /// `to_le_bytes`が書いた形式から読み戻す。guest側のdecodeに使う。
+    pub fn from_le_bytes(bytes: [u8; PROCINFO_LEN]) -> Self {
+        let word = |at: usize| {
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        let mut name = [0u8; PROC_NAME_LEN];
+        name.copy_from_slice(&bytes[12..]);
+        Self {
+            pid: word(0),
+            state: word(4),
+            name_len: word(8),
+            name,
+        }
+    }
+}
 
 /// `readdir`がuser bufferへ書き込むdirectory entry。`name_len`は
 /// `name`内の有効byte数で、`kind`は`STAT_KIND_*`を再利用する。`size`と
@@ -318,6 +379,7 @@ mod tests {
         assert_eq!(SyscallNumber::Chdir as usize, 33);
         assert_eq!(SyscallNumber::Getcwd as usize, 34);
         assert_eq!(SyscallNumber::Realtime as usize, 35);
+        assert_eq!(SyscallNumber::Procinfo as usize, 36);
         assert_eq!((F_GETFD, F_SETFD, FD_CLOEXEC), (1, 2, 1));
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
@@ -377,6 +439,26 @@ mod tests {
             ]
         );
         assert_eq!(Stat::from_le_bytes(stat.to_le_bytes()), stat);
+    }
+
+    // Catches the ProcInfo wire layout drifting: pid, state and name_len
+    // as LE words, then the zero-padded name — matching what `ps` decodes.
+    #[test]
+    fn procinfo_serializes_pid_state_and_a_zero_padded_name() {
+        let mut name = [0u8; PROC_NAME_LEN];
+        name[..5].copy_from_slice(b"sleep");
+        let info = ProcInfo {
+            pid: 0x0102,
+            state: PROC_STATE_SLEEPING,
+            name_len: 5,
+            name,
+        };
+        let bytes = info.to_le_bytes();
+        assert_eq!(&bytes[..12], &[2, 1, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0]);
+        assert_eq!(&bytes[12..17], b"sleep");
+        assert!(bytes[17..].iter().all(|byte| *byte == 0));
+        assert_eq!(ProcInfo::from_le_bytes(bytes), info);
+        assert_eq!(PROCINFO_LEN, 44);
     }
 
     // Catches the DirEnt wire layout drifting: name_len first, then kind,

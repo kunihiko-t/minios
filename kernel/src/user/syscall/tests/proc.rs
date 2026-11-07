@@ -137,6 +137,71 @@ fn realtime_passes_the_source_value_or_errno_through() {
     assert_eq!(context.register(10), ENODEV as usize);
 }
 
+// Catches procinfo copying the wrong bytes, losing the end-of-table zero,
+// or asking the source before the out pointer is checked: an entry must
+// be a ReadComplete of the serialized ProcInfo at `a1`, an index past the
+// end must return 0, and an unmapped buffer must be EFAULT without a call.
+#[test]
+fn procinfo_copies_the_entry_or_reports_the_end() {
+    use minios_abi::syscall::{PROC_NAME_LEN, PROC_STATE_SLEEPING, PROCINFO_LEN, ProcInfo};
+
+    struct TableSource {
+        calls: usize,
+    }
+    impl ControlSource for TableSource {
+        type Error = SinkError;
+        fn read_stdin(&mut self, _output: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+            Ok(Some(0))
+        }
+        fn procinfo(&mut self, index: usize) -> Result<Option<ProcInfo>, isize> {
+            self.calls += 1;
+            let mut name = [0u8; PROC_NAME_LEN];
+            name[..5].copy_from_slice(b"sleep");
+            Ok((index == 0).then_some(ProcInfo {
+                pid: 3,
+                state: PROC_STATE_SLEEPING,
+                name_len: 5,
+                name,
+            }))
+        }
+    }
+    let procinfo = SyscallNumber::Procinfo as usize;
+    let mut sink = FakeSink::default();
+    let mut source = TableSource { calls: 0 };
+    let mut scratch_buf = scratch();
+    let out = MESSAGE_PAGE + 0x100;
+    let (_, flow) = dispatch_fixture(
+        procinfo,
+        0,
+        out,
+        0,
+        &mut sink,
+        &mut source,
+        &mut scratch_buf,
+    );
+    assert_eq!(
+        flow,
+        SyscallFlow::ReadComplete {
+            start: out as u64,
+            len: PROCINFO_LEN,
+        }
+    );
+    let info = ProcInfo::from_le_bytes(scratch_buf[..PROCINFO_LEN].try_into().unwrap());
+    assert_eq!(
+        (info.pid, info.state, info.name_len),
+        (3, PROC_STATE_SLEEPING, 5)
+    );
+
+    let (context, flow) =
+        dispatch_fixture(procinfo, 1, out, 0, &mut sink, &mut source, &mut scratch());
+    assert_eq!(flow, SyscallFlow::Resume);
+    assert_eq!(context.register(10), 0);
+
+    let (context, _) = dispatch_fixture(procinfo, 0, 0, 0, &mut sink, &mut source, &mut scratch());
+    assert_eq!(context.register(10), EFAULT as usize);
+    assert_eq!(source.calls, 2);
+}
+
 // Catches getpid writing anything other than the source's pid into a0.
 #[test]
 fn getpid_returns_the_source_pid() {

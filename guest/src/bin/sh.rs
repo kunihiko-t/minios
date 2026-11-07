@@ -9,10 +9,12 @@
 //! pipelineをbackgroundで起動して待たずに次へ進み、built-inの`wait`が
 //! まとめて待つ。backgroundのcommandのstdinは、write端を閉じたpipeの
 //! read端（読めばすぐEOF）にして、shellとconsoleの入力を取り合わせない。
-//! 引用符で囲まない語`$?`は直前の終了statusの10進数へ置き換わる。
+//! 引用符で囲まない語`$?`は直前の終了statusの10進数へ、`$!`は最後に
+//! backgroundで起動したprocessのpidへ置き換わる。
 //! `/`を含まない名前`NAME`は`/BIN/NAME.ELF`（大文字）へ、`/`を
 //! 含む語はそのままpathとして解決する。built-inは`exit [code]`、`cd [dir]`、
-//! `pwd`、`true`、`false`、`wait`で、作業directoryはkernelがprocessごとに持ち、
+//! `pwd`、`true`、`false`、`wait [pid...]`、`kill pid...`で、作業directoryは
+//! kernelがprocessごとに持ち、
 //! spawnしたchildへ引き継がれる。stdinのEOFで0で終了する。`-i`を渡すと
 //! `$ `を出す。
 //!
@@ -63,6 +65,8 @@ const MAX_JOBS: usize = 16;
 struct Jobs {
     pids: [Pid; MAX_JOBS],
     count: usize,
+    /// `$!`：最後にbackgroundで起動したpipelineの最後のpid。
+    last: Option<Pid>,
     /// `-i`で起動した対話shellなら、background起動のpidを`[pid]`で知らせる。
     interactive: bool,
 }
@@ -150,9 +154,25 @@ fn tokens(line: &[u8]) -> impl Iterator<Item = Result<Token<'_>, &'static str>> 
     })
 }
 
-/// 1行をpipelineへ分解する。空行は`Ok(None)`。引用符で囲まない語`$?`は
-/// `last_status`（直前の終了statusの10進数）へ置き換える。
-fn parse<'a>(line: &'a [u8], last_status: &'a [u8]) -> Result<Option<Pipeline<'a>>, &'static str> {
+/// 引用符で囲まない語を置き換える特殊parameter。
+#[derive(Clone, Copy)]
+struct Params<'a> {
+    /// `$?`：直前の終了statusの10進数。
+    status: &'a [u8],
+    /// `$!`：最後にbackgroundで起動したprocessのpid。まだ無ければ`None`で、
+    /// 語そのものが消える。
+    last_background: Option<&'a [u8]>,
+}
+
+/// 構文検査だけに使う、値を問わない特殊parameter。
+const CHECK_PARAMS: Params<'static> = Params {
+    status: b"0",
+    last_background: None,
+};
+
+/// 1行をpipelineへ分解する。空行は`Ok(None)`。引用符で囲まない語`$?`と
+/// `$!`は`params`の値へ置き換える。
+fn parse<'a>(line: &'a [u8], params: Params<'a>) -> Result<Option<Pipeline<'a>>, &'static str> {
     let empty = Stage {
         argv: [&[]; SPAWN_MAX_ARGC],
         argc: 0,
@@ -186,10 +206,13 @@ fn parse<'a>(line: &'a [u8], last_status: &'a [u8]) -> Result<Option<Pipeline<'a
                 redirect = Some(op);
             }
             Token::Word { text, quoted } => {
-                let word = if !quoted && text == b"$?" {
-                    last_status
-                } else {
-                    text
+                let word = match (quoted, text) {
+                    (false, b"$?") => params.status,
+                    (false, b"$!") => match params.last_background {
+                        Some(pid) => pid,
+                        None => continue,
+                    },
+                    _ => text,
                 };
                 match redirect.take() {
                     Some(b'<') => {
@@ -359,8 +382,11 @@ fn run(pipeline: &Pipeline<'_>, jobs: &mut Jobs, background: bool) -> i32 {
     if background {
         jobs.pids[jobs.count..jobs.count + spawned].copy_from_slice(&pids[..spawned]);
         jobs.count += spawned;
-        if jobs.interactive && spawned > 0 {
-            eprintln!("[{}]", pids[spawned - 1]);
+        if spawned > 0 {
+            jobs.last = Some(pids[spawned - 1]);
+            if jobs.interactive {
+                eprintln!("[{}]", pids[spawned - 1]);
+            }
         }
         return status;
     }
@@ -461,7 +487,7 @@ fn check_list(line: &[u8]) -> Result<(), &'static str> {
     let mut previous: Option<Connector> = None;
     for item in split_list(line) {
         let (segment, connector) = item?;
-        let empty = parse(segment, b"0")?.is_none();
+        let empty = parse(segment, CHECK_PARAMS)?.is_none();
         match (empty, connector, previous) {
             // 空行と、末尾の`;`・`&`の後ろの空。
             (true, None, None | Some(Connector::Then | Connector::Background)) => {}
@@ -527,13 +553,84 @@ fn format_status(status: i32, buffer: &mut [u8; 11]) -> &[u8] {
 }
 
 /// built-inとして扱うcommand名。backgroundでは起動できない。
-const BUILTINS: [&[u8]; 6] = [b"exit", b"cd", b"pwd", b"true", b"false", b"wait"];
+const BUILTINS: [&[u8]; 7] = [b"exit", b"cd", b"pwd", b"true", b"false", b"wait", b"kill"];
+
+/// `wait`と`kill`の引数を10進のpidとして読む。
+fn parse_pid(word: &[u8]) -> Option<Pid> {
+    parse_code(word)
+        .filter(|code| *code >= 0)
+        .map(|code| code as Pid)
+}
+
+/// built-inの`wait [pid...]`。引数が無ければbackgroundで起動した全processを
+/// 起動順に待って0を返す。pidを渡せばそのprocessを順に待ち、最後に待った
+/// processの終了codeを返す。待てないpidは127である。
+fn wait_builtin(pids: &[&[u8]], jobs: &mut Jobs) -> i32 {
+    if pids.is_empty() {
+        // 既に回収されたpidや、kernelの台帳から落ちた古い終了codeは`ECHILD`に
+        // なるが、終わっていることに変わりはない。
+        for &pid in &jobs.pids[..jobs.count] {
+            let _ = wait(pid);
+        }
+        jobs.count = 0;
+        return 0;
+    }
+    let mut status = 0;
+    for &word in pids {
+        let Some(pid) = parse_pid(word) else {
+            eprintln!("sh: wait: {}: not a pid", text(word));
+            status = SYNTAX_STATUS;
+            continue;
+        };
+        status = match wait(pid) {
+            Ok(code) => code,
+            Err(Errno(errno)) => {
+                eprintln!("sh: wait: {pid}: cannot wait (errno {errno})");
+                SPAWN_STATUS
+            }
+        };
+        // 待ち終えたpidは記録から外し、後の`wait`で重ねて待たない。
+        if let Some(index) = jobs.pids[..jobs.count].iter().position(|&job| job == pid) {
+            jobs.pids.copy_within(index + 1..jobs.count, index);
+            jobs.count -= 1;
+        }
+    }
+    status
+}
+
+/// built-inの`kill pid...`。各processへ終了を要求する。終了した
+/// processの終了codeは`EXIT_CODE_KILLED`（75）になり、`wait`で回収できる。
+fn kill_builtin(pids: &[&[u8]]) -> i32 {
+    if pids.is_empty() {
+        eprintln!("usage: kill <pid>...");
+        return SYNTAX_STATUS;
+    }
+    let mut status = 0;
+    for &word in pids {
+        let Some(pid) = parse_pid(word) else {
+            eprintln!("sh: kill: {}: not a pid", text(word));
+            status = SYNTAX_STATUS;
+            continue;
+        };
+        if let Err(Errno(errno)) = process::kill(pid) {
+            eprintln!("sh: kill: {pid}: cannot kill (errno {errno})");
+            status = 1;
+        }
+    }
+    status
+}
 
 /// 1個のpipelineを実行し、新しい終了statusを返す。`background`なら待たない。
 fn execute(line: &[u8], status: i32, jobs: &mut Jobs, background: bool) -> i32 {
     let mut digits = [0u8; 11];
-    let last_status = format_status(status, &mut digits);
-    let pipeline = match parse(line, last_status) {
+    let mut last_digits = [0u8; 11];
+    let params = Params {
+        status: format_status(status, &mut digits),
+        last_background: jobs
+            .last
+            .map(|pid| format_status(pid as i32, &mut last_digits)),
+    };
+    let pipeline = match parse(line, params) {
         Ok(Some(pipeline)) => pipeline,
         Ok(None) => return status,
         Err(message) => {
@@ -581,14 +678,11 @@ fn execute(line: &[u8], status: i32, jobs: &mut Jobs, background: bool) -> i32 {
             }
         };
     }
-    if simple && first.argc == 1 && first.argv[0] == b"wait" {
-        // 起動順に待つ。既に回収されたpidや、kernelの台帳から落ちた古い
-        // 終了codeは`ECHILD`になるが、終わっていることに変わりはない。
-        for &pid in &jobs.pids[..jobs.count] {
-            let _ = wait(pid);
-        }
-        jobs.count = 0;
-        return 0;
+    if simple && first.argv[0] == b"wait" {
+        return wait_builtin(&first.argv[1..first.argc], jobs);
+    }
+    if simple && first.argv[0] == b"kill" {
+        return kill_builtin(&first.argv[1..first.argc]);
     }
     if simple && first.argc == 1 && first.argv[0] == b"true" {
         return 0;
@@ -629,6 +723,7 @@ fn main(args: Args) -> i32 {
     let mut jobs = Jobs {
         pids: [0; MAX_JOBS],
         count: 0,
+        last: None,
         interactive: prompt,
     };
     loop {
