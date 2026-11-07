@@ -181,7 +181,7 @@ pub fn sys_kill(pid: usize) -> isize {
     ecall(SyscallNumber::Kill, pid, 0, 0, 0)
 }
 
-/// `stat`を呼ぶ。`out`へ8 byteの`Stat`をLEで書き込む。
+/// `stat`を呼ぶ。`out`へ16 byteの`Stat`をLEで書き込む。
 pub fn sys_stat(path: *const u8, path_len: usize, out: *mut u8) -> isize {
     ecall(
         SyscallNumber::Stat,
@@ -192,7 +192,7 @@ pub fn sys_stat(path: *const u8, path_len: usize, out: *mut u8) -> isize {
     )
 }
 
-/// `fstat`を呼ぶ。`out`へ8 byteの`Stat`をLEで書き込む。
+/// `fstat`を呼ぶ。`out`へ16 byteの`Stat`をLEで書き込む。
 pub fn sys_fstat(fd: usize, out: *mut u8) -> isize {
     ecall(SyscallNumber::Fstat, fd, out as usize, 0, 0)
 }
