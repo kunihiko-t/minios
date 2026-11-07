@@ -2022,7 +2022,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 40] = [
+const USER_SHELL_SCRIPT: [&[u8]; 44] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -2067,12 +2067,18 @@ const USER_SHELL_SCRIPT: [&[u8]; 40] = [
     b"cd nosuchdir\n",
     b"rm nosuch.txt\n",
     // `$?`は直前の終了status。`;`・`&&`・`||`は同じ優先度で左から評価し、
-    // 引用符の中の区切りと`$?`は文字のまま残る。1文字の`&`は構文errorである。
+    // 引用符の中の区切りと`$?`は文字のまま残る。
     b"echo $?\n",
     b"false && echo no || echo yes\n",
     b"echo a; echo b\n",
     b"echo \"a;b && c\" '$?'\n",
-    b"echo x &\n",
+    // `&`は待たずに次へ進み、`wait`がまとめて待つ。backgroundの`cat`は
+    // 閉じたpipeからEOFを読むため、残りのscriptをstdinから奪わない。
+    b"sleep 1 & echo now\n",
+    b"wait\n",
+    b"cat &\n",
+    b"wait\n",
+    b"cd / &\n",
     b"nosuch\n",
 ];
 
@@ -2240,10 +2246,18 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
         // echo "a;b && c" '$?'
         stdout(b"a;b && c $?\n"),
         exit(),
-        // echo x &：構文errorの行は何も起動しない。
+        // sleep 1 & echo now：`echo`が先に終わり、`wait`が`sleep`を待つ。
+        stdout(b"now\n"),
+        exit(),
+        // wait
+        exit(),
+        // cat &：stdinはすぐEOFになり、何も出さずに終わる。
+        exit(),
+        // wait
+        // cd / &：built-inはbackgroundで起動できない。
         control_frame(
             FrameKind::Stderr,
-            b"sh: background jobs ('&') are not supported\n",
+            b"sh: cd: built-in commands cannot run in the background\n",
         ),
         // nosuch
         control_frame(FrameKind::Stderr, b"sh: nosuch: not found (errno -2)\n"),

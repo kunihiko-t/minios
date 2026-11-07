@@ -5,11 +5,14 @@
 //! られる。`"…"`か`'…'`で囲んだ語は空白や演算子を含められる。
 //! 1行には`;`、`&&`、`||`でpipelineを並べられる。`;`は前の結果に関係なく、
 //! `&&`は直前の終了statusが0のときだけ、`||`は0以外のときだけ次を実行する
-//! （3つは同じ優先度で左から順に評価する）。引用符で囲まない語`$?`は直前の
-//! 終了statusの10進数へ置き換わる。
+//! （3つは同じ優先度で左から順に評価する）。末尾か区切りの`&`はその
+//! pipelineをbackgroundで起動して待たずに次へ進み、built-inの`wait`が
+//! まとめて待つ。backgroundのcommandのstdinは、write端を閉じたpipeの
+//! read端（読めばすぐEOF）にして、shellとconsoleの入力を取り合わせない。
+//! 引用符で囲まない語`$?`は直前の終了statusの10進数へ置き換わる。
 //! `/`を含まない名前`NAME`は`/BIN/NAME.ELF`（大文字）へ、`/`を
 //! 含む語はそのままpathとして解決する。built-inは`exit [code]`、`cd [dir]`、
-//! `pwd`、`true`、`false`で、作業directoryはkernelがprocessごとに持ち、
+//! `pwd`、`true`、`false`、`wait`で、作業directoryはkernelがprocessごとに持ち、
 //! spawnしたchildへ引き継がれる。stdinのEOFで0で終了する。`-i`を渡すと
 //! `$ `を出す。
 //!
@@ -53,6 +56,16 @@ const SAVED_STDOUT: usize = FD_TABLE_LEN - 1;
 const SYNTAX_STATUS: i32 = 2;
 /// 起動できなかったcommandの終了status。
 const SPAWN_STATUS: i32 = 127;
+/// backgroundで起動して、まだ`wait`していないprocessの上限。
+const MAX_JOBS: usize = 16;
+
+/// backgroundで起動したprocessの記録。
+struct Jobs {
+    pids: [Pid; MAX_JOBS],
+    count: usize,
+    /// `-i`で起動した対話shellなら、background起動のpidを`[pid]`で知らせる。
+    interactive: bool,
+}
 
 fn text(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).unwrap_or("?")
@@ -251,7 +264,12 @@ fn private(file: File) -> File {
 }
 
 /// pipelineを起動して全childを待ち、最後のcommandの終了codeを返す。
-fn run(pipeline: &Pipeline<'_>) -> i32 {
+/// `background`なら待たずに全childのpidを`jobs`へ記録し、起動できれば0を返す。
+fn run(pipeline: &Pipeline<'_>, jobs: &mut Jobs, background: bool) -> i32 {
+    if background && jobs.count + pipeline.count > MAX_JOBS {
+        eprintln!("sh: too many background jobs (max {MAX_JOBS}); run wait");
+        return 1;
+    }
     // redirect先はspawn前に開き、失敗したら何も起動しない。
     let mut upstream = match pipeline.input.map(File::open).transpose() {
         Ok(file) => file.map(private),
@@ -269,6 +287,21 @@ fn run(pipeline: &Pipeline<'_>) -> i32 {
             return 1;
         }
     };
+
+    // backgroundのcommandがconsoleの入力をshellと取り合わないよう、`< file`が
+    // 無ければwrite端を閉じたpipeのread端をstdinにする。読めばすぐEOFになる。
+    if background && upstream.is_none() {
+        match pipe() {
+            Ok((reader, writer)) => {
+                drop(writer);
+                upstream = Some(private(reader));
+            }
+            Err(Errno(errno)) => {
+                eprintln!("sh: cannot create pipe (errno {errno})");
+                return 1;
+            }
+        }
+    }
 
     let mut pids: [Pid; MAX_STAGES] = [0; MAX_STAGES];
     let mut spawned = 0;
@@ -323,6 +356,15 @@ fn run(pipeline: &Pipeline<'_>) -> i32 {
         }
     }
 
+    if background {
+        jobs.pids[jobs.count..jobs.count + spawned].copy_from_slice(&pids[..spawned]);
+        jobs.count += spawned;
+        if jobs.interactive && spawned > 0 {
+            eprintln!("[{}]", pids[spawned - 1]);
+        }
+        return status;
+    }
+
     // 起動順に待つ。前段は後段より先に終わるとは限らないが、順に待てば
     // 全員を回収でき、終了codeは最後のcommandのものが残る。
     for (index, &pid) in pids[..spawned].iter().enumerate() {
@@ -366,12 +408,14 @@ enum Connector {
     And,
     /// `||`：直前の終了statusが0以外なら次を実行する。
     Or,
+    /// `&`：前のpipelineをbackgroundで起動し、待たずに次を実行する。
+    Background,
 }
 
-/// 1行を`;`、`&&`、`||`で区切り、各pipelineの部分と、その後ろの区切りを
+/// 1行を`;`、`&`、`&&`、`||`で区切り、各pipelineの部分と、その後ろの区切りを
 /// 順に返す。最後の部分の区切りは`None`である。引用符の中の`;`、`&`、`|`は
 /// 区切らない。閉じていない引用符は行末まで1つの部分として返し、`parse`が
-/// 構文errorにする。1文字の`&`（background実行）は扱わないため構文errorである。
+/// 構文errorにする。
 fn split_list(
     line: &[u8],
 ) -> impl Iterator<Item = Result<(&[u8], Option<Connector>), &'static str>> {
@@ -395,8 +439,8 @@ fn split_list(
                     return Some(Ok((&current[..index], Some(Connector::And))));
                 }
                 (None, b'&') => {
-                    rest = None;
-                    return Some(Err("background jobs ('&') are not supported"));
+                    rest = Some(&current[index + 1..]);
+                    return Some(Ok((&current[..index], Some(Connector::Background))));
                 }
                 (None, b'|') if current.get(index + 1) == Some(&b'|') => {
                     rest = Some(&current[index + 2..]);
@@ -411,18 +455,20 @@ fn split_list(
     })
 }
 
-/// `line`の全pipelineを実行前に検査する。`;`の後ろの空は許すが、区切りの
-/// 前の空と、`&&`・`||`の後ろの空は構文errorである。
+/// `line`の全pipelineを実行前に検査する。`;`と`&`の後ろの空は許すが、
+/// 区切りの前の空と、`&&`・`||`の後ろの空は構文errorである。
 fn check_list(line: &[u8]) -> Result<(), &'static str> {
     let mut previous: Option<Connector> = None;
     for item in split_list(line) {
         let (segment, connector) = item?;
         let empty = parse(segment, b"0")?.is_none();
         match (empty, connector, previous) {
-            // 空行と、末尾の`;`の後ろの空。
-            (true, None, None | Some(Connector::Then)) => {}
+            // 空行と、末尾の`;`・`&`の後ろの空。
+            (true, None, None | Some(Connector::Then | Connector::Background)) => {}
             (true, None, Some(_)) => return Err("missing command after '&&' or '||'"),
-            (true, Some(_), _) => return Err("missing command before ';', '&&' or '||'"),
+            (true, Some(_), _) => {
+                return Err("missing command before ';', '&', '&&' or '||'");
+            }
             (false, _, _) => {}
         }
         previous = connector;
@@ -431,7 +477,7 @@ fn check_list(line: &[u8]) -> Result<(), &'static str> {
 }
 
 /// 1行を実行し、新しい終了statusを返す。構文errorのある行は何も実行しない。
-fn execute_line(line: &[u8], status: i32) -> i32 {
+fn execute_line(line: &[u8], status: i32, jobs: &mut Jobs) -> i32 {
     if let Err(message) = check_list(line) {
         eprintln!("sh: {message}");
         return SYNTAX_STATUS;
@@ -443,10 +489,11 @@ fn execute_line(line: &[u8], status: i32) -> i32 {
             unreachable!("check_list accepted the line");
         };
         if run_next {
-            status = execute(segment, status);
+            let background = connector == Some(Connector::Background);
+            status = execute(segment, status, jobs, background);
         }
         run_next = match connector {
-            None | Some(Connector::Then) => true,
+            None | Some(Connector::Then | Connector::Background) => true,
             Some(Connector::And) => status == 0,
             Some(Connector::Or) => status != 0,
         };
@@ -479,8 +526,11 @@ fn format_status(status: i32, buffer: &mut [u8; 11]) -> &[u8] {
     &buffer[..out]
 }
 
-/// 1個のpipelineを実行し、新しい終了statusを返す。
-fn execute(line: &[u8], status: i32) -> i32 {
+/// built-inとして扱うcommand名。backgroundでは起動できない。
+const BUILTINS: [&[u8]; 6] = [b"exit", b"cd", b"pwd", b"true", b"false", b"wait"];
+
+/// 1個のpipelineを実行し、新しい終了statusを返す。`background`なら待たない。
+fn execute(line: &[u8], status: i32, jobs: &mut Jobs, background: bool) -> i32 {
     let mut digits = [0u8; 11];
     let last_status = format_status(status, &mut digits);
     let pipeline = match parse(line, last_status) {
@@ -492,6 +542,13 @@ fn execute(line: &[u8], status: i32) -> i32 {
         }
     };
     let first = &pipeline.stages[0];
+    if background && pipeline.count == 1 && BUILTINS.contains(&first.argv[0]) {
+        eprintln!(
+            "sh: {}: built-in commands cannot run in the background",
+            text(first.argv[0])
+        );
+        return 1;
+    }
     if pipeline.count == 1 && first.argv[0] == b"exit" {
         match first.argv[1..first.argc] {
             [] => process::exit(status),
@@ -524,6 +581,15 @@ fn execute(line: &[u8], status: i32) -> i32 {
             }
         };
     }
+    if simple && first.argc == 1 && first.argv[0] == b"wait" {
+        // 起動順に待つ。既に回収されたpidや、kernelの台帳から落ちた古い
+        // 終了codeは`ECHILD`になるが、終わっていることに変わりはない。
+        for &pid in &jobs.pids[..jobs.count] {
+            let _ = wait(pid);
+        }
+        jobs.count = 0;
+        return 0;
+    }
     if simple && first.argc == 1 && first.argv[0] == b"true" {
         return 0;
     }
@@ -543,7 +609,7 @@ fn execute(line: &[u8], status: i32) -> i32 {
             }
         };
     }
-    run(&pipeline)
+    run(&pipeline, jobs, background)
 }
 
 minios_guest::entry!(main);
@@ -560,6 +626,11 @@ fn main(args: Args) -> i32 {
     let mut overflow = false;
     let mut chunk = [0u8; LINE_MAX];
     let mut status = 0;
+    let mut jobs = Jobs {
+        pids: [0; MAX_JOBS],
+        count: 0,
+        interactive: prompt,
+    };
     loop {
         if prompt && len == 0 {
             print!("$ ");
@@ -568,7 +639,7 @@ fn main(args: Args) -> i32 {
         if read == 0 {
             // 改行のない最終行も1行として実行する。
             if len > 0 && !overflow {
-                execute_line(&line[..len], status);
+                execute_line(&line[..len], status, &mut jobs);
             }
             return 0;
         }
@@ -577,7 +648,7 @@ fn main(args: Args) -> i32 {
                 if overflow {
                     eprintln!("sh: line too long (max {LINE_MAX} bytes)");
                 } else {
-                    status = execute_line(&line[..len], status);
+                    status = execute_line(&line[..len], status, &mut jobs);
                 }
                 len = 0;
                 overflow = false;
