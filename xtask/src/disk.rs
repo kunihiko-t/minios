@@ -355,7 +355,17 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     boot[44..48].copy_from_slice(&ROOT_CLUSTER.to_le_bytes());
     boot[48..50].copy_from_slice(&1u16.to_le_bytes()); // fsinfo sector
     boot[50..52].copy_from_slice(&6u16.to_le_bytes()); // backup boot sector
+    // FAT32の拡張BPB。label未設定は規定の"NO NAME"で表す（host側のfsckが
+    // 空白以外の不正なlabelとして報告しないように）。
+    boot[64] = 0x80; // drive number
+    boot[66] = 0x29; // 拡張boot signature: volume ID/label/type が有効
+    boot[67..71].copy_from_slice(&0x4d69_4f53u32.to_le_bytes()); // volume ID
+    boot[71..82].copy_from_slice(b"NO NAME    ");
+    boot[82..90].copy_from_slice(b"FAT32   ");
     boot[510..512].copy_from_slice(&[0x55, 0xaa]);
+    // BPBが宣言したsector 6へbackup boot sectorを置く。
+    let backup = boot.to_vec();
+    image[6 * SECTOR..7 * SECTOR].copy_from_slice(&backup);
 
     // --- FAT (2面同一): [0]=media, [1]=EOC, [2]〜[9]=固定entryのEOC ---
     let mut fat = std::vec![0u8; fat_sectors as usize * SECTOR];
@@ -448,7 +458,8 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
         let docs_start = (data_start + (DOCS_CLUSTER - 2)) as usize * SECTOR;
         let docs = &mut image[docs_start..docs_start + SECTOR];
         dir_entry(docs, 0, b".          ", 0x10, DOCS_CLUSTER, 0);
-        dir_entry(docs, 1, b"..         ", 0x10, ROOT_CLUSTER, 0);
+        // FAT32の規約では親がrootの`..`はcluster 0を指す。
+        dir_entry(docs, 1, b"..         ", 0x10, 0, 0);
         dir_entry(
             docs,
             2,
@@ -493,7 +504,7 @@ fn image_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
         let bin_start = (data_start + (bin_cluster - 2)) as usize * SECTOR;
         let bin = &mut image[bin_start..bin_start + SECTOR];
         dir_entry(bin, 0, b".          ", 0x10, bin_cluster, 0);
-        dir_entry(bin, 1, b"..         ", 0x10, ROOT_CLUSTER, 0);
+        dir_entry(bin, 1, b"..         ", 0x10, 0, 0);
         let files = placed.iter().filter(|file| file.0 == "BIN");
         for (index, (_, name, cluster, bytes)) in (2..).zip(files) {
             assert!(index < DIR_RECORDS, "BIN fixture directory is full");
