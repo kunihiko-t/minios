@@ -124,13 +124,18 @@ run loopはkernel `satp`へ戻った後に`take_retired_image`で旧imageを取�
 [`guest/src/bin/sh.rs`](../../guest/src/bin/sh.rs)は、FAT32 diskへ置く`SH.ELF`としてstdinを1行ずつ読みます。
 `|`で区切った最大7個のcommandをpipelineとして起動し、最初のcommandには`< file`、最後のcommandには`> file`を付けられます。
 `/`を含まないcommand名`NAME`は`/BIN/NAME.ELF`（大文字）へ、`/`を含む語はそのままpathとして解決します。
-built-inは`exit [code]`、`cd [dir]`、`pwd`の3つです。
+built-inは`exit [code]`、`cd [dir]`、`pwd`、`true`、`false`の5つです。
+1行には`;`、`&&`、`||`でpipelineを並べられます。
+`;`は前の結果に関係なく、`&&`は直前の終了statusが0のときだけ、`||`は0以外のときだけ次のpipelineを実行し、3つは同じ優先度で左から順に評価します（`false && echo no || echo yes`は`yes`を出します）。
+`split_list`が引用符の外の区切りで行を分け、`check_list`が全部を構文検査してから実行するため、構文errorのある行は1つも起動しません。
+引用符で囲まない語`$?`は直前の終了statusの10進数へ置き換わり、`'$?'`は文字のまま残ります。
+background実行の`&`は扱わず、構文errorです。
 作業directoryはkernelがprocessごとに持ち（`Process::cwd`）、`chdir`と`getcwd`で読み書きします。
 pathを受けるsyscallは[`kernel/src/path.rs`](../../kernel/src/path.rs)の`resolve`で相対pathを作業directoryと連結し、`.`と`..`を解決してからFAT32 layerへ渡します。
 `spawn`したchildは呼び出し側の作業directoryを引き継ぐため、`cd work`の後の`ls`や`cat a.txt`は`work`の中で動きます。
 shellはcommandを`/BIN/NAME.ELF`という絶対pathへ解決するので、作業directoryを変えてもtoolは見つかります。
 `cd`と`pwd`は1段のcommandでredirectがない場合だけbuilt-inとして扱います。
-起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)と、file操作の[`ls.rs`](../../guest/src/bin/ls.rs)、[`mkdir.rs`](../../guest/src/bin/mkdir.rs)、[`rmdir.rs`](../../guest/src/bin/rmdir.rs)、[`rm.rs`](../../guest/src/bin/rm.rs)、[`mv.rs`](../../guest/src/bin/mv.rs)です。
+起動されるtoolは[`cat.rs`](../../guest/src/bin/cat.rs)、[`wc.rs`](../../guest/src/bin/wc.rs)、[`echo.rs`](../../guest/src/bin/echo.rs)と、file操作の[`ls.rs`](../../guest/src/bin/ls.rs)、[`mkdir.rs`](../../guest/src/bin/mkdir.rs)、[`rmdir.rs`](../../guest/src/bin/rmdir.rs)、[`rm.rs`](../../guest/src/bin/rm.rs)、[`mv.rs`](../../guest/src/bin/mv.rs)、実時刻を出す[`date.rs`](../../guest/src/bin/date.rs)です。
 file操作のtoolはそれぞれ`readdir`、`mkdir`、`rmdir`、`unlink`、`rename`を1回ずつ呼ぶだけの薄いprogramで、`ls`はdirectoryの名前に`/`を付けます。
 `ls -l`は`DirEnt`の`size`と`mtime`から`- 18 1980-01-01 00:00 HELLO.TXT`の形の行を作り、fileを指す引数には`stat`の値を使います。
 `"…"`か`'…'`で囲んだ語は、中の空白や`|`、`<`、`>`を文字として含む1語になるため、LFNの`"my notes.txt"`のような名前もtoolへ渡せます。
@@ -282,11 +287,16 @@ rmdir work
 ls
 cd nosuchdir
 rm nosuch.txt
+echo $?
+false && echo no || echo yes
+echo a; echo b
+echo "a;b && c" '$?'
+echo x &
 nosuch
 ```
 
-標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`ls -l`の3行、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、日本語の名前で作った`メモ.txt`を含むrootの一覧と`こんにちは`、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧が届きます。
-標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、閉じていない引用符への`sh: unterminated quote`、存在しないdirectoryへの`sh: cd: nosuchdir: cannot change directory (errno -2)`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`sh: nosuch: not found (errno -2)`が届きます。
+標準出力には`hello world`、`hello from virtio`、`1 3 18`、`redirected`、`ls -l`の3行、`1 3 18`、`1 3 6`、`1 3 6`、`saved`、`quoted words`、`a | b`が順に届き、日本語の名前で作った`メモ.txt`を含むrootの一覧と`こんにちは`、続いて`pwd`の`/work`、作業directoryを一覧する`ls`の`saved.notes`、`saved`、`cd ..`の後の`pwd`の`/`、片付け後の`ls`が出すrootの一覧、`rm`の終了statusを出す`echo $?`の`1`、`yes`、`a`、`b`、`a;b && c $?`が届きます。
+標準エラーには、8段のpipelineへの`sh: too many commands in a pipeline (max 7)`、閉じていない引用符への`sh: unterminated quote`、存在しないdirectoryへの`sh: cd: nosuchdir: cannot change directory (errno -2)`、`rm nosuch.txt`の`rm: nosuch.txt: cannot remove (errno -2)`（終了code 1）、`echo x &`への`sh: background jobs ('&') are not supported`、`sh: nosuch: not found (errno -2)`が届きます。
 pipelineでconsoleへ書くのは最後のcommandだけで、そのcommandは前段が全員終了してwrite端が消えた後にEOFを読んでから出力します。
 このため前段のExit frameは必ず最後のcommandの出力より前に並び、harnessはframe列を完全一致で照合できます。
 EOFを読んだshellは0で終了します。

@@ -2022,7 +2022,7 @@ const SPAWN_ARGS_EXPECTED_FRAMES: [&[u8]; 11] = [
 
 /// user-shell検査でshellへ送るscript。Stdin frame 1個ずつの中身で、
 /// 1 frameに2行を詰めた場合と、1行を2 frameへ分けた場合を含める。
-const USER_SHELL_SCRIPT: [&[u8]; 35] = [
+const USER_SHELL_SCRIPT: [&[u8]; 40] = [
     b"echo hello world\ncat HELLO.TXT\n",
     b"cat HELLO",
     b".TXT | wc\n",
@@ -2066,6 +2066,13 @@ const USER_SHELL_SCRIPT: [&[u8]; 35] = [
     b"ls\n",
     b"cd nosuchdir\n",
     b"rm nosuch.txt\n",
+    // `$?`は直前の終了status。`;`・`&&`・`||`は同じ優先度で左から評価し、
+    // 引用符の中の区切りと`$?`は文字のまま残る。1文字の`&`は構文errorである。
+    b"echo $?\n",
+    b"false && echo no || echo yes\n",
+    b"echo a; echo b\n",
+    b"echo \"a;b && c\" '$?'\n",
+    b"echo x &\n",
     b"nosuch\n",
 ];
 
@@ -2219,6 +2226,25 @@ fn user_shell_expected_frames() -> Vec<Vec<u8>> {
             b"rm: nosuch.txt: cannot remove (errno -2)\n",
         ),
         control_frame(FrameKind::Exit, &1u32.to_le_bytes()),
+        // echo $?：直前の`rm`の終了status 1。
+        stdout(b"1\n"),
+        exit(),
+        // false && echo no || echo yes：built-inの`false`は何も起動しない。
+        stdout(b"yes\n"),
+        exit(),
+        // echo a; echo b
+        stdout(b"a\n"),
+        exit(),
+        stdout(b"b\n"),
+        exit(),
+        // echo "a;b && c" '$?'
+        stdout(b"a;b && c $?\n"),
+        exit(),
+        // echo x &：構文errorの行は何も起動しない。
+        control_frame(
+            FrameKind::Stderr,
+            b"sh: background jobs ('&') are not supported\n",
+        ),
         // nosuch
         control_frame(FrameKind::Stderr, b"sh: nosuch: not found (errno -2)\n"),
         // EOFでshell自身が0で終了する。

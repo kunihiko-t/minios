@@ -3,10 +3,15 @@
 //! stdinを1行ずつ読み、`|`で区切った最大7個のcommandをpipelineとして
 //! 起動する。最初のcommandには`< file`、最後のcommandには`> file`を付け
 //! られる。`"…"`か`'…'`で囲んだ語は空白や演算子を含められる。
+//! 1行には`;`、`&&`、`||`でpipelineを並べられる。`;`は前の結果に関係なく、
+//! `&&`は直前の終了statusが0のときだけ、`||`は0以外のときだけ次を実行する
+//! （3つは同じ優先度で左から順に評価する）。引用符で囲まない語`$?`は直前の
+//! 終了statusの10進数へ置き換わる。
 //! `/`を含まない名前`NAME`は`/BIN/NAME.ELF`（大文字）へ、`/`を
 //! 含む語はそのままpathとして解決する。built-inは`exit [code]`、`cd [dir]`、
-//! `pwd`で、作業directoryはkernelがprocessごとに持ち、spawnしたchildへ
-//! 引き継がれる。stdinのEOFで0で終了する。`-i`を渡すと`$ `を出す。
+//! `pwd`、`true`、`false`で、作業directoryはkernelがprocessごとに持ち、
+//! spawnしたchildへ引き継がれる。stdinのEOFで0で終了する。`-i`を渡すと
+//! `$ `を出す。
 //!
 //! 各commandは「dup2してからspawn」で起動する。kernelは`spawn`時に
 //! fd tableを複製するため、shell自身のfd 0/1をpipe端やredirect先へ
@@ -73,7 +78,8 @@ enum Token<'a> {
     /// 1文字の演算子`|`、`<`、`>`。
     Op(u8),
     /// 語。引用符で囲んだ語は引用符を除いた中身で、演算子や空白も含められる。
-    Word(&'a [u8]),
+    /// `quoted`は引用符で囲んだ語か。囲んだ`"$?"`は置き換えない。
+    Word { text: &'a [u8], quoted: bool },
 }
 
 /// 語を区切るbyte。
@@ -109,7 +115,10 @@ fn tokens(line: &[u8]) -> impl Iterator<Item = Result<Token<'_>, &'static str>> 
                 rest = &[];
                 return Some(Err("quotes must enclose a whole word"));
             }
-            return Some(Ok(Token::Word(word)));
+            return Some(Ok(Token::Word {
+                text: word,
+                quoted: true,
+            }));
         }
         let len = rest
             .iter()
@@ -121,12 +130,16 @@ fn tokens(line: &[u8]) -> impl Iterator<Item = Result<Token<'_>, &'static str>> 
             rest = &[];
             return Some(Err("quotes must enclose a whole word"));
         }
-        Some(Ok(Token::Word(word)))
+        Some(Ok(Token::Word {
+            text: word,
+            quoted: false,
+        }))
     })
 }
 
-/// 1行をpipelineへ分解する。空行は`Ok(None)`。
-fn parse(line: &[u8]) -> Result<Option<Pipeline<'_>>, &'static str> {
+/// 1行をpipelineへ分解する。空行は`Ok(None)`。引用符で囲まない語`$?`は
+/// `last_status`（直前の終了statusの10進数）へ置き換える。
+fn parse<'a>(line: &'a [u8], last_status: &'a [u8]) -> Result<Option<Pipeline<'a>>, &'static str> {
     let empty = Stage {
         argv: [&[]; SPAWN_MAX_ARGC],
         argc: 0,
@@ -159,27 +172,34 @@ fn parse(line: &[u8]) -> Result<Option<Pipeline<'_>>, &'static str> {
                 }
                 redirect = Some(op);
             }
-            Token::Word(word) => match redirect.take() {
-                Some(b'<') => {
-                    if pipeline.count != 1 || pipeline.input.is_some() {
-                        return Err("'<' is only allowed once on the first command");
+            Token::Word { text, quoted } => {
+                let word = if !quoted && text == b"$?" {
+                    last_status
+                } else {
+                    text
+                };
+                match redirect.take() {
+                    Some(b'<') => {
+                        if pipeline.count != 1 || pipeline.input.is_some() {
+                            return Err("'<' is only allowed once on the first command");
+                        }
+                        pipeline.input = Some(word);
                     }
-                    pipeline.input = Some(word);
-                }
-                Some(_) => {
-                    if pipeline.output.is_some() {
-                        return Err("'>' is only allowed once");
+                    Some(_) => {
+                        if pipeline.output.is_some() {
+                            return Err("'>' is only allowed once");
+                        }
+                        pipeline.output = Some(word);
                     }
-                    pipeline.output = Some(word);
-                }
-                None => {
-                    if stage.argc == SPAWN_MAX_ARGC {
-                        return Err("too many arguments");
+                    None => {
+                        if stage.argc == SPAWN_MAX_ARGC {
+                            return Err("too many arguments");
+                        }
+                        stage.argv[stage.argc] = word;
+                        stage.argc += 1;
                     }
-                    stage.argv[stage.argc] = word;
-                    stage.argc += 1;
                 }
-            },
+            }
         }
     }
     if redirect.is_some() {
@@ -337,9 +357,133 @@ fn parse_code(word: &[u8]) -> Option<i32> {
     Some(if negative { -value } else { value })
 }
 
-/// 1行を実行し、新しい終了statusを返す。
+/// 1行に並べたpipelineの区切り。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Connector {
+    /// `;`：前の結果に関係なく次を実行する。
+    Then,
+    /// `&&`：直前の終了statusが0なら次を実行する。
+    And,
+    /// `||`：直前の終了statusが0以外なら次を実行する。
+    Or,
+}
+
+/// 1行を`;`、`&&`、`||`で区切り、各pipelineの部分と、その後ろの区切りを
+/// 順に返す。最後の部分の区切りは`None`である。引用符の中の`;`、`&`、`|`は
+/// 区切らない。閉じていない引用符は行末まで1つの部分として返し、`parse`が
+/// 構文errorにする。1文字の`&`（background実行）は扱わないため構文errorである。
+fn split_list(
+    line: &[u8],
+) -> impl Iterator<Item = Result<(&[u8], Option<Connector>), &'static str>> {
+    let mut rest = Some(line);
+    core::iter::from_fn(move || {
+        let current = rest?;
+        let mut quote = None;
+        let mut index = 0;
+        while index < current.len() {
+            let byte = current[index];
+            match (quote, byte) {
+                (Some(open), _) if byte == open => quote = None,
+                (Some(_), _) => {}
+                (None, b'"' | b'\'') => quote = Some(byte),
+                (None, b';') => {
+                    rest = Some(&current[index + 1..]);
+                    return Some(Ok((&current[..index], Some(Connector::Then))));
+                }
+                (None, b'&') if current.get(index + 1) == Some(&b'&') => {
+                    rest = Some(&current[index + 2..]);
+                    return Some(Ok((&current[..index], Some(Connector::And))));
+                }
+                (None, b'&') => {
+                    rest = None;
+                    return Some(Err("background jobs ('&') are not supported"));
+                }
+                (None, b'|') if current.get(index + 1) == Some(&b'|') => {
+                    rest = Some(&current[index + 2..]);
+                    return Some(Ok((&current[..index], Some(Connector::Or))));
+                }
+                (None, _) => {}
+            }
+            index += 1;
+        }
+        rest = None;
+        Some(Ok((current, None)))
+    })
+}
+
+/// `line`の全pipelineを実行前に検査する。`;`の後ろの空は許すが、区切りの
+/// 前の空と、`&&`・`||`の後ろの空は構文errorである。
+fn check_list(line: &[u8]) -> Result<(), &'static str> {
+    let mut previous: Option<Connector> = None;
+    for item in split_list(line) {
+        let (segment, connector) = item?;
+        let empty = parse(segment, b"0")?.is_none();
+        match (empty, connector, previous) {
+            // 空行と、末尾の`;`の後ろの空。
+            (true, None, None | Some(Connector::Then)) => {}
+            (true, None, Some(_)) => return Err("missing command after '&&' or '||'"),
+            (true, Some(_), _) => return Err("missing command before ';', '&&' or '||'"),
+            (false, _, _) => {}
+        }
+        previous = connector;
+    }
+    Ok(())
+}
+
+/// 1行を実行し、新しい終了statusを返す。構文errorのある行は何も実行しない。
+fn execute_line(line: &[u8], status: i32) -> i32 {
+    if let Err(message) = check_list(line) {
+        eprintln!("sh: {message}");
+        return SYNTAX_STATUS;
+    }
+    let mut status = status;
+    let mut run_next = true;
+    for item in split_list(line) {
+        let Ok((segment, connector)) = item else {
+            unreachable!("check_list accepted the line");
+        };
+        if run_next {
+            status = execute(segment, status);
+        }
+        run_next = match connector {
+            None | Some(Connector::Then) => true,
+            Some(Connector::And) => status == 0,
+            Some(Connector::Or) => status != 0,
+        };
+    }
+    status
+}
+
+/// `status`を10進数で`buffer`へ書き、書いた部分を返す。
+fn format_status(status: i32, buffer: &mut [u8; 11]) -> &[u8] {
+    let mut digits = [0u8; 10];
+    let mut len = 0;
+    let mut value = status.unsigned_abs();
+    loop {
+        digits[len] = b'0' + (value % 10) as u8;
+        len += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let mut out = 0;
+    if status < 0 {
+        buffer[0] = b'-';
+        out = 1;
+    }
+    for &digit in digits[..len].iter().rev() {
+        buffer[out] = digit;
+        out += 1;
+    }
+    &buffer[..out]
+}
+
+/// 1個のpipelineを実行し、新しい終了statusを返す。
 fn execute(line: &[u8], status: i32) -> i32 {
-    let pipeline = match parse(line) {
+    let mut digits = [0u8; 11];
+    let last_status = format_status(status, &mut digits);
+    let pipeline = match parse(line, last_status) {
         Ok(Some(pipeline)) => pipeline,
         Ok(None) => return status,
         Err(message) => {
@@ -380,6 +524,12 @@ fn execute(line: &[u8], status: i32) -> i32 {
             }
         };
     }
+    if simple && first.argc == 1 && first.argv[0] == b"true" {
+        return 0;
+    }
+    if simple && first.argc == 1 && first.argv[0] == b"false" {
+        return 1;
+    }
     if simple && first.argv[0] == b"pwd" && first.argc == 1 {
         let mut buffer = [0u8; MAX_PATH_LEN + 1];
         return match fs::getcwd(&mut buffer) {
@@ -418,7 +568,7 @@ fn main(args: Args) -> i32 {
         if read == 0 {
             // 改行のない最終行も1行として実行する。
             if len > 0 && !overflow {
-                execute(&line[..len], status);
+                execute_line(&line[..len], status);
             }
             return 0;
         }
@@ -427,7 +577,7 @@ fn main(args: Args) -> i32 {
                 if overflow {
                     eprintln!("sh: line too long (max {LINE_MAX} bytes)");
                 } else {
-                    status = execute(&line[..len], status);
+                    status = execute_line(&line[..len], status);
                 }
                 len = 0;
                 overflow = false;
