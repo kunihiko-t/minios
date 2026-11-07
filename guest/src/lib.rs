@@ -4,7 +4,7 @@
 //! `main(args: Args) -> i32`の戻り値を終了codeにする。`io`、`fs`、`process`は
 //! syscall 1回を1 methodへ包む薄い型で、`sys`は検証用の生のwrapperである。
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 pub mod fs;
 pub mod heap;

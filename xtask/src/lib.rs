@@ -100,6 +100,7 @@ enum Phase {
     BuildKernelRv32,
     AbiUnitTests,
     KernelUnitTests,
+    GuestUnitTests,
     XtaskUnitTests,
     Qemu(qemu::TestKind),
 }
@@ -202,6 +203,7 @@ impl Phase {
             ]),
             Self::AbiUnitTests => Some(&["test", "-p", "minios-abi", "--locked"]),
             Self::KernelUnitTests => Some(&["test", "-p", "minios-kernel", "--lib", "--locked"]),
+            Self::GuestUnitTests => Some(&["test", "-p", "minios-guest", "--lib", "--locked"]),
             Self::XtaskUnitTests => Some(&["test", "-p", "xtask", "--locked"]),
             Self::Qemu(_) => None,
         }
@@ -274,6 +276,7 @@ impl Phase {
 fn test_phases() -> Vec<Phase> {
     vec![
         Phase::KernelUnitTests,
+        Phase::GuestUnitTests,
         Phase::XtaskUnitTests,
         Phase::Qemu(qemu::TestKind::Boot),
         Phase::Qemu(qemu::TestKind::Trap),
@@ -345,6 +348,7 @@ fn check_phases() -> Vec<Phase> {
         Phase::BuildKernelRv32,
         Phase::AbiUnitTests,
         Phase::KernelUnitTests,
+        Phase::GuestUnitTests,
         Phase::XtaskUnitTests,
         Phase::Qemu(qemu::TestKind::Boot),
         Phase::Qemu(qemu::TestKind::Trap),
@@ -669,6 +673,7 @@ mod tests {
             test_phases(),
             vec![
                 Phase::KernelUnitTests,
+                Phase::GuestUnitTests,
                 Phase::XtaskUnitTests,
                 Phase::Qemu(qemu::TestKind::Boot),
                 Phase::Qemu(qemu::TestKind::Trap),
@@ -762,6 +767,7 @@ mod tests {
             Phase::BuildKernelRv32,
             Phase::AbiUnitTests,
             Phase::KernelUnitTests,
+            Phase::GuestUnitTests,
             Phase::XtaskUnitTests,
             Phase::Qemu(qemu::TestKind::Boot),
             Phase::Qemu(qemu::TestKind::Trap),
@@ -902,7 +908,7 @@ mod tests {
             &plan[host_tests_end + 7..host_tests_end + 7 + expected.len()],
             expected
         );
-        assert_eq!(plan.len(), 66);
+        assert_eq!(plan.len(), 67);
     }
 
     #[test]
@@ -1147,6 +1153,10 @@ mod tests {
             (
                 Phase::KernelUnitTests,
                 vec!["test", "-p", "minios-kernel", "--lib", "--locked"],
+            ),
+            (
+                Phase::GuestUnitTests,
+                vec!["test", "-p", "minios-guest", "--lib", "--locked"],
             ),
             (
                 Phase::XtaskUnitTests,

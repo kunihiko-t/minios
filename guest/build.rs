@@ -2,6 +2,7 @@
 
 fn main() {
     let linker = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("linker.ld");
-    println!("cargo:rustc-link-arg=-T{}", linker.display());
+    // linker scriptはguest binだけへ渡す。host上のlib unit testは通常のlinkで作る。
+    println!("cargo:rustc-link-arg-bins=-T{}", linker.display());
     println!("cargo:rerun-if-changed=linker.ld");
 }

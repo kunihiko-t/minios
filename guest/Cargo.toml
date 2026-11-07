@@ -13,7 +13,8 @@ minios-abi = { path = "../abi" }
 
 [lib]
 path = "src/lib.rs"
-test = false
+# host上で`cargo test -p minios-guest --lib`が動く。binはguest targetだけ。
+test = true
 bench = false
 doctest = false
 
